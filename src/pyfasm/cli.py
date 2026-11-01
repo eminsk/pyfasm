@@ -32,12 +32,14 @@ def main() -> int:
     p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
 
     # Subcommand: bundle
-    p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 launcher executable")
+    p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 monolithic executable")
     p_bundle.add_argument("project_dir", help="Path to Python project directory")
     p_bundle.add_argument("-e", "--entry", help="Path to main entry script (default: auto-detected)")
     p_bundle.add_argument("-o", "--output", help="Path to output executable (.exe, .elf, .macho)")
     p_bundle.add_argument("--console", action="store_true", help="Build console launcher instead of GUI (shows stdout/stderr)")
     p_bundle.add_argument("--target", choices=["win64", "linux", "macos", "apple"], default="win64", help="Target OS platform for launcher (win64, linux, macos)")
+    p_bundle.add_argument("--include-bin", action="append", default=[], help="Path to external binary or tool to include inside the bundle (e.g. ffmpeg.exe, mpv-2.dll)")
+    p_bundle.add_argument("--dir-mode", action="store_true", help="Build directory-wrapper launcher instead of monolithic single-file")
 
     args = parser.parse_args()
     compiler = PyFasmCompiler()
@@ -51,6 +53,8 @@ def main() -> int:
             output_exe=args.output,
             is_gui=not args.console,
             target=args.target,
+            onefile=not args.dir_mode,
+            include_bins=args.include_bin,
         )
 
         if not success:
