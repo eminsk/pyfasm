@@ -1,0 +1,298 @@
+format PE64 console 5.0
+entry _pyfasm_entry_point
+
+include 'win64a.inc'
+
+
+section '.data' data readable writeable
+    hStdOut         dq 0
+    hStdIn          dq 0
+    bytesWritten    dq 0
+    crlf_str        db 13, 10, 0
+    minus_str       db '-', 0
+
+    _str_lit_1 db 72, 101, 108, 108, 111, 32, 102, 114, 111, 109, 32, 80, 121, 70, 65, 83, 77, 58, 32, 80, 117, 114, 101, 32, 78, 97, 116, 105, 118, 101, 32, 120, 54, 52, 32, 65, 115, 115, 101, 109, 98, 108, 121, 32, 119, 105, 116, 104, 111, 117, 116, 32, 71, 73, 76, 33, 10, 0
+    _str_lit_2 db 67, 111, 109, 112, 117, 116, 105, 110, 103, 32, 98, 97, 115, 105, 99, 32, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 58, 32, 40, 49, 48, 48, 32, 42, 32, 50, 53, 41, 32, 47, 32, 53, 32, 43, 32, 52, 50, 32, 61, 32, 0
+
+section '.text' code readable executable
+
+_pyfasm_entry_point:
+    sub rsp, 40                      ; shadow space for Windows x64 ABI
+    call _pyfasm_init_io             ; initialize runtime I/O
+    call main                        ; execute user main()
+    mov ecx, eax                     ; exit code
+    call [ExitProcess]
+
+; ============================================================
+; Function: main
+; ============================================================
+main:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48                      ; frame + shadow space
+    lea rax, [_str_lit_1]
+    mov rcx, rax
+    call _pyfasm_print_str
+    lea rax, [_str_lit_2]
+    mov rcx, rax
+    call _pyfasm_print_str
+    mov rax, 100
+    push rax
+    mov rax, 25
+    mov r11, rax
+    pop rax
+    imul rax, r11
+    push rax
+    mov rax, 5
+    mov r11, rax
+    pop rax
+    cqo
+    idiv r11
+    push rax
+    mov rax, 42
+    mov r11, rax
+    pop rax
+    add rax, r11
+    mov [rbp - 8], rax               ; assign ans
+    mov rax, [rbp - 8]               ; load ans
+    mov rcx, rax
+    call _pyfasm_print_int
+    call _pyfasm_print_newline
+    call _pyfasm_print_newline
+    mov rax, 0
+    jmp .epilog_main
+.epilog_main:
+    mov rsp, rbp
+    pop rbp
+    ret
+
+
+section '.text' code readable executable
+
+_pyfasm_init_io:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     ecx, -11                ; STD_OUTPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdOut], rax
+    mov     ecx, -10                ; STD_INPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdIn], rax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_str:
+    ; RCX = pointer to null-terminated string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .done_print_str
+
+    ; Calculate length
+    xor     eax, eax
+    mov     rdi, rsi
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rbx, rcx                ; string length in rbx
+    test    rbx, rbx
+    jz      .done_print_str
+
+    ; WriteFile(hStdOut, rsi, rbx, &bytesWritten, NULL)
+    mov     rcx, [hStdOut]
+    mov     rdx, rsi
+    mov     r8, rbx
+    lea     r9, [rsp + 32]
+    mov     qword [rsp + 32], 0
+    sub     rsp, 16                 ; 5th parameter on stack
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+
+.done_print_str:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_print_newline:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    lea     rcx, [crlf_str]
+    call    _pyfasm_print_str
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_int:
+    ; RCX = signed 64-bit integer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    mov     rax, rcx
+    test    rax, rax
+    jns     .positive
+
+    ; Negative number
+    push    rax
+    lea     rcx, [minus_str]
+    call    _pyfasm_print_str
+    pop     rax
+    neg     rax
+
+.positive:
+    lea     rdi, [rbp - 48]         ; end of temporary digit buffer
+    mov     byte [rdi], 0           ; null-terminator
+    mov     rbx, 10
+
+.digit_loop:
+    xor     rdx, rdx
+    div     rbx                     ; rax = quotient, rdx = remainder
+    add     dl, '0'
+    dec     rdi
+    mov     [rdi], dl
+    test    rax, rax
+    jnz     .digit_loop
+
+    ; Print digits string
+    mov     rcx, rdi
+    call    _pyfasm_print_str
+
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_get_tick_count:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    [GetTickCount64]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_sleep_ms:
+    ; RCX = milliseconds
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    [Sleep]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_alloc_memory:
+    ; RCX = bytes to allocate
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rdx, rcx                ; dwSize = bytes
+    xor     ecx, ecx                ; lpAddress = NULL
+    mov     r8d, 3000h              ; MEM_COMMIT | MEM_RESERVE
+    mov     r9d, 04h                ; PAGE_READWRITE
+    call    [VirtualAlloc]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_free_memory:
+    ; RCX = pointer to memory
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    xor     edx, edx                ; dwSize = 0 (MUST be 0 for MEM_RELEASE)
+    mov     r8d, 8000h              ; MEM_RELEASE
+    call    [VirtualFree]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_spawn_thread:
+    ; RCX = thread function pointer, RDX = parameter
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48                 ; 32 bytes shadow + 16 bytes for 5th and 6th args
+    and     rsp, -16
+    mov     r8, rcx                 ; lpStartAddress = target function
+    mov     r9, rdx                 ; lpParameter = param
+    xor     ecx, ecx                ; lpThreadAttributes = NULL
+    xor     edx, edx                ; dwStackSize = 0
+    mov     qword [rsp + 32], 0     ; dwCreationFlags = 0
+    mov     qword [rsp + 40], 0     ; lpThreadId = NULL
+    call    [CreateThread]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_wait_thread:
+    ; RCX = thread handle
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rdx, -1                 ; INFINITE
+    call    [WaitForSingleObject]
+    mov     rcx, rbx
+    call    [CloseHandle]
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_atomic_add:
+    ; RCX = pointer to qword, RDX = value to add
+    lock add qword [rcx], rdx
+    mov     rax, [rcx]
+    ret
+
+_pyfasm_atomic_sub:
+    ; RCX = pointer to qword, RDX = value to subtract
+    lock sub qword [rcx], rdx
+    mov     rax, [rcx]
+    ret
+
+
+section '.idata' import data readable writeable
+    library kernel32, 'KERNEL32.DLL'
+
+    import kernel32, \
+           GetStdHandle, 'GetStdHandle', \
+           WriteFile, 'WriteFile', \
+           ReadFile, 'ReadFile', \
+           GetTickCount64, 'GetTickCount64', \
+           Sleep, 'Sleep', \
+           VirtualAlloc, 'VirtualAlloc', \
+           VirtualFree, 'VirtualFree', \
+           CreateThread, 'CreateThread', \
+           WaitForSingleObject, 'WaitForSingleObject', \
+           CloseHandle, 'CloseHandle', \
+           ExitProcess, 'ExitProcess'

@@ -1,0 +1,22 @@
+[project]
+name = "pyfasm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "eminsk", email = "M_N_N@tut.by" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+pyfasm = "pyfasm:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
