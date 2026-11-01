@@ -1,7 +1,7 @@
 """
 Project Bundler for PyFASM.
 Packages complex Python applications (including CustomTkinter, requests, yt-dlp)
-into a native Windows x64 launcher executable with free-threading and disabled GIL.
+into a native Windows x64 launcher executable with smart virtual environment detection.
 """
 from __future__ import annotations
 import os
@@ -26,16 +26,45 @@ class ProjectBundler:
         app_title: str = "PyFASM Application"
     ) -> str:
         """
-        Generates clean FASM x64 assembly for a native process launcher
-        that sets PYTHON_GIL=0 and runs the entry point seamlessly.
+        Generates clean FASM x64 assembly for a native process launcher.
         """
         subsystem = "GUI 5.0" if is_gui else "console 5.0"
 
-        # Escape entry_script for assembly
+        # Escape paths for assembly
         script_escaped = entry_script.replace("\\", "\\\\")
+        proj_dir_path = Path(entry_script).parent
+        proj_dir = str(proj_dir_path).replace("\\", "\\\\")
+
+        # Locate venv python
+        venv_scripts = proj_dir_path / ".venv" / "Scripts"
+        venv_py = venv_scripts / ("pythonw.exe" if is_gui else "python.exe")
+        if not venv_py.exists():
+            venv_py = venv_scripts / "python.exe"
+        venv_escaped = str(venv_py).replace("\\", "\\\\") if venv_py.exists() else ""
+
+        # Locate uv executable
+        uv_path = shutil.which("uv") or r"C:\Users\M_N_N\.local\bin\uv.exe"
+        if not os.path.exists(uv_path) and os.path.exists(r"C:\Users\M_N_N\.local\bin\uv.exe"):
+            uv_path = r"C:\Users\M_N_N\.local\bin\uv.exe"
+        uv_escaped = uv_path.replace("\\", "\\\\")
+
+        # Check if project uses free-threaded Python build
+        is_freethreaded = False
+        pyver_file = proj_dir_path / ".python-version"
+        if pyver_file.exists():
+            try:
+                content = pyver_file.read_text(encoding="utf-8").lower()
+                if "freethreaded" in content or "t-windows" in content:
+                    is_freethreaded = True
+            except Exception:
+                pass
+
+        gil_arg = "-X gil=0 " if is_freethreaded else ""
+
+        has_venv = bool(venv_escaped)
 
         return f"""; ============================================================
-; PyFASM Native Project Bootstrapper & Free-Threaded Launcher
+; PyFASM Native Project Bootstrapper & Launcher
 ; ============================================================
 format PE64 {subsystem}
 entry start
@@ -43,13 +72,13 @@ entry start
 include 'win64a.inc'
 
 section '.data' data readable writeable
-    env_gil_name    db 'PYTHON_GIL', 0
-    env_gil_val     db '0', 0
     env_unbuf_name  db 'PYTHONUNBUFFERED', 0
     env_unbuf_val   db '1', 0
 
-    uv_cmd          db 'uv run python -X gil=0 "{script_escaped}"', 0
-    python_cmd      db 'python -X gil=0 "{script_escaped}"', 0
+    work_dir        db '{proj_dir}', 0
+    venv_cmd        db '"{venv_escaped}" "{script_escaped}"', 0
+    uv_cmd          db '"{uv_escaped}" run --project "{proj_dir}" python {gil_arg}"{script_escaped}"', 0
+    python_cmd      db 'python {gil_arg}"{script_escaped}"', 0
 
     startup_info    STARTUPINFO
     process_info    PROCESS_INFORMATION
@@ -59,47 +88,55 @@ section '.text' code readable executable
 start:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 64
+    sub     rsp, 96
     and     rsp, -16
-
-    ; Set PYTHON_GIL = 0 (Free-threading / No GIL)
-    lea     rcx, [env_gil_name]
-    lea     rdx, [env_gil_val]
-    call    [SetEnvironmentVariableA]
 
     ; Set PYTHONUNBUFFERED = 1
     lea     rcx, [env_unbuf_name]
     lea     rdx, [env_unbuf_val]
     call    [SetEnvironmentVariableA]
 
-    ; Zero startup_info
-    lea     rdi, [startup_info]
-    mov     rcx, sizeof.STARTUPINFO
-    xor     al, al
-    rep     stosb
-    mov     [startup_info.cb], sizeof.STARTUPINFO
+    ; Initialize startup_info using system defaults
+    lea     rcx, [startup_info]
+    call    [GetStartupInfoA]
 
-    ; Hide console window if GUI
-    mov     [startup_info.dwFlags], 1 ; STARTF_USESHOWWINDOW
-    mov     [startup_info.wShowWindow], {'0' if is_gui else '1'} ; SW_HIDE or SW_SHOWNORMAL
+    ; Try venv Python directly if available
+    {'''
+    xor     ecx, ecx
+    lea     rdx, [venv_cmd]
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 0 ; bInheritHandles
+    mov     qword [rsp + 40], 0 ; dwCreationFlags
+    mov     qword [rsp + 48], 0 ; lpEnvironment
+    lea     rax, [work_dir]
+    mov     [rsp + 56], rax     ; lpCurrentDirectory
+    lea     rax, [startup_info]
+    mov     [rsp + 64], rax     ; lpStartupInfo
+    lea     rax, [process_info]
+    mov     [rsp + 72], rax     ; lpProcessInformation
 
-    ; Try CreateProcess with uv run python
+    call    [CreateProcessA]
+    test    rax, rax
+    jnz     .wait_proc
+    ''' if has_venv else ''}
+
+    ; Try CreateProcess with uv run --project
     xor     ecx, ecx
     lea     rdx, [uv_cmd]
     xor     r8d, r8d
     xor     r9d, r9d
     mov     qword [rsp + 32], 0 ; bInheritHandles
-    mov     qword [rsp + 40], {'08000000h' if is_gui else '0'} ; CREATE_NO_WINDOW
+    mov     qword [rsp + 40], 0 ; dwCreationFlags
     mov     qword [rsp + 48], 0 ; lpEnvironment
-    mov     qword [rsp + 56], 0 ; lpCurrentDirectory
+    lea     rax, [work_dir]
+    mov     [rsp + 56], rax     ; lpCurrentDirectory
     lea     rax, [startup_info]
-    mov     [rsp + 64], rax
+    mov     [rsp + 64], rax     ; lpStartupInfo
     lea     rax, [process_info]
-    mov     [rsp + 72], rax
+    mov     [rsp + 72], rax     ; lpProcessInformation
 
-    sub     rsp, 32
     call    [CreateProcessA]
-    add     rsp, 32
 
     test    rax, rax
     jnz     .wait_proc
@@ -110,17 +147,16 @@ start:
     xor     r8d, r8d
     xor     r9d, r9d
     mov     qword [rsp + 32], 0
-    mov     qword [rsp + 40], {'08000000h' if is_gui else '0'}
+    mov     qword [rsp + 40], 0
     mov     qword [rsp + 48], 0
-    mov     qword [rsp + 56], 0
+    lea     rax, [work_dir]
+    mov     [rsp + 56], rax
     lea     rax, [startup_info]
     mov     [rsp + 64], rax
     lea     rax, [process_info]
     mov     [rsp + 72], rax
 
-    sub     rsp, 32
     call    [CreateProcessA]
-    add     rsp, 32
 
 .wait_proc:
     test    rax, rax
@@ -148,6 +184,7 @@ section '.idata' import data readable writeable
 
     import kernel32, \\
            SetEnvironmentVariableA, 'SetEnvironmentVariableA', \\
+           GetStartupInfoA, 'GetStartupInfoA', \\
            CreateProcessA, 'CreateProcessA', \\
            WaitForSingleObject, 'WaitForSingleObject', \\
            CloseHandle, 'CloseHandle', \\
@@ -169,14 +206,14 @@ section '.idata' import data readable writeable
         if not proj_path.exists():
             return False, "", f"Project directory not found: {project_dir}"
 
-        # Detect entry script if not provided
+        # Detect entry script if not provided (main.py has highest priority)
         if not entry_script:
             candidates = [
-                "application_startup.py",
-                "app_core.py",
                 "main.py",
                 "app.py",
+                "app_core.py",
                 "main_app.py",
+                "application_startup.py",
             ]
             for cand in candidates:
                 cand_file = proj_path / cand
