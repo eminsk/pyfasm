@@ -1,5 +1,11 @@
 # PyFASM: Free-Threaded (No-GIL) Python to Pure FASM x64 Native Compiler
 
+[![Python: 3.15 No-GIL](https://img.shields.io/badge/Python-3.15%20Free--Threaded%20(No--GIL)-blue.svg)](https://python.org)
+[![Backend: FASM x64](https://img.shields.io/badge/Backend-Flat%20Assembler%20x64-orange.svg)](https://flatassembler.net)
+[![Tests: 11 Passed](https://img.shields.io/badge/Tests-11%20Passed-brightgreen.svg)]()
+[![Targets: Win64 | DLL | MyOS 10](https://img.shields.io/badge/Targets-Win64%20PE%20%7C%20DLL%20%7C%20MyOS%2010%20x64-purple.svg)]()
+
+
 **PyFASM** — революционный нативный компилятор, транслирующий код Python напрямую в чистый машинный код **x86_64 Flat Assembler (FASM)** с **полным отсутствием GIL (Global Interpreter Lock)** и поддержкой истинного аппаратного параллелизма процессора.
 
 Разработан специально для создания сверхлёгких, автономных бинарных файлов без зависимостей как для **Windows 10 x64** (автономные `.exe`), так и для микроядерной операционной системы **MyOS 10 x64** (плоские бинарники `.bin`).
