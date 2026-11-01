@@ -1,7 +1,18 @@
+import os
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 from pyfasm.compiler import PyFasmCompiler
+
+
+def get_host_target() -> tuple[str, str]:
+    if sys.platform.startswith("linux"):
+        return "linux", ".elf"
+    elif sys.platform == "darwin":
+        return "macos", ".macho"
+    else:
+        return "win64", ".exe"
 
 
 def test_end_to_end_math_and_print(tmp_path: Path):
@@ -14,21 +25,24 @@ def main() -> int:
     print(ans)
     return 0
 """
+    target, ext = get_host_target()
     src_file = tmp_path / "test_math.py"
     src_file.write_text(source, encoding="utf-8")
-    out_exe = tmp_path / "test_math.exe"
+    out_bin = tmp_path / f"test_math{ext}"
 
     compiler = PyFasmCompiler()
-    success, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_bin), target=target)
 
     assert success, f"FASM compilation failed:\n{log}"
     assert Path(bin_path).exists()
 
-    # Execute binary and verify stdout
-    res = subprocess.run([bin_path], capture_output=True, text=True)
-    assert res.returncode == 0
-    # (10 + 20) * 3 - 5 = 85
-    assert "85" in res.stdout.strip()
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        # (10 + 20) * 3 - 5 = 85
+        assert "85" in res.stdout.strip()
 
 
 def test_end_to_end_fibonacci_loop(tmp_path: Path):
@@ -49,20 +63,24 @@ def main() -> int:
     print(f10)
     return 0
 """
+    target, ext = get_host_target()
     src_file = tmp_path / "test_fib.py"
     src_file.write_text(source, encoding="utf-8")
-    out_exe = tmp_path / "test_fib.exe"
+    out_bin = tmp_path / f"test_fib{ext}"
 
     compiler = PyFasmCompiler()
-    success, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_bin), target=target)
 
     assert success, f"FASM compilation failed:\n{log}"
     assert Path(bin_path).exists()
 
-    res = subprocess.run([bin_path], capture_output=True, text=True)
-    assert res.returncode == 0
-    # fib(10) = 55
-    assert "55" in res.stdout.strip()
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        # fib(10) = 55
+        assert "55" in res.stdout.strip()
 
 
 def test_end_to_end_memory_allocation(tmp_path: Path):
@@ -76,20 +94,24 @@ def main() -> int:
     free_memory(buf)
     return 0
 """
+    target, ext = get_host_target()
     src_file = tmp_path / "test_mem.py"
     src_file.write_text(source, encoding="utf-8")
-    out_exe = tmp_path / "test_mem.exe"
+    out_bin = tmp_path / f"test_mem{ext}"
 
     compiler = PyFasmCompiler()
-    success, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_bin), target=target)
 
     assert success, f"FASM compilation failed:\n{log}"
     assert Path(bin_path).exists()
 
-    res = subprocess.run([bin_path], capture_output=True, text=True)
-    assert res.returncode == 0
-    # 123 + 456 = 579
-    assert "579" in res.stdout.strip()
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        # 123 + 456 = 579
+        assert "579" in res.stdout.strip()
 
 
 def test_end_to_end_myos_compilation(tmp_path: Path):
@@ -121,24 +143,29 @@ def main() -> int:
     print_float(pi)
     return 0
 """
+    target, ext = get_host_target()
     src_file = tmp_path / "test_float.py"
     src_file.write_text(source, encoding="utf-8")
-    out_exe = tmp_path / "test_float.exe"
+    out_bin = tmp_path / f"test_float{ext}"
 
     compiler = PyFasmCompiler()
-    success, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_bin), target=target)
 
     assert success, f"Compilation failed:\n{log}"
     assert Path(bin_path).exists()
 
-    res = subprocess.run([bin_path], capture_output=True, text=True)
-    assert res.returncode == 0
-    # len("PyFASM is ultra fast!") = 21
-    assert "21" in res.stdout
-    # 3.141592
-    assert "3." in res.stdout
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        # len("PyFASM is ultra fast!") = 21
+        assert "21" in res.stdout
+        # 3.141592
+        assert "3." in res.stdout
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DLL ctypes test requires Win32")
 def test_end_to_end_dll_compilation_and_ctypes(tmp_path: Path):
     source = """
 def compute_kernel(x: int, y: int) -> int:
@@ -173,17 +200,18 @@ def get_magic_number() -> int:
 
 
 def test_bundler_creates_native_launcher(tmp_path: Path):
+    target, ext = get_host_target()
     proj_dir = tmp_path / "mock_project"
     proj_dir.mkdir()
     entry_file = proj_dir / "main.py"
     entry_file.write_text("print('Hello from bundled app')", encoding="utf-8")
 
-    out_exe = proj_dir / "app_launcher.exe"
+    out_bin = proj_dir / f"app_launcher{ext}"
 
     from pyfasm.bundler import ProjectBundler
     compiler = PyFasmCompiler()
     bundler = ProjectBundler(compiler.fasm_runner)
-    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_exe), is_gui=False, target="win64")
+    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_bin), is_gui=False, target=target)
 
     assert success, f"Bundler failed:\n{log}"
     assert Path(bin_path).exists()

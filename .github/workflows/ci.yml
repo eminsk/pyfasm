@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-cpython:
-    name: CPython ${{ matrix.python-version }}
+  test-windows-cpython:
+    name: Windows CPython ${{ matrix.python-version }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -37,8 +37,8 @@ jobs:
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
-  test-nogil:
-    name: No-GIL (Free-Threaded) ${{ matrix.python-version }}
+  test-windows-nogil:
+    name: Windows No-GIL (Free-Threaded) ${{ matrix.python-version }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -61,8 +61,8 @@ jobs:
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
-  test-pypy:
-    name: PyPy ${{ matrix.python-version }}
+  test-windows-pypy:
+    name: Windows PyPy ${{ matrix.python-version }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -84,5 +84,65 @@ jobs:
 
       - name: Run Pytest Test Suite
         continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  test-linux:
+    name: Linux ELF64 (Ubuntu) Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+          - "3.13t"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Linux
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  test-macos:
+    name: Apple macOS Mach-O (Darwin) Python ${{ matrix.python-version }}
+    runs-on: macos-13
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Apple macOS
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v

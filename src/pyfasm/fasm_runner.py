@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -17,6 +18,8 @@ class FasmRunner:
         r"C:\FASM\FASM.EXE",
         r"C:\asm\FASM.EXE",
         r"C:\Program Files\FASM\fasm.exe",
+        "/usr/bin/fasm",
+        "/usr/local/bin/fasm",
     ]
 
     def __init__(self, fasm_path: Optional[str] = None, include_path: Optional[str] = None):
@@ -28,9 +31,29 @@ class FasmRunner:
             return str(Path(explicit_path).resolve())
 
         # Check bundled repository tools/fasm
-        repo_tools = Path(__file__).resolve().parents[2] / "tools" / "fasm" / ("FASM.EXE" if os.name == "nt" else "fasm")
-        if repo_tools.exists():
-            return str(repo_tools.resolve())
+        repo_tools_dir = Path(__file__).resolve().parents[2] / "tools" / "fasm"
+        if os.name == "nt":
+            cand = repo_tools_dir / "FASM.EXE"
+            if cand.exists():
+                return str(cand.resolve())
+        elif sys.platform == "darwin":
+            for bin_name in ("fasm.darwin", "fasm"):
+                cand = repo_tools_dir / bin_name
+                if cand.exists():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
+        else:
+            for bin_name in ("fasm.x64", "fasm"):
+                cand = repo_tools_dir / bin_name
+                if cand.exists():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
 
         # Check system PATH
         path_which = shutil.which("fasm") or shutil.which("fasm.exe")
@@ -44,7 +67,7 @@ class FasmRunner:
 
         # Check user cache ~/.pyfasm/fasm
         user_fasm_dir = Path.home() / ".pyfasm" / "fasm"
-        for cand_name in ("fasm.exe", "FASM.EXE", "fasm"):
+        for cand_name in ("fasm.exe", "FASM.EXE", "fasm", "fasm.x64", "fasm.darwin"):
             cand = user_fasm_dir / cand_name
             if cand.exists():
                 return str(cand.resolve())
@@ -75,12 +98,30 @@ class FasmRunner:
                 return str(cand.resolve())
             for cand in target_dir.rglob("FASM.EXE"):
                 return str(cand.resolve())
+        elif sys.platform == "darwin":
+            url = "https://raw.githubusercontent.com/STLVNUB/fasm-osx/master/fasm"
+            dest = target_dir / "fasm"
+            req = urllib.request.Request(url, headers={"User-Agent": "pyfasm"})
+            with open(dest, "wb") as f:
+                f.write(urllib.request.urlopen(req).read())
+            try:
+                os.chmod(dest, 0o755)
+            except Exception:
+                pass
+            return str(dest.resolve())
         else:
             url = "https://flatassembler.net/fasm-1.73.32.tgz"
             tgz_dest = target_dir / "fasm.tgz"
             urllib.request.urlretrieve(url, tgz_dest)
             with tarfile.open(tgz_dest, "r:gz") as tf:
                 tf.extractall(target_dir)
+            for cand in target_dir.rglob("fasm.x64"):
+                if cand.is_file():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
             for cand in target_dir.rglob("fasm"):
                 if cand.is_file():
                     try:
@@ -99,6 +140,11 @@ class FasmRunner:
         candidate = fasm_dir / "INCLUDE"
         if candidate.exists() and candidate.is_dir():
             return str(candidate.resolve())
+
+        # Check bundled tools/fasm/INCLUDE
+        bundled_inc = Path(__file__).resolve().parents[2] / "tools" / "fasm" / "INCLUDE"
+        if bundled_inc.exists() and bundled_inc.is_dir():
+            return str(bundled_inc.resolve())
 
         return str(fasm_dir.resolve())
 

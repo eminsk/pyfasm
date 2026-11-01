@@ -1,9 +1,11 @@
+import sys
 import subprocess
 from pathlib import Path
 import pytest
 from pyfasm.compiler import PyFasmCompiler
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Win32 CreateThread multithreading execution test")
 def test_end_to_end_multithreading_no_gil(tmp_path: Path):
     source = """
 def worker(counter_ptr: int) -> int:
