@@ -529,7 +529,7 @@ section '.idata' import data readable writeable
                 # 1. Add all .py files and configs
                 skip_dirs = {
                     ".git", "__pycache__", ".pytest_cache",
-                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode"
+                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode", "FASM", "dist", "build", "fasm_export"
                 }
                 if not include_venv:
                     skip_dirs.update({".venv", "venv"})

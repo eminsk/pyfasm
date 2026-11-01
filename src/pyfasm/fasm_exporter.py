@@ -111,8 +111,12 @@ class FasmExporter:
             p_zip = Path(payload_zip).resolve()
             if p_zip.exists():
                 dst_zip = out_dir / payload_name
-                shutil.copy2(p_zip, dst_zip)
-                has_payload = True
+                try:
+                    if p_zip != dst_zip:
+                        shutil.copy2(p_zip, dst_zip)
+                    has_payload = True
+                except Exception:
+                    has_payload = False
 
         # 5. Generate build.bat
         bat_lines = [
