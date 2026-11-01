@@ -1,6 +1,6 @@
 [project]
-name = "pyfasm"
-version = "0.1.0"
+name = "pyfasm64"
+version = "0.1.1"
 description = "Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, and DLL"
 readme = "README.md"
 authors = [
@@ -31,6 +31,7 @@ classifiers = [
 ]
 
 [project.scripts]
+pyfasm64 = "pyfasm:main"
 pyfasm = "pyfasm:main"
 
 [build-system]
