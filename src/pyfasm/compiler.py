@@ -3,6 +3,7 @@ Compiler API orchestrating parsing, code generation, and FASM assembly.
 """
 from __future__ import annotations
 import os
+import sys
 from pathlib import Path
 from typing import Tuple, Optional
 from pyfasm.ast_parser import AstAnalyzer, ParsedModule
@@ -62,5 +63,17 @@ class PyFasmCompiler:
             asm_file_path=str(asm_file) if keep_asm else None,
             keep_asm=keep_asm
         )
+
+        if success and os.path.exists(out_bin):
+            try:
+                os.chmod(out_bin, 0o755)
+            except Exception:
+                pass
+            if sys.platform == "darwin":
+                try:
+                    import subprocess
+                    subprocess.run(["codesign", "-s", "-", "-f", str(out_bin)], capture_output=True)
+                except Exception:
+                    pass
 
         return success, str(out_bin), log

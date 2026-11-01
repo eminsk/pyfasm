@@ -8,6 +8,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ============================================================
+  # 1. WINDOWS (PE64)
+  # ============================================================
   test-windows-cpython:
     name: Windows CPython ${{ matrix.python-version }}
     runs-on: windows-latest
@@ -87,8 +90,11 @@ jobs:
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
-  test-linux:
-    name: Linux ELF64 (Ubuntu) Python ${{ matrix.python-version }}
+  # ============================================================
+  # 2. LINUX (ELF64 - Ubuntu)
+  # ============================================================
+  test-linux-cpython:
+    name: Linux ELF64 CPython ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -101,7 +107,8 @@ jobs:
           - "3.12"
           - "3.13"
           - "3.14"
-          - "3.13t"
+          - "3.15"
+          - "3.16"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -119,28 +126,92 @@ jobs:
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
-  test-macos:
-    name: Apple macOS Mach-O (Darwin) Python ${{ matrix.python-version }}
-    runs-on: macos-latest
+  test-linux-nogil:
+    name: Linux ELF64 No-GIL (Free-Threaded) ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version:
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
+          - "3.13t"
+          - "3.14t"
+          - "3.15t"
+          - "3.16t"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set permissions for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
 
-      - name: Ensure Rosetta 2 is available
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Linux
         run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  test-linux-pypy:
+    name: Linux ELF64 PyPy ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "pypy3.8"
+          - "pypy3.9"
+          - "pypy3.10"
+          - "pypy3.11"
+          - "pypy3.12"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Linux
+        continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  # ============================================================
+  # 3. APPLE macOS (Mach-O 64 - Darwin)
+  # ============================================================
+  test-macos-cpython:
+    name: Apple macOS Mach-O CPython ${{ matrix.python-version }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+          - "3.15"
+          - "3.16"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions and Rosetta for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
           softwareupdate --install-rosetta --agree-to-license || true
+          codesign -s - -f tools/fasm/fasm.darwin || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -148,6 +219,68 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Apple macOS
-        continue-on-error: true
+        continue-on-error: ${{ matrix.python-version == '3.8' || matrix.python-version == '3.9' }}
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  test-macos-nogil:
+    name: Apple macOS Mach-O No-GIL (Free-Threaded) ${{ matrix.python-version }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.13t"
+          - "3.14t"
+          - "3.15t"
+          - "3.16t"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions and Rosetta for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          softwareupdate --install-rosetta --agree-to-license || true
+          codesign -s - -f tools/fasm/fasm.darwin || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Apple macOS
+        run: |
+          uv run --python ${{ matrix.python-version }} pytest -v
+
+  test-macos-pypy:
+    name: Apple macOS Mach-O PyPy ${{ matrix.python-version }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "pypy3.8"
+          - "pypy3.9"
+          - "pypy3.10"
+          - "pypy3.11"
+          - "pypy3.12"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set permissions and Rosetta for bundled FASM
+        run: |
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          softwareupdate --install-rosetta --agree-to-license || true
+          codesign -s - -f tools/fasm/fasm.darwin || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run Pytest Test Suite on Apple macOS
+        continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v

@@ -184,6 +184,18 @@ class FasmRunner:
                 text=True,
                 check=False
             )
+            if res.returncode != 0 and sys.platform == "darwin" and shutil.which("arch"):
+                arch_res = subprocess.run(
+                    ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False
+                )
+                if arch_res.returncode == 0:
+                    res = arch_res
+
             success = (res.returncode == 0) and out_bin.exists()
             log = res.stdout.strip()
             if not keep_asm and asm_file_path is None:
@@ -193,4 +205,18 @@ class FasmRunner:
                     pass
             return success, log
         except Exception as e:
+            if sys.platform == "darwin" and shutil.which("arch"):
+                try:
+                    arch_res = subprocess.run(
+                        ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=False
+                    )
+                    success = (arch_res.returncode == 0) and out_bin.exists()
+                    return success, arch_res.stdout.strip()
+                except Exception:
+                    pass
             return False, f"Execution failed: {e}"

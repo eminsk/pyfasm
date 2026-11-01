@@ -402,4 +402,16 @@ section '.idata' import data readable writeable
             keep_asm=True
         )
 
+        if success and os.path.exists(out_bin):
+            try:
+                os.chmod(out_bin, 0o755)
+            except Exception:
+                pass
+            if sys.platform == 'darwin':
+                try:
+                    import subprocess
+                    subprocess.run(['codesign', '-s', '-', '-f', str(out_bin)], capture_output=True)
+                except Exception:
+                    pass
+
         return success, str(out_bin), log
