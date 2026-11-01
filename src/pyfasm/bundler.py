@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -28,6 +29,7 @@ class ProjectBundler:
         app_title: str = "PyFASM Application",
         target: str = "win64",
         onefile: bool = True,
+        build_stamp: Optional[str] = None,
     ) -> str:
         """
         Generates FASM x64 assembly for a monolithic single-file or directory launcher.
@@ -224,7 +226,14 @@ file_size = $ - mach_header
         # Windows PE64 Monolithic Launcher (Default)
         # ---------------------------------------------------------------------
         subsystem = "GUI 5.0" if is_gui else "console 5.0"
-        creation_flags = "0x08000000" if is_gui else "0"
+        creation_flags = "0"
+        gui_si_patch = """
+    ; For GUI apps: hide cmd wrapper console so child Tkinter/Win32 windows display normally
+    mov     dword [startup_info.dwFlags], 1     ; STARTF_USESHOWWINDOW
+    mov     word [startup_info.wShowWindow], 0  ; SW_HIDE
+""" if is_gui else ""
+
+        stamp_file = build_stamp or f".stamp_{abs(hash(app_name_safe)) % 1000000}"
 
         if onefile:
             return f"""; ============================================================
@@ -239,8 +248,8 @@ section '.data' data readable writeable
     env_unbuf_name  db 'PYTHONUNBUFFERED', 0
     env_unbuf_val   db '1', 0
 
-    cmd_prefix      db 'cmd.exe /c if not exist "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\.stamp" (mkdir "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & tar -xf "', 0
-    cmd_mid         db '" -C "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & echo 1 > "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\.stamp") & call "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\run.bat"', 0
+    cmd_prefix      db 'cmd.exe /c if exist "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\{stamp_file}" (call "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\run.bat") else (mkdir "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & tar -xf "', 0
+    cmd_mid         db '" -C "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & echo 1 > "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\{stamp_file}" & call "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\run.bat")', 0
 
     sz_self_exe     rb 1024
     sz_full_cmd     rb 8192
@@ -268,6 +277,7 @@ start:
     call    [GetModuleFileNameA]
 
     ; Build full command line: cmd_prefix + sz_self_exe + cmd_mid
+    cld
     lea     rdi, [sz_full_cmd]
     lea     rsi, [cmd_prefix]
 .copy_prefix:
@@ -297,14 +307,14 @@ start:
     ; Initialize startup_info
     lea     rcx, [startup_info]
     call    [GetStartupInfoA]
-
+{gui_si_patch}
     ; Launch command
     xor     ecx, ecx
     lea     rdx, [sz_full_cmd]
     xor     r8d, r8d
     xor     r9d, r9d
     mov     qword [rsp + 32], 0                 ; bInheritHandles
-    mov     qword [rsp + 40], {creation_flags}  ; dwCreationFlags (CREATE_NO_WINDOW for GUI)
+    mov     qword [rsp + 40], {creation_flags}  ; dwCreationFlags
     mov     qword [rsp + 48], 0                 ; lpEnvironment
     mov     qword [rsp + 56], 0                 ; lpCurrentDirectory
     lea     rax, [startup_info]
@@ -384,7 +394,7 @@ start:
 
     lea     rcx, [startup_info]
     call    [GetStartupInfoA]
-
+{gui_si_patch}
     xor     ecx, ecx
     lea     rdx, [python_cmd]
     xor     r8d, r8d
@@ -489,13 +499,15 @@ section '.idata' import data readable writeable
             elif out_bin.suffix.lower() == ".macho":
                 target_norm = "macos"
 
-        # Generate Launcher Assembly
+        # Generate Launcher Assembly with unique build stamp
+        build_stamp = f".stamp_{int(time.time())}"
         asm_content = self.generate_launcher_asm(
             entry_script=str(entry_path),
             is_gui=is_gui,
             app_title=proj_path.name,
             target=target_norm,
             onefile=onefile,
+            build_stamp=build_stamp,
         )
 
         asm_file = out_bin.with_suffix(".asm")
@@ -546,11 +558,45 @@ section '.idata' import data readable writeable
                 # 2. Add runner scripts (run.bat and run.sh)
                 entry_rel = entry_path.name
                 proj_venv_win = proj_path / ".venv" / "Scripts" / "python.exe"
+                proj_venv_winw = proj_path / ".venv" / "Scripts" / "pythonw.exe"
                 proj_venv_win_str = str(proj_venv_win.resolve()).replace("/", "\\") if proj_venv_win.exists() else ""
+                proj_venv_winw_str = str(proj_venv_winw.resolve()).replace("/", "\\") if proj_venv_winw.exists() else ""
                 proj_venv_posix = proj_path / ".venv" / "bin" / "python"
                 proj_venv_posix_str = str(proj_venv_posix.resolve()).replace("\\", "/") if proj_venv_posix.exists() else ""
 
-                win_venv_check_bat = f'else if exist "{proj_venv_win_str}" (\r\n    "{proj_venv_win_str}" "{entry_rel}" %*\r\n) ' if proj_venv_win_str else ""
+                if is_gui:
+                    py_launcher_bat = (
+                        f'if exist "%~dp0.venv\\Scripts\\pythonw.exe" (\r\n'
+                        f'    "%~dp0.venv\\Scripts\\pythonw.exe" "{entry_rel}" %*\r\n'
+                        f') else if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
+                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
+                        f') '
+                    )
+                    if proj_venv_winw_str:
+                        py_launcher_bat += (
+                            f'else if exist "{proj_venv_winw_str}" (\r\n'
+                            f'    "{proj_venv_winw_str}" "{entry_rel}" %*\r\n'
+                            f') '
+                        )
+                    elif proj_venv_win_str:
+                        py_launcher_bat += (
+                            f'else if exist "{proj_venv_win_str}" (\r\n'
+                            f'    "{proj_venv_win_str}" "{entry_rel}" %*\r\n'
+                            f') '
+                        )
+                else:
+                    py_launcher_bat = (
+                        f'if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
+                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
+                        f') '
+                    )
+                    if proj_venv_win_str:
+                        py_launcher_bat += (
+                            f'else if exist "{proj_venv_win_str}" (\r\n'
+                            f'    "{proj_venv_win_str}" "{entry_rel}" %*\r\n'
+                            f') '
+                        )
+
                 venv_check_posix = f'elif [ -f "{proj_venv_posix_str}" ]; then\n    exec "{proj_venv_posix_str}" "{entry_rel}" "$@"\n' if proj_venv_posix_str else ""
 
                 bat_script = (
@@ -559,9 +605,8 @@ section '.idata' import data readable writeable
                     'cd /d "%~dp0"\r\n'
                     'set "PATH=%~dp0;%PATH%"\r\n'
                     'set "PYTHONPATH=%~dp0;%PYTHONPATH%"\r\n'
-                    f'if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
-                    f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
-                    f') {win_venv_check_bat}else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" (\r\n'
+                    f'{py_launcher_bat}'
+                    f'else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" (\r\n'
                     f'    "%USERPROFILE%\\.local\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'
                     f') else if exist "%LOCALAPPDATA%\\uv\\bin\\uv.exe" (\r\n'
                     f'    "%LOCALAPPDATA%\\uv\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'

@@ -23,6 +23,21 @@ def test_generate_launcher_asm_win64():
     assert "run.bat" in asm
 
 
+def test_generate_launcher_asm_win64_gui():
+    bundler = ProjectBundler()
+    asm = bundler.generate_launcher_asm(
+        entry_script="C:/fake/app/main.py",
+        is_gui=True,
+        app_title="TestGuiApp",
+        target="win64",
+        onefile=True,
+    )
+    assert "format PE64 GUI 5.0" in asm
+    assert "STARTF_USESHOWWINDOW" in asm
+    assert "SW_HIDE" in asm
+    assert "TestGuiApp" in asm
+
+
 def test_generate_launcher_asm_linux():
     bundler = ProjectBundler()
     asm = bundler.generate_launcher_asm(
