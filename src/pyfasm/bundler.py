@@ -53,6 +53,17 @@ class ProjectBundler:
 
         gil_arg = "-X gil=0 " if is_freethreaded else ""
 
+        # Project venv Python resolution
+        proj_venv_win = proj_dir_path / ".venv" / "Scripts" / "python.exe"
+        if not proj_venv_win.exists():
+            proj_venv_win = proj_dir_path.parent / ".venv" / "Scripts" / "python.exe"
+        proj_venv_win_str = str(proj_venv_win.resolve()).replace("/", "\\") if proj_venv_win.exists() else ""
+
+        proj_venv_posix = proj_dir_path / ".venv" / "bin" / "python"
+        if not proj_venv_posix.exists():
+            proj_venv_posix = proj_dir_path.parent / ".venv" / "bin" / "python"
+        proj_venv_posix_str = str(proj_venv_posix.resolve()).replace("\\", "/") if proj_venv_posix.exists() else ""
+
         # ---------------------------------------------------------------------
         # Linux ELF64 Launcher
         # ---------------------------------------------------------------------
@@ -61,11 +72,16 @@ class ProjectBundler:
                 sh_cmd = (
                     f'APP_DIR="$HOME/.cache/pyfasm/{app_name_safe}"; '
                     f'if [ ! -f "$APP_DIR/.stamp" ]; then '
-                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
-                    f'export PATH="$APP_DIR:$PATH"; cd "$APP_DIR"; exec python3 {gil_arg}"{entry_rel}"'
+                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
+                    f'exec "$APP_DIR/run.sh"'
                 )
             else:
-                sh_cmd = f'cd "{proj_dir_posix}"; exec python3 {gil_arg}"{script_posix}"'
+                sh_cmd = (
+                    f'cd "{proj_dir_posix}"; '
+                    f'if [ -f "{proj_venv_posix_str}" ]; then exec "{proj_venv_posix_str}" {gil_arg}"{script_posix}"; '
+                    f'elif command -v uv >/dev/null 2>&1; then exec uv run python {gil_arg}"{script_posix}"; '
+                    f'else exec python3 {gil_arg}"{script_posix}"; fi'
+                )
 
             return f"""; ============================================================
 ; PyFASM Native Monolithic Project Launcher (Linux ELF64)
@@ -107,11 +123,16 @@ start:
                 sh_cmd = (
                     f'APP_DIR="$HOME/Library/Caches/pyfasm/{app_name_safe}"; '
                     f'if [ ! -f "$APP_DIR/.stamp" ]; then '
-                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
-                    f'export PATH="$APP_DIR:$PATH"; cd "$APP_DIR"; exec python3 {gil_arg}"{entry_rel}"'
+                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
+                    f'exec "$APP_DIR/run.sh"'
                 )
             else:
-                sh_cmd = f'cd "{proj_dir_posix}"; exec python3 {gil_arg}"{script_posix}"'
+                sh_cmd = (
+                    f'cd "{proj_dir_posix}"; '
+                    f'if [ -f "{proj_venv_posix_str}" ]; then exec "{proj_venv_posix_str}" {gil_arg}"{script_posix}"; '
+                    f'elif command -v uv >/dev/null 2>&1; then exec uv run python {gil_arg}"{script_posix}"; '
+                    f'else exec python3 {gil_arg}"{script_posix}"; fi'
+                )
 
             return f"""; ============================================================
 ; PyFASM Native Monolithic Project Launcher (Apple macOS Mach-O 64)
@@ -203,6 +224,7 @@ file_size = $ - mach_header
         # Windows PE64 Monolithic Launcher (Default)
         # ---------------------------------------------------------------------
         subsystem = "GUI 5.0" if is_gui else "console 5.0"
+        creation_flags = "0x08000000" if is_gui else "0"
 
         if onefile:
             return f"""; ============================================================
@@ -218,10 +240,10 @@ section '.data' data readable writeable
     env_unbuf_val   db '1', 0
 
     cmd_prefix      db 'cmd.exe /c if not exist "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\.stamp" (mkdir "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & tar -xf "', 0
-    cmd_mid         db '" -C "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & echo 1 > "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\.stamp") & set "PATH=%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe};%PATH%" & cd /d "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & python {gil_arg}"{entry_rel}"', 0
+    cmd_mid         db '" -C "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}" & echo 1 > "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\.stamp") & call "%LOCALAPPDATA%\\pyfasm\\apps\\{app_name_safe}\\run.bat"', 0
 
     sz_self_exe     rb 1024
-    sz_full_cmd     rb 4096
+    sz_full_cmd     rb 8192
 
     startup_info    STARTUPINFO
     process_info    PROCESS_INFORMATION
@@ -281,14 +303,14 @@ start:
     lea     rdx, [sz_full_cmd]
     xor     r8d, r8d
     xor     r9d, r9d
-    mov     qword [rsp + 32], 0 ; bInheritHandles
-    mov     qword [rsp + 40], 0 ; dwCreationFlags
-    mov     qword [rsp + 48], 0 ; lpEnvironment
-    mov     qword [rsp + 56], 0 ; lpCurrentDirectory
+    mov     qword [rsp + 32], 0                 ; bInheritHandles
+    mov     qword [rsp + 40], {creation_flags}  ; dwCreationFlags (CREATE_NO_WINDOW for GUI)
+    mov     qword [rsp + 48], 0                 ; lpEnvironment
+    mov     qword [rsp + 56], 0                 ; lpCurrentDirectory
     lea     rax, [startup_info]
-    mov     [rsp + 64], rax     ; lpStartupInfo
+    mov     [rsp + 64], rax                     ; lpStartupInfo
     lea     rax, [process_info]
-    mov     [rsp + 72], rax     ; lpProcessInformation
+    mov     [rsp + 72], rax                     ; lpProcessInformation
 
     call    [CreateProcessA]
     test    rax, rax
@@ -327,6 +349,9 @@ section '.idata' import data readable writeable
             # Directory wrapper mode
             script_escaped = entry_script.replace("\\", "\\\\")
             proj_dir = str(proj_dir_path).replace("\\", "\\\\")
+            cmd_run = f'if exist "{proj_venv_win_str}" ("{proj_venv_win_str}" {gil_arg}"{script_escaped}") else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" ("%USERPROFILE%\\.local\\bin\\uv.exe" run python {gil_arg}"{script_escaped}") else (python {gil_arg}"{script_escaped}")' if proj_venv_win_str else f'python {gil_arg}"{script_escaped}"'
+            cmd_full_win = f'cmd.exe /c {cmd_run}'
+
             return f"""; ============================================================
 ; PyFASM Native Project Bootstrapper & Launcher (Windows PE64)
 ; ============================================================
@@ -340,7 +365,7 @@ section '.data' data readable writeable
     env_unbuf_val   db '1', 0
 
     work_dir        db '{proj_dir}', 0
-    python_cmd      db 'python {gil_arg}"{script_escaped}"', 0
+    python_cmd      db '{cmd_full_win}', 0
 
     startup_info    STARTUPINFO
     process_info    PROCESS_INFORMATION
@@ -365,7 +390,7 @@ start:
     xor     r8d, r8d
     xor     r9d, r9d
     mov     qword [rsp + 32], 0
-    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 40], {creation_flags}
     mov     qword [rsp + 48], 0
     lea     rax, [work_dir]
     mov     [rsp + 56], rax
@@ -415,6 +440,7 @@ section '.idata' import data readable writeable
         target: str = "win64",
         onefile: bool = True,
         include_bins: Optional[List[str]] = None,
+        include_venv: bool = False,
     ) -> Tuple[bool, str, str]:
         """
         Bundles a project, its dependencies, and tools (ffmpeg, mpv) into a single monolithic standalone executable.
@@ -489,15 +515,18 @@ section '.idata' import data readable writeable
             with zipfile.ZipFile(payload_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 # 1. Add all .py files and configs
                 skip_dirs = {
-                    ".git", ".venv", "venv", "__pycache__", ".pytest_cache",
+                    ".git", "__pycache__", ".pytest_cache",
                     ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode"
                 }
+                if not include_venv:
+                    skip_dirs.update({".venv", "venv"})
                 skip_exts = {
                     ".mp4", ".mkv", ".avi", ".webm", ".ts", ".iso", ".zip",
                     ".tar", ".gz", ".log", ".tmp", ".pyc", ".exe"
                 }
 
                 # Gather files
+                added_arcnames = set()
                 for root, dirs, files in os.walk(proj_path):
                     dirs[:] = [d for d in dirs if d not in skip_dirs]
                     for f in files:
@@ -509,15 +538,65 @@ section '.idata' import data readable writeable
                         # Skip own output binary
                         if p.resolve() == out_bin.resolve() or p.resolve() == payload_path.resolve():
                             continue
-                        rel_path = p.relative_to(proj_path)
-                        zf.write(p, arcname=str(rel_path))
+                        rel_path = str(p.relative_to(proj_path)).replace("\\", "/")
+                        if rel_path not in added_arcnames:
+                            zf.write(p, arcname=rel_path)
+                            added_arcnames.add(rel_path)
 
-                # 2. Add explicitly requested or discovered binary tools (e.g. ffmpeg.exe, mpv-2.dll)
+                # 2. Add runner scripts (run.bat and run.sh)
+                entry_rel = entry_path.name
+                proj_venv_win = proj_path / ".venv" / "Scripts" / "python.exe"
+                proj_venv_win_str = str(proj_venv_win.resolve()).replace("/", "\\") if proj_venv_win.exists() else ""
+                proj_venv_posix = proj_path / ".venv" / "bin" / "python"
+                proj_venv_posix_str = str(proj_venv_posix.resolve()).replace("\\", "/") if proj_venv_posix.exists() else ""
+
+                win_venv_check_bat = f'else if exist "{proj_venv_win_str}" (\r\n    "{proj_venv_win_str}" "{entry_rel}" %*\r\n) ' if proj_venv_win_str else ""
+                venv_check_posix = f'elif [ -f "{proj_venv_posix_str}" ]; then\n    exec "{proj_venv_posix_str}" "{entry_rel}" "$@"\n' if proj_venv_posix_str else ""
+
+                bat_script = (
+                    "@echo off\r\n"
+                    "setlocal\r\n"
+                    'cd /d "%~dp0"\r\n'
+                    'set "PATH=%~dp0;%PATH%"\r\n'
+                    'set "PYTHONPATH=%~dp0;%PYTHONPATH%"\r\n'
+                    f'if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
+                    f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
+                    f') {win_venv_check_bat}else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" (\r\n'
+                    f'    "%USERPROFILE%\\.local\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'
+                    f') else if exist "%LOCALAPPDATA%\\uv\\bin\\uv.exe" (\r\n'
+                    f'    "%LOCALAPPDATA%\\uv\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'
+                    f') else (\r\n'
+                    f'    python "{entry_rel}" %*\r\n'
+                    f')\r\n'
+                )
+                zf.writestr("run.bat", bat_script)
+                added_arcnames.add("run.bat")
+
+                sh_script = (
+                    "#!/bin/sh\n"
+                    'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+                    'export PATH="$DIR:$PATH"\n'
+                    'export PYTHONPATH="$DIR:$PYTHONPATH"\n'
+                    'cd "$DIR"\n'
+                    f'if [ -f "$DIR/.venv/bin/python" ]; then\n'
+                    f'    exec "$DIR/.venv/bin/python" "{entry_rel}" "$@"\n'
+                    f'{venv_check_posix}'
+                    f'elif command -v uv >/dev/null 2>&1; then\n'
+                    f'    exec uv run python "{entry_rel}" "$@"\n'
+                    f'else\n'
+                    f'    exec python3 "{entry_rel}" "$@"\n'
+                    f'fi\n'
+                )
+                zf.writestr("run.sh", sh_script)
+                added_arcnames.add("run.sh")
+
+                # 3. Add explicitly requested or discovered binary tools (e.g. ffmpeg.exe, mpv-2.dll)
                 if include_bins:
                     for b_path in include_bins:
                         bp = Path(b_path).resolve()
-                        if bp.exists():
+                        if bp.exists() and bp.name not in added_arcnames:
                             zf.write(bp, arcname=bp.name)
+                            added_arcnames.add(bp.name)
 
             # Append zip payload directly to the executable
             payload_data = payload_path.read_bytes()

@@ -39,6 +39,7 @@ def main() -> int:
     p_bundle.add_argument("--console", action="store_true", help="Build console launcher instead of GUI (shows stdout/stderr)")
     p_bundle.add_argument("--target", choices=["win64", "linux", "macos", "apple"], default="win64", help="Target OS platform for launcher (win64, linux, macos)")
     p_bundle.add_argument("--include-bin", action="append", default=[], help="Path to external binary or tool to include inside the bundle (e.g. ffmpeg.exe, mpv-2.dll)")
+    p_bundle.add_argument("--include-venv", action="store_true", help="Pack project .venv environment into the bundle for offline standalone portability")
     p_bundle.add_argument("--dir-mode", action="store_true", help="Build directory-wrapper launcher instead of monolithic single-file")
 
     args = parser.parse_args()
@@ -55,6 +56,7 @@ def main() -> int:
             target=args.target,
             onefile=not args.dir_mode,
             include_bins=args.include_bin,
+            include_venv=args.include_venv,
         )
 
         if not success:
