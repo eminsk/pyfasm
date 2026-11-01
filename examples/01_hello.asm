@@ -8,8 +8,12 @@ section '.data' data readable writeable
     hStdOut         dq 0
     hStdIn          dq 0
     bytesWritten    dq 0
+    bytesRead       dq 0
     crlf_str        db 13, 10, 0
     minus_str       db '-', 0
+    dot_str         db '.', 0
+    flt_1m          dq 1000000.0
+    flt_zero        dq 0.0
 
     _str_lit_1 db 72, 101, 108, 108, 111, 32, 102, 114, 111, 109, 32, 80, 121, 70, 65, 83, 77, 58, 32, 80, 117, 114, 101, 32, 78, 97, 116, 105, 118, 101, 32, 120, 54, 52, 32, 65, 115, 115, 101, 109, 98, 108, 121, 32, 119, 105, 116, 104, 111, 117, 116, 32, 71, 73, 76, 33, 10, 0
     _str_lit_2 db 67, 111, 109, 112, 117, 116, 105, 110, 103, 32, 98, 97, 115, 105, 99, 32, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 58, 32, 40, 49, 48, 48, 32, 42, 32, 50, 53, 41, 32, 47, 32, 53, 32, 43, 32, 52, 50, 32, 61, 32, 0
@@ -17,10 +21,14 @@ section '.data' data readable writeable
 section '.text' code readable executable
 
 _pyfasm_entry_point:
-    sub rsp, 40                      ; shadow space for Windows x64 ABI
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32                      ; shadow/local frame
+    and rsp, -16                     ; 16-byte stack alignment
     call _pyfasm_init_io             ; initialize runtime I/O
     call main                        ; execute user main()
-    mov ecx, eax                     ; exit code
+    mov ecx, eax                     ; exit code in ecx (Windows)
+    mov edi, eax                     ; exit code in edi (Linux/macOS)
     call [ExitProcess]
 
 ; ============================================================
@@ -136,6 +144,120 @@ _pyfasm_print_newline:
     lea     rcx, [crlf_str]
     call    _pyfasm_print_str
     mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_char:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    mov     byte [rsp + 40], cl
+    lea     rdx, [rsp + 40]
+    mov     rcx, [hStdOut]
+    mov     r8, 1
+    lea     r9, [rsp + 32]
+    mov     qword [rsp + 32], 0
+    sub     rsp, 16
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_len:
+    ; RCX = pointer to string
+    push    rdi
+    mov     rdi, rcx
+    xor     eax, eax
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rax, rcx
+    pop     rdi
+    ret
+
+_pyfasm_print_float:
+    ; XMM0 = double
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    ucomisd xmm0, [flt_zero]
+    jae     .flt_pos
+    movsd   [rsp + 32], xmm0
+    lea     rcx, [minus_str]
+    call    _pyfasm_print_str
+    movsd   xmm0, [rsp + 32]
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.flt_pos:
+    cvttsd2si rax, xmm0
+    mov     [rsp + 40], rax
+    mov     rcx, rax
+    call    _pyfasm_print_int
+    lea     rcx, [dot_str]
+    call    _pyfasm_print_str
+
+    cvtsi2sd xmm1, [rsp + 40]
+    subsd   xmm0, xmm1
+    mulsd   xmm0, [flt_1m]
+    cvttsd2si rax, xmm0
+    test    rax, rax
+    jns     .frac_ok
+    neg     rax
+.frac_ok:
+    mov     rcx, rax
+    call    _pyfasm_print_int
+
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_file_write:
+    ; RCX = filename, RDX = content string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 64
+    and     rsp, -16
+    mov     rsi, rdx
+    mov     rdx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d                ; share = 0
+    xor     r9d, r9d                ; security = NULL
+    mov     qword [rsp + 32], 2      ; CREATE_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0      ; template = NULL
+    call    [CreateFileA]
+    cmp     rax, -1
+    je      .err_write
+    mov     rbx, rax
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r8, rax
+    mov     rcx, rbx
+    mov     rdx, rsi
+    lea     r9, [bytesWritten]
+    sub     rsp, 16
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+
+    mov     rcx, rbx
+    call    [CloseHandle]
+    mov     rax, 1
+    jmp     .done_write
+.err_write:
+    xor     eax, eax
+.done_write:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
     pop     rbp
     ret
 
@@ -288,6 +410,7 @@ section '.idata' import data readable writeable
            GetStdHandle, 'GetStdHandle', \
            WriteFile, 'WriteFile', \
            ReadFile, 'ReadFile', \
+           CreateFileA, 'CreateFileA', \
            GetTickCount64, 'GetTickCount64', \
            Sleep, 'Sleep', \
            VirtualAlloc, 'VirtualAlloc', \

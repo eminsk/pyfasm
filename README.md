@@ -7,7 +7,7 @@
 [![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg?style=flat)](https://python.org)
 [![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg?style=flat)](https://peps.python.org/pep-0703/)
 [![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
-[![Targets: Win64 | Linux | macOS | MyOS 10](https://img.shields.io/badge/Targets-Win64%20%7C%20Linux%20%7C%20macOS%20%7C%20MyOS%2010-purple.svg?style=flat)]()
+[![Targets: Windows | Linux | macOS | DLL](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20DLL-purple.svg?style=flat)]()
 [![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64-red.svg?style=flat)](https://flatassembler.net)
 [![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
@@ -23,7 +23,7 @@
 
 **PyFASM** is a high-performance cross-platform native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It generates tiny, self-contained standalone binaries with **zero runtime overhead**, **no virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
 
-It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (3.13t–3.16t)**, and **PyPy (3.8–3.12)**. PyFASM produces native binaries without external dependencies across five distinct target formats: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), **Apple macOS** (Mach-O 64), and bare-metal **MyOS 10** (`.bin`).
+It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (3.13t–3.16t)**, and **PyPy (3.8–3.12)**. PyFASM produces native binaries without external dependencies across native target formats: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), and **Apple macOS** (Mach-O 64).
 
 ---
 
@@ -46,7 +46,6 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
   * `--target dll`: Windows 64-bit Dynamic Link Libraries (`.dll`) callable instantly from Python via `ctypes` or from C/C++.
   * `--target linux`: Native Linux x86-64 ELF64 executables (`.elf`) using pure kernel syscalls (`sys_write`, `sys_exit`, `sys_mmap`, `sys_nanosleep`) with zero libc dependency.
   * `--target macos` / `--target apple`: Apple macOS x86-64 Mach-O 64-bit executables (`.macho`) using direct Darwin BSD kernel syscalls.
-  * `--target myos`: 64-bit flat binary (`.bin`) for the MyOS 10 microkernel operating system with direct VGA frame buffer and COM1 serial output.
 * **Cross-Platform Project Bundler (`pyfasm bundle`)**:
   * Bundles complex Python applications into native standalone launcher executables for **Windows** (`.exe`), **Linux** (`.elf`), and **Apple macOS** (`.macho`) that automatically discover virtual environments and launch in Free-Threaded (No-GIL) mode when available.
 
@@ -74,39 +73,39 @@ PyFASM is architected from the ground up as a retargetable, zero-runtime compile
                     └─────────────┬──────────────┘
                                   │
                                   ▼ (Target ABI & Syscall Selector)
-              ┌───────────────────┼───────────────────┬───────────────────┐
-              ▼                   ▼                   ▼                   ▼
-    ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
-    │  Windows PE64     │ │   Linux ELF64     │ │ Apple macOS Mach-O│ │  MyOS 10 Flat     │
-    │  - Microsoft x64  │ │   - System V ABI  │ │   - Darwin BSD    │ │   - Direct VGA    │
-    │  - Shadow Space   │ │   - Pure Syscalls │ │   - 0x2000000 Sys │ │   - COM1 UART     │
-    └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘
-              │                   │                   │                   │
-              └───────────────────┼───────────────────┴───────────────────┘
+              ┌───────────────────┼───────────────────┐
+              ▼                   ▼                   ▼
+    ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
+    │  Windows PE64     │ │   Linux ELF64     │ │ Apple macOS Mach-O│
+    │  - Microsoft x64  │ │   - System V ABI  │ │   - Darwin BSD    │
+    │  - Shadow Space   │ │   - Pure Syscalls │ │   - 0x2000000 Sys │
+    └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘
+              │                   │                   │
+              └───────────────────┼───────────────────┘
                                   ▼ (Bundled FASM Assembler)
-              ┌───────────────────┼───────────────────┬───────────────────┐
-              ▼                   ▼                   ▼                   ▼
-    [ Windows PE64 .exe ]  [ Linux ELF64 .elf ] [ Apple Mach-O .macho ] [ MyOS 10 .bin ]
-         (~2.5 KB)               (~1.8 KB)           (~2.4 KB)           (512 B)
+              ┌───────────────────┼───────────────────┐
+              ▼                   ▼                   ▼
+    [ Windows PE64 .exe ]  [ Linux ELF64 .elf ] [ Apple Mach-O .macho ]
+         (~2.5 KB)               (~1.8 KB)           (~2.4 KB)
 ```
 
 ---
 
 ## Platform Architecture Comparison
 
-| Architectural Aspect | Windows x86-64 | Linux x86-64 | Apple macOS x86-64 | MyOS 10 Bare-Metal |
-| :--- | :--- | :--- | :--- | :--- |
-| **Binary Format** | PE32+ (PE64) Console / DLL | ELF64 Executable (Type 3) | Mach-O 64 (`MH_MAGIC_64`) | Flat Raw 64-bit Binary |
-| **Magic Header** | `MZ` (0x5A4D) / `PE\0\0` | `\x7fELF` (0x464C457F) | `0xFEEDFACF` (Little-Endian) | None (Raw Entry Point) |
-| **ABI Calling Convention** | Microsoft x64 ABI | System V AMD64 ABI | System V AMD64 ABI | Custom Register FastCall |
-| **Register Parameters** | `RCX`, `RDX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` | `RAX`, `RBX`, `RCX`, `RDX` |
-| **Stack Shadow Space** | 32 bytes reserved by caller | None (128-byte Red Zone) | None (128-byte Red Zone) | None |
-| **Kernel Interface** | Win32 API (`kernel32.dll`) | Direct Linux Kernel Syscalls | Direct Darwin BSD Syscalls | Memory-mapped I/O & Ports |
-| **Standard Output** | `GetStdHandle` + `WriteFile` | `syscall` (rax = 1 `sys_write`) | `syscall` (rax = `0x2000004`) | VGA Buffer (`0xB8000`) |
-| **Process Termination** | `ExitProcess` (code in RCX) | `syscall` (rax = 60 `sys_exit`) | `syscall` (rax = `0x2000001`) | Infinite CPU `hlt` loop |
-| **Memory Allocation** | `VirtualAlloc` (MEM_COMMIT) | `syscall` (rax = 9 `sys_mmap`) | `syscall` (rax = `0x20000C5`) | Heap Bump Pointer |
-| **High-Precision Time**| `GetTickCount` / RDTSC | `sys_nanosleep` (35) / RDTSC | `sys_nanosleep` (`0x20000EB`) / RDTSC | PIT / RDTSC Hardware Clock |
-| **Runtime Dependencies** | None (kernel32 only) | **Zero libc / Zero glibc** | **Zero libSystem / Zero dyld**| **Pure Bare Metal** |
+| Architectural Aspect | Windows x86-64 | Linux x86-64 | Apple macOS x86-64 |
+| :--- | :--- | :--- | :--- |
+| **Binary Format** | PE32+ (PE64) Console / DLL | ELF64 Executable (Type 3) | Mach-O 64 (`MH_MAGIC_64`) |
+| **Magic Header** | `MZ` (0x5A4D) / `PE\0\0` | `\x7fELF` (0x464C457F) | `0xFEEDFACF` (Little-Endian) |
+| **ABI Calling Convention** | Microsoft x64 ABI | System V AMD64 ABI | System V AMD64 ABI |
+| **Register Parameters** | `RCX`, `RDX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` |
+| **Stack Shadow Space** | 32 bytes reserved by caller | None (128-byte Red Zone) | None (128-byte Red Zone) |
+| **Kernel Interface** | Win32 API (`kernel32.dll`) | Direct Linux Kernel Syscalls | Direct Darwin BSD Syscalls |
+| **Standard Output** | `GetStdHandle` + `WriteFile` | `syscall` (rax = 1 `sys_write`) | `syscall` (rax = `0x2000004`) |
+| **Process Termination** | `ExitProcess` (code in RCX) | `syscall` (rax = 60 `sys_exit`) | `syscall` (rax = `0x2000001`) |
+| **Memory Allocation** | `VirtualAlloc` (MEM_COMMIT) | `syscall` (rax = 9 `sys_mmap`) | `syscall` (rax = `0x20000C5`) |
+| **High-Precision Time**| `GetTickCount` / RDTSC | `sys_nanosleep` (35) / RDTSC | `sys_nanosleep` (`0x20000EB`) / RDTSC |
+| **Runtime Dependencies** | None (kernel32 only) | **Zero libc / Zero glibc** | **Zero libSystem / Zero dyld**|
 
 ---
 
@@ -136,11 +135,6 @@ PyFASM is architected from the ground up as a retargetable, zero-runtime compile
   * `sys_mmap`: `rax = 0x20000C5` (anonymous private memory pages).
   * `sys_nanosleep`: `rax = 0x20000EB` (thread sleep).
 * **Zero dyld Overhead**: Bypasses Apple's dynamic linker `dyld` and `libSystem.B.dylib` entirely, resulting in standalone executables that start instantaneously without security dyld-cache overhead.
-
-### 4. Bare-Metal MyOS 10 Architecture (`--target myos`)
-* **Flat 64-bit Binary**: Generates raw 64-bit machine code (`org 0x100000`) designed for microkernel operating system execution.
-* **Hardware Memory-Mapped I/O**: Writes text directly into VGA text-mode memory buffer at physical address `0xB8000`.
-* **Serial Diagnostic Logging**: Emits debug characters directly to the standard x86 UART 8250 COM1 serial port (`0x3F8`) using CPU `out dx, al` instructions.
 
 ---
 
@@ -241,20 +235,13 @@ uv run pyfasm compile examples/01_hello.py -o hello_linux.elf --target linux
 uv run pyfasm compile examples/01_hello.py -o hello_mac.macho --target macos
 ```
 
-### 4. Compile for Bare-Metal MyOS 10
-
-```bash
-# Generates raw flat 64-bit binary for MyOS 10 kernel:
-uv run pyfasm compile examples/01_hello.py -o hello_myos.bin --target myos
-```
-
-### 5. Inspect Generated FASM Assembly
+### 4. Inspect Generated FASM Assembly
 
 ```bash
 uv run pyfasm emit-asm examples/02_fibonacci.py
 ```
 
-### 6. Compile to High-Performance Windows DLL
+### 5. Compile to High-Performance Windows DLL
 
 ```bash
 uv run pyfasm compile my_math.py -o my_math.dll --target dll

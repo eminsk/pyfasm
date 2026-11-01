@@ -1,7 +1,7 @@
 [project]
 name = "pyfasm"
 version = "0.1.0"
-description = "Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, DLL, and MyOS 10"
+description = "Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, and DLL"
 readme = "README.md"
 authors = [
     { name = "eminsk", email = "M_N_N@tut.by" }

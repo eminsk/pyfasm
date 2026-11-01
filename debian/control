@@ -13,4 +13,4 @@ Description: Universal No-GIL & PyPy to pure FASM x64 native compiler
  PyFASM is a native cross-platform compiler translating Python (3.8-3.16,
  No-GIL 3.13t-3.16t, PyPy 3.8-3.12) directly to pure x86_64 Flat Assembler
  with true hardware multithreading for Linux ELF, Apple macOS, Windows PE64,
- DLL and MyOS 10.
+ DLL and bare-metal flat binaries.
