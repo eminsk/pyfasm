@@ -4,6 +4,7 @@ Unit tests for PyFASM ProjectBundler.
 import os
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 import pytest
 from pyfasm.bundler import ProjectBundler
@@ -112,3 +113,43 @@ def test_bundle_cross_platform_win64(tmp_path):
     assert success is True, f"Cross-compilation for win64 failed:\n{log}"
     assert Path(out_path).exists()
     assert Path(out_path).stat().st_size > 0
+
+
+def test_bundle_runner_portability(tmp_path):
+    """Verify run.bat and run.sh have zero hardcoded developer machine paths."""
+    proj_dir = tmp_path / "my_portable_app"
+    proj_dir.mkdir()
+    # Mock a fake developer .venv to ensure bundler doesn't leak its path
+    venv_dir = proj_dir / ".venv" / "Scripts"
+    venv_dir.mkdir(parents=True)
+    (venv_dir / "python.exe").write_text("", encoding="utf-8")
+
+    main_file = proj_dir / "main.py"
+    main_file.write_text("print('Portable!')\n", encoding="utf-8")
+
+    bundler = ProjectBundler()
+    out_exe = tmp_path / "my_portable_app.exe"
+    success, out_path, log = bundler.bundle(
+        project_dir=str(proj_dir),
+        entry_script=str(main_file),
+        output_exe=str(out_exe),
+        is_gui=False,
+        target="win64",
+        onefile=True,
+    )
+    assert success is True
+
+    # Check payload archive directly in the bundled binary
+    with zipfile.ZipFile(str(out_path), "r") as zf:
+        run_bat = zf.read("run.bat").decode("utf-8")
+        run_sh = zf.read("run.sh").decode("utf-8")
+
+        # Must not contain absolute project directory or developer machine path
+        assert str(proj_dir) not in run_bat
+        assert str(proj_dir) not in run_sh
+        assert "C:\\proekts" not in run_bat
+        assert "/proekts" not in run_sh
+
+        # Must use relative or standard portable paths
+        assert "%~dp0" in run_bat
+        assert "$DIR" in run_sh

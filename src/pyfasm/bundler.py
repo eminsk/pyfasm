@@ -529,7 +529,8 @@ section '.idata' import data readable writeable
                 # 1. Add all .py files and configs
                 skip_dirs = {
                     ".git", "__pycache__", ".pytest_cache",
-                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode", "FASM", "dist", "build", "fasm_export"
+                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode", "FASM", "dist", "build", "fasm_export",
+                    "thumbnail_cache", ".cache", "cache"
                 }
                 if not include_venv:
                     skip_dirs.update({".venv", "venv"})
@@ -558,12 +559,6 @@ section '.idata' import data readable writeable
 
                 # 2. Add runner scripts (run.bat and run.sh)
                 entry_rel = entry_path.name
-                proj_venv_win = proj_path / ".venv" / "Scripts" / "python.exe"
-                proj_venv_winw = proj_path / ".venv" / "Scripts" / "pythonw.exe"
-                proj_venv_win_str = str(proj_venv_win.resolve()).replace("/", "\\") if proj_venv_win.exists() else ""
-                proj_venv_winw_str = str(proj_venv_winw.resolve()).replace("/", "\\") if proj_venv_winw.exists() else ""
-                proj_venv_posix = proj_path / ".venv" / "bin" / "python"
-                proj_venv_posix_str = str(proj_venv_posix.resolve()).replace("\\", "/") if proj_venv_posix.exists() else ""
 
                 if is_gui:
                     py_launcher_bat = (
@@ -573,32 +568,14 @@ section '.idata' import data readable writeable
                         f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
                         f') '
                     )
-                    if proj_venv_winw_str:
-                        py_launcher_bat += (
-                            f'else if exist "{proj_venv_winw_str}" (\r\n'
-                            f'    "{proj_venv_winw_str}" "{entry_rel}" %*\r\n'
-                            f') '
-                        )
-                    elif proj_venv_win_str:
-                        py_launcher_bat += (
-                            f'else if exist "{proj_venv_win_str}" (\r\n'
-                            f'    "{proj_venv_win_str}" "{entry_rel}" %*\r\n'
-                            f') '
-                        )
                 else:
                     py_launcher_bat = (
                         f'if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
                         f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
                         f') '
                     )
-                    if proj_venv_win_str:
-                        py_launcher_bat += (
-                            f'else if exist "{proj_venv_win_str}" (\r\n'
-                            f'    "{proj_venv_win_str}" "{entry_rel}" %*\r\n'
-                            f') '
-                        )
 
-                venv_check_posix = f'elif [ -f "{proj_venv_posix_str}" ]; then\n    exec "{proj_venv_posix_str}" "{entry_rel}" "$@"\n' if proj_venv_posix_str else ""
+                venv_check_posix = ""
 
                 bat_script = (
                     "@echo off\r\n"

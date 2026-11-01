@@ -1,6 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "pyfasm64"
-version = "0.1.1"
+version = "0.1.2"
 description = "Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, and DLL"
 readme = "README.md"
 authors = [
@@ -24,21 +28,19 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3.15",
     "Programming Language :: Python :: 3.16",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
     "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Build Tools",
     "Topic :: Software Development :: Assemblers",
 ]
 
 [project.scripts]
-pyfasm64 = "pyfasm:main"
-pyfasm = "pyfasm:main"
+pyfasm64 = "pyfasm.cli:main"
+pyfasm = "pyfasm.cli:main"
 
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+[project.urls]
+Homepage = "https://github.com/eminsk/pyfasm"
+Repository = "https://github.com/eminsk/pyfasm"
+Issues = "https://github.com/eminsk/pyfasm/issues"
 
-[dependency-groups]
-dev = [
-    "pytest>=7.4.0",
-]
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyfasm"]
