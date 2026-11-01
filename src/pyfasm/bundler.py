@@ -226,11 +226,11 @@ file_size = $ - mach_header
         # Windows PE64 Monolithic Launcher (Default)
         # ---------------------------------------------------------------------
         subsystem = "GUI 5.0" if is_gui else "console 5.0"
-        creation_flags = "0"
+        creation_flags = "0x08000000" if is_gui else "0"
         gui_si_patch = """
-    ; For GUI apps: hide cmd wrapper console so child Tkinter/Win32 windows display normally
+    ; For GUI apps: show child GUI windows normally while cmd console is suppressed by CREATE_NO_WINDOW
     mov     dword [startup_info.dwFlags], 1     ; STARTF_USESHOWWINDOW
-    mov     word [startup_info.wShowWindow], 0  ; SW_HIDE
+    mov     word [startup_info.wShowWindow], 1  ; SW_SHOWNORMAL
 """ if is_gui else ""
 
         stamp_file = build_stamp or f".stamp_{abs(hash(app_name_safe)) % 1000000}"

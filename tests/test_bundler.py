@@ -35,7 +35,8 @@ def test_generate_launcher_asm_win64_gui():
     )
     assert "format PE64 GUI 5.0" in asm
     assert "STARTF_USESHOWWINDOW" in asm
-    assert "SW_HIDE" in asm
+    assert "SW_SHOWNORMAL" in asm
+    assert "0x08000000" in asm
     assert "TestGuiApp" in asm
 
 
