@@ -151,6 +151,19 @@ _pyfasm_print_newline:
     pop     rbp
     ret
 
+_pyfasm_str_len:
+    ; RCX = pointer to string
+    push    rdi
+    mov     rdi, rcx
+    xor     eax, eax
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rax, rcx
+    pop     rdi
+    ret
+
 _pyfasm_print_int:
     ; RCX = 64-bit integer
     push    rbp

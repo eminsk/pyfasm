@@ -1,12 +1,14 @@
+from __future__ import annotations
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Tuple
 import pytest
 from pyfasm.compiler import PyFasmCompiler
 
 
-def get_host_target() -> tuple[str, str]:
+def get_host_target() -> Tuple[str, str]:
     if sys.platform.startswith("linux"):
         return "linux", ".elf"
     elif sys.platform == "darwin":
