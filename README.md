@@ -1,13 +1,15 @@
-# PyFASM: Free-Threaded (No-GIL) Python to Pure FASM x64 Native Compiler
+# PyFASM: Universal No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to Pure FASM x64 Native Compiler
 
-[![Python: 3.15 No-GIL](https://img.shields.io/badge/Python-3.15%20Free--Threaded%20(No--GIL)-blue.svg)](https://python.org)
+[![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg)](https://python.org)
+[![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-green.svg)](https://peps.python.org/pep-0703/)
+[![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg)](https://pypy.org)
 [![Backend: FASM x64](https://img.shields.io/badge/Backend-Flat%20Assembler%20x64-orange.svg)](https://flatassembler.net)
 [![Tests: 13 Passed](https://img.shields.io/badge/Tests-13%20Passed-brightgreen.svg)]()
 [![Targets: Windows | Linux | macOS | MyOS 10](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20MyOS%2010-purple.svg)]()
 
-**PyFASM** — революционный нативный кроссплатформенный компилятор, транслирующий код Python напрямую в чистый машинный код **x86_64 Flat Assembler (FASM)** с **полным отсутствием GIL (Global Interpreter Lock)** и поддержкой истинного аппаратного параллелизма процессора.
+**PyFASM** — революционный кроссплатформенный нативный компилятор, транслирующий код Python напрямую в чистый машинный код **x86_64 Flat Assembler (FASM)** с **полным отсутствием GIL (Global Interpreter Lock)** и поддержкой истинного аппаратного параллелизма процессора.
 
-Разработан для создания автономных бинарных файлов без зависимостей под **все ключевые платформы**: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), **Apple macOS** (Mach-O 64), а также для микроядерной ОС **MyOS 10 x64** (плоские бинарники `.bin`).
+Поддерживает запуск под **Python 3.8–3.16**, **No-GIL / Free-Threaded (Python 3.13t–3.16t)** и **PyPy (3.8–3.12)**. Создает автономные бинарные файлы без зависимостей под **все ключевые платформы**: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), **Apple macOS** (Mach-O 64), а также для микроядерной ОС **MyOS 10 x64** (плоские бинарники `.bin`).
 
 ---
 

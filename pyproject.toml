@@ -1,13 +1,34 @@
 [project]
 name = "pyfasm"
 version = "0.1.0"
-description = "Native Free-Threaded (No-GIL) Python 3.15 to pure x86_64 FASM compiler & bundler for Windows, Linux ELF, Apple macOS, DLL, and MyOS 10"
+description = "Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, DLL, and MyOS 10"
 readme = "README.md"
 authors = [
     { name = "eminsk", email = "M_N_N@tut.by" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.8"
 dependencies = []
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: 3.16",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Assemblers",
+]
 
 [project.scripts]
 pyfasm = "pyfasm:main"
@@ -18,5 +39,5 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.2.0",
+    "pytest>=7.4.0",
 ]

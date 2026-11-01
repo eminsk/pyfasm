@@ -9,6 +9,13 @@ from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, Stri
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR
 
 
+def _unwrap_slice(node: ast.AST) -> ast.AST:
+    """Unwraps legacy ast.Index node for Python 3.8 and PyPy 3.8-3.12 compatibility."""
+    if type(node).__name__ == "Index" and hasattr(node, "value"):
+        return getattr(node, "value")
+    return node
+
+
 class X64CodeGen:
     """Translates a ParsedModule into a complete FASM assembly program."""
 
@@ -211,7 +218,7 @@ class X64CodeGen:
                 elif isinstance(target, ast.Subscript):
                     # arr[idx] = val
                     self.emit("push rax", "save value to assign")
-                    self._generate_expr(target.slice)  # index -> RAX
+                    self._generate_expr(_unwrap_slice(target.slice))  # index -> RAX
                     self.emit("push rax", "save index")
                     self._generate_expr(target.value)  # arr pointer -> RAX
                     self.emit("mov r8, rax", "array base pointer")
@@ -449,7 +456,7 @@ class X64CodeGen:
             # arr[idx]
             self._generate_expr(expr.value)  # arr pointer -> RAX
             self.emit("push rax")
-            self._generate_expr(expr.slice)  # index -> RAX
+            self._generate_expr(_unwrap_slice(expr.slice))  # index -> RAX
             self.emit("mov r11, rax")
             self.emit("pop rax")
             self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
