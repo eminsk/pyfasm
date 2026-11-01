@@ -34,5 +34,16 @@ tests:
 
 about:
   homepage: https://github.com/eminsk/pyfasm
+  repository: https://github.com/eminsk/pyfasm
+  documentation: https://github.com/eminsk/pyfasm#readme
   license: MIT
+  license_file: LICENSE
   summary: Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, DLL, and MyOS 10
+  description: |
+    PyFASM is a high-performance cross-platform native compiler that translates Python
+    code directly into pure x86_64 Flat Assembler (FASM) machine code with zero runtime
+    overhead, no virtual machine, and complete elimination of the Global Interpreter Lock (Zero-GIL).
+
+extra:
+  recipe-maintainers:
+    - eminsk

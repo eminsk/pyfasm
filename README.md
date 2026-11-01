@@ -1,14 +1,25 @@
 # PyFASM: Universal Python-to-Pure FASM x86_64 Native Compiler
 
 [![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
-[![Conda](https://img.shields.io/badge/Conda-m__n__nik-green.svg)](https://anaconda.org/m_n_nik/pyfasm)
-[![PPA](https://img.shields.io/badge/Ubuntu%20PPA-eminsk%2Fppa-orange.svg)](https://launchpad.net/~eminsk/+archive/ubuntu/ppa)
-[![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg)](https://python.org)
-[![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg)](https://peps.python.org/pep-0703/)
-[![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg)](https://pypy.org)
-[![Targets: Win64 | Linux | macOS | MyOS 10](https://img.shields.io/badge/Targets-Win64%20%7C%20Linux%20%7C%20macOS%20%7C%20MyOS%2010-purple.svg)]()
-[![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64-red.svg)](https://flatassembler.net)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Conda-Forge](https://img.shields.io/conda/vn/conda-forge/pyfasm.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm)
+[![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/pyfasm.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm)
+[![Debian / Ubuntu PPA](https://img.shields.io/badge/Ubuntu%20PPA-eminsk%2Fppa-orange.svg?style=flat)](https://launchpad.net/~eminsk/+archive/ubuntu/ppa)
+[![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg?style=flat)](https://python.org)
+[![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg?style=flat)](https://peps.python.org/pep-0703/)
+[![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
+[![Targets: Win64 | Linux | macOS | MyOS 10](https://img.shields.io/badge/Targets-Win64%20%7C%20Linux%20%7C%20macOS%20%7C%20MyOS%2010-purple.svg?style=flat)]()
+[![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64-red.svg?style=flat)](https://flatassembler.net)
+[![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
+[![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
+[![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](LICENSE)
+[![Donate USDT](https://img.shields.io/badge/Donate-USDT_(TRC20)-26A17B?style=flat&logo=tether&logoColor=white)](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P)
+
+> ### 🤝 Community, Issues & Support
+> - 🐛 **Found a bug, compiler issue, or edge case?** Please [Open an Issue](https://github.com/eminsk/pyfasm/issues) — bug reports and platform patches are tracked and resolved quickly!
+> - 💬 **Questions, cross-compilation ideas, or new architectures?** Join our [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
+> - ⭐ **Find PyFASM useful?** Give it a star on GitHub — it helps more developers discover the compiler!
+> - ☕ **Support development (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
 
 **PyFASM** is a high-performance cross-platform native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It generates tiny, self-contained standalone binaries with **zero runtime overhead**, **no virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
 
@@ -157,14 +168,17 @@ uv run pyfasm bundle ./my_app -o ./my_app/app.macho --target macos
 
 ## Installation
 
-### Via Conda (`m_n_nik` channel)
+### Via Conda (`conda-forge` organization channel)
 
 ```bash
 # Using standard conda
-conda install -c m_n_nik pyfasm
+conda install -c conda-forge pyfasm
+
+# Or using mamba
+mamba install -c conda-forge pyfasm
 
 # Or using pixi
-pixi add --channel m_n_nik pyfasm
+pixi add pyfasm
 ```
 
 ### Via Debian / Ubuntu PPA (`eminsk/ppa`)

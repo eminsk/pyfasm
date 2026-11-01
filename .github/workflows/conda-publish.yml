@@ -1,13 +1,15 @@
 name: Conda Package Build & Publish
 
 on:
-  workflow_dispatch:
   push:
+    branches: [ master, main ]
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   conda-build-and-publish:
+    name: Conda Package Build & Publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -29,13 +31,23 @@ jobs:
         run: |
           rattler-build build -c conda-forge --recipe recipe/recipe.yaml --output-dir dist/conda/
 
+      - name: Upload Conda Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: conda-package
+          path: dist/conda/
+
       - name: Install Anaconda Client
         run: |
           pip install --upgrade anaconda-client
 
       - name: Upload to Anaconda.org
-        if: success() && env.ANACONDA_API_TOKEN != ''
+        if: success()
         env:
           ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
         run: |
-          anaconda --token "$ANACONDA_API_TOKEN" upload --user m_n_nik dist/conda/noarch/*.conda --skip-existing
+          if [ -n "$ANACONDA_API_TOKEN" ]; then
+            anaconda --token "$ANACONDA_API_TOKEN" upload --user m_n_nik dist/conda/noarch/*.conda --skip-existing
+          else
+            echo "ANACONDA_API_TOKEN is empty or not configured. Artifact saved."
+          fi
