@@ -1,6 +1,6 @@
 context:
-  name: pyfasm
-  version: "0.1.0"
+  name: pyfasm64
+  version: "0.1.1"
 
 package:
   name: ${{ name }}
@@ -15,6 +15,7 @@ build:
   script: ${{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
   python:
     entry_points:
+      - pyfasm64 = pyfasm.cli:main
       - pyfasm = pyfasm.cli:main
 
 requirements:
@@ -29,6 +30,7 @@ requirements:
 tests:
   - python:
       imports:
+        - pyfasm64
         - pyfasm
       pip_check: true
 
@@ -40,9 +42,10 @@ about:
   license_file: LICENSE
   summary: Universal Native No-GIL (3.13t-3.16t) & PyPy (3.8-3.12) to pure x86_64 FASM compiler & bundler for Windows, Linux, macOS, and DLL
   description: |
-    PyFASM is a high-performance cross-platform native compiler that translates Python
+    PyFASM64 is a high-performance cross-platform native compiler that translates Python
     code directly into pure x86_64 Flat Assembler (FASM) machine code with zero runtime
     overhead, no virtual machine, and complete elimination of the Global Interpreter Lock (Zero-GIL).
+    Provides 100% backward compatibility with pyfasm.
 
 extra:
   recipe-maintainers:

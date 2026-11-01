@@ -1,3 +1,12 @@
+python3-pyfasm64 (0.1.1-1) stable; urgency=medium
+
+  * Release PyFASM64 0.1.1 on PyPI as pyfasm64.
+  * Added pyfasm64 and pyfasm entry points and aliases for 100% backward compatibility.
+  * Full support for CPython 3.8-3.16, Free-Threaded No-GIL (3.13t-3.16t), and PyPy.
+  * Preserved full compatibility with python3-pyfasm package via Provides/Replaces.
+
+ -- eminsk <M_N_N@tut.by>  Sun, 01 Nov 2026 08:00:00 -0500
+
 python3-pyfasm (0.1.0-1) stable; urgency=medium
 
   * Initial release of PyFASM for Debian/Ubuntu APT.

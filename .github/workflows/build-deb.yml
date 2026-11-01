@@ -25,7 +25,7 @@ jobs:
           chmod +x debian/rules
           dpkg-buildpackage -us -uc -b -d
           mkdir -p deb-dist
-          mv ../python3-pyfasm_*.deb deb-dist/
+          mv ../python3-pyfasm*.deb deb-dist/
 
       - name: Upload .deb Artifact
         uses: actions/upload-artifact@v4

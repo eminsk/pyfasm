@@ -1,4 +1,4 @@
-Source: python3-pyfasm
+Source: python3-pyfasm64
 Section: python
 Priority: optional
 Maintainer: eminsk <M_N_N@tut.by>
@@ -6,11 +6,14 @@ Build-Depends: debhelper-compat (= 13), dh-python, pybuild-plugin-pyproject, pyt
 Standards-Version: 4.6.2
 Homepage: https://github.com/eminsk/pyfasm
 
-Package: python3-pyfasm
+Package: python3-pyfasm64
 Architecture: all
 Depends: ${misc:Depends}, ${python3:Depends}
+Provides: python3-pyfasm (= ${binary:Version})
+Replaces: python3-pyfasm (<< 0.1.1)
+Conflicts: python3-pyfasm (<< 0.1.1)
 Description: Universal No-GIL & PyPy to pure FASM x64 native compiler
- PyFASM is a native cross-platform compiler translating Python (3.8-3.16,
+ PyFASM64 is a native cross-platform compiler translating Python (3.8-3.16,
  No-GIL 3.13t-3.16t, PyPy 3.8-3.12) directly to pure x86_64 Flat Assembler
  with true hardware multithreading for Linux ELF, Apple macOS, Windows PE64,
- DLL and bare-metal flat binaries.
+ DLL and bare-metal flat binaries. Fully backward compatible with legacy pyfasm.
