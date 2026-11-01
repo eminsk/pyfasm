@@ -37,9 +37,53 @@ class FasmRunner:
             if os.path.exists(p):
                 return str(Path(p).resolve())
 
+        # Check user cache ~/.pyfasm/fasm
+        user_fasm_dir = Path.home() / ".pyfasm" / "fasm"
+        for cand_name in ("fasm.exe", "FASM.EXE", "fasm"):
+            cand = user_fasm_dir / cand_name
+            if cand.exists():
+                return str(cand.resolve())
+
+        # Auto-download on demand if not found
+        try:
+            return self._auto_download_fasm(user_fasm_dir)
+        except Exception:
+            pass
+
         raise FileNotFoundError(
             "FASM executable not found! Please install FASM or specify its path."
         )
+
+    def _auto_download_fasm(self, target_dir: Path) -> str:
+        import urllib.request
+        import zipfile
+        import tarfile
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            url = "https://flatassembler.net/fasmw17332.zip"
+            zip_dest = target_dir / "fasmw.zip"
+            urllib.request.urlretrieve(url, zip_dest)
+            with zipfile.ZipFile(zip_dest, "r") as zf:
+                zf.extractall(target_dir)
+            for cand in target_dir.rglob("fasm.exe"):
+                return str(cand.resolve())
+            for cand in target_dir.rglob("FASM.EXE"):
+                return str(cand.resolve())
+        else:
+            url = "https://flatassembler.net/fasm-1.73.32.tgz"
+            tgz_dest = target_dir / "fasm.tgz"
+            urllib.request.urlretrieve(url, tgz_dest)
+            with tarfile.open(tgz_dest, "r:gz") as tf:
+                tf.extractall(target_dir)
+            for cand in target_dir.rglob("fasm"):
+                if cand.is_file():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
+        raise FileNotFoundError("Could not auto-download FASM")
 
     def _locate_include(self, explicit_include: Optional[str]) -> str:
         if explicit_include and os.path.exists(explicit_include):

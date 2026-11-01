@@ -18,6 +18,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup FASM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "C:\proekts\FASM"
+          Invoke-WebRequest -Uri "https://flatassembler.net/fasmw17332.zip" -OutFile "$env:TEMP\fasm.zip"
+          Expand-Archive -Path "$env:TEMP\fasm.zip" -DestinationPath "C:\proekts\FASM" -Force
+          Write-Output "C:\proekts\FASM" >> $env:GITHUB_PATH
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:

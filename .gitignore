@@ -8,4 +8,7 @@ __pycache__/
 *.elf
 *.macho
 *.asm
+*.egg-info/
+build/
+dist/
 test_*
