@@ -133,20 +133,52 @@ class FasmRunner:
 
     def _locate_include(self, explicit_include: Optional[str]) -> str:
         if explicit_include and os.path.exists(explicit_include):
-            return str(Path(explicit_include).resolve())
+            inc_path = Path(explicit_include).resolve()
+        else:
+            # Check adjacent to fasm_path
+            fasm_dir = Path(self.fasm_path).parent
+            candidate = fasm_dir / "INCLUDE"
+            if candidate.exists() and candidate.is_dir():
+                inc_path = candidate.resolve()
+            else:
+                # Check bundled tools/fasm/INCLUDE
+                bundled_inc = Path(__file__).resolve().parents[2] / "tools" / "fasm" / "INCLUDE"
+                if bundled_inc.exists() and bundled_inc.is_dir():
+                    inc_path = bundled_inc.resolve()
+                else:
+                    inc_path = fasm_dir.resolve()
 
-        # Check adjacent to fasm_path
-        fasm_dir = Path(self.fasm_path).parent
-        candidate = fasm_dir / "INCLUDE"
-        if candidate.exists() and candidate.is_dir():
-            return str(candidate.resolve())
+        if os.name != "nt" and inc_path.exists() and inc_path.is_dir():
+            self._ensure_case_folded_include(inc_path)
 
-        # Check bundled tools/fasm/INCLUDE
-        bundled_inc = Path(__file__).resolve().parents[2] / "tools" / "fasm" / "INCLUDE"
-        if bundled_inc.exists() and bundled_inc.is_dir():
-            return str(bundled_inc.resolve())
+        return str(inc_path)
 
-        return str(fasm_dir.resolve())
+    @staticmethod
+    def _ensure_case_folded_include(base_inc: Path) -> None:
+        """Creates symlinks for case-insensitive include resolution on case-sensitive filesystems (Linux)."""
+        try:
+            for root, dirs, files in os.walk(base_inc):
+                r_path = Path(root)
+                for d in list(dirs):
+                    low_d = d.lower()
+                    if low_d != d:
+                        target = r_path / low_d
+                        if not target.exists():
+                            try:
+                                os.symlink(d, target)
+                            except Exception:
+                                pass
+                for f in files:
+                    low_f = f.lower()
+                    if low_f != f:
+                        target = r_path / low_f
+                        if not target.exists():
+                            try:
+                                os.symlink(f, target)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
 
     def assemble(
         self,

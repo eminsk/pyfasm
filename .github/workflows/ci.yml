@@ -113,9 +113,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set permissions for bundled FASM
+      - name: Set permissions and include symlinks for bundled FASM
         run: |
           chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          python3 -c "
+          import os, pathlib
+          inc = pathlib.Path('tools/fasm/INCLUDE')
+          if inc.exists():
+              for root, dirs, files in os.walk(inc):
+                  r = pathlib.Path(root)
+                  for d in list(dirs):
+                      if d.lower() != d and not (r / d.lower()).exists():
+                          try: os.symlink(d, r / d.lower())
+                          except Exception: pass
+                  for f in files:
+                      if f.lower() != f and not (r / f.lower()).exists():
+                          try: os.symlink(f, r / f.lower())
+                          except Exception: pass
+          " || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -141,9 +156,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set permissions for bundled FASM
+      - name: Set permissions and include symlinks for bundled FASM
         run: |
           chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          python3 -c "
+          import os, pathlib
+          inc = pathlib.Path('tools/fasm/INCLUDE')
+          if inc.exists():
+              for root, dirs, files in os.walk(inc):
+                  r = pathlib.Path(root)
+                  for d in list(dirs):
+                      if d.lower() != d and not (r / d.lower()).exists():
+                          try: os.symlink(d, r / d.lower())
+                          except Exception: pass
+                  for f in files:
+                      if f.lower() != f and not (r / f.lower()).exists():
+                          try: os.symlink(f, r / f.lower())
+                          except Exception: pass
+          " || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -170,9 +200,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set permissions for bundled FASM
+      - name: Set permissions and include symlinks for bundled FASM
         run: |
           chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          python3 -c "
+          import os, pathlib
+          inc = pathlib.Path('tools/fasm/INCLUDE')
+          if inc.exists():
+              for root, dirs, files in os.walk(inc):
+                  r = pathlib.Path(root)
+                  for d in list(dirs):
+                      if d.lower() != d and not (r / d.lower()).exists():
+                          try: os.symlink(d, r / d.lower())
+                          except Exception: pass
+                  for f in files:
+                      if f.lower() != f and not (r / f.lower()).exists():
+                          try: os.symlink(f, r / f.lower())
+                          except Exception: pass
+          " || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

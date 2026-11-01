@@ -71,8 +71,36 @@ def test_bundle_minimal_project(tmp_path):
     main_file = proj_dir / "main.py"
     main_file.write_text("print('Bundler Test Success!')\n", encoding="utf-8")
 
+    if sys.platform.startswith("linux"):
+        target, ext = "linux", ".elf"
+    elif sys.platform == "darwin":
+        target, ext = "macos", ".macho"
+    else:
+        target, ext = "win64", ".exe"
+
     bundler = ProjectBundler()
-    out_exe = tmp_path / "my_test_app.exe"
+    out_bin = tmp_path / f"my_test_app{ext}"
+    success, out_path, log = bundler.bundle(
+        project_dir=str(proj_dir),
+        entry_script=str(main_file),
+        output_exe=str(out_bin),
+        is_gui=False,
+        target=target,
+        onefile=True,
+    )
+    assert success is True, f"Bundler failed for {target}:\n{log}"
+    assert Path(out_path).exists()
+    assert Path(out_path).stat().st_size > 0
+
+
+def test_bundle_cross_platform_win64(tmp_path):
+    proj_dir = tmp_path / "my_cross_win_app"
+    proj_dir.mkdir()
+    main_file = proj_dir / "main.py"
+    main_file.write_text("print('Bundler Cross Win64 Success!')\n", encoding="utf-8")
+
+    bundler = ProjectBundler()
+    out_exe = tmp_path / "my_cross_win_app.exe"
     success, out_path, log = bundler.bundle(
         project_dir=str(proj_dir),
         entry_script=str(main_file),
@@ -81,6 +109,6 @@ def test_bundle_minimal_project(tmp_path):
         target="win64",
         onefile=True,
     )
-    assert success is True
+    assert success is True, f"Cross-compilation for win64 failed:\n{log}"
     assert Path(out_path).exists()
     assert Path(out_path).stat().st_size > 0
