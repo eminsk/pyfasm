@@ -28,9 +28,18 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        if: success()
+        if: ${{ env.PYPI_TOKEN != '' }}
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
           verify-metadata: false
           password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: PyPI publishing note
+        if: ${{ env.PYPI_TOKEN == '' }}
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          echo "::notice::PYPI_API_TOKEN secret is not yet configured in GitHub repository Settings -> Secrets and variables -> Actions. PyPI upload was skipped."

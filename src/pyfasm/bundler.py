@@ -1,7 +1,7 @@
 """
 Project Bundler for PyFASM.
-Packages complex Python applications (including CustomTkinter, requests, yt-dlp)
-into a native Windows x64 launcher executable with smart virtual environment detection.
+Packages complex Python applications into a native Windows x64 launcher executable
+with smart virtual environment and No-GIL runtime detection.
 """
 from __future__ import annotations
 import os
@@ -43,10 +43,14 @@ class ProjectBundler:
         venv_escaped = str(venv_py).replace("\\", "\\\\") if venv_py.exists() else ""
 
         # Locate uv executable
-        uv_path = shutil.which("uv") or r"C:\Users\M_N_N\.local\bin\uv.exe"
-        if not os.path.exists(uv_path) and os.path.exists(r"C:\Users\M_N_N\.local\bin\uv.exe"):
-            uv_path = r"C:\Users\M_N_N\.local\bin\uv.exe"
-        uv_escaped = uv_path.replace("\\", "\\\\")
+        uv_path = shutil.which("uv")
+        if not uv_path:
+            local_bin = Path.home() / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+            if local_bin.exists():
+                uv_path = str(local_bin)
+            else:
+                uv_path = "uv"
+        uv_escaped = str(uv_path).replace("\\", "\\\\")
 
         # Check if project uses free-threaded Python build
         is_freethreaded = False

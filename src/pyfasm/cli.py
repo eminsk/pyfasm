@@ -32,7 +32,7 @@ def main() -> int:
     p_asm.add_argument("--target", choices=["win64", "dll", "linux", "macos", "apple", "myos"], default="win64", help="Target OS platform")
 
     # Subcommand: bundle
-    p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project (like yt2005) into a native x64 launcher executable")
+    p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 launcher executable")
     p_bundle.add_argument("project_dir", help="Path to Python project directory")
     p_bundle.add_argument("-e", "--entry", help="Path to main entry script (default: auto-detected)")
     p_bundle.add_argument("-o", "--output", help="Path to output executable (.exe)")

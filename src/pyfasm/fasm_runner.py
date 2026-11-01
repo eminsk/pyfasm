@@ -14,8 +14,8 @@ class FasmRunner:
     """Manages discovery and invocation of Flat Assembler (FASM)."""
 
     DEFAULT_SEARCH_PATHS = [
-        r"C:\proekts\FASM\FASM.EXE",
-        r"C:\asm\hdd\FASM.EXE",
+        r"C:\FASM\FASM.EXE",
+        r"C:\asm\FASM.EXE",
         r"C:\Program Files\FASM\fasm.exe",
     ]
 
@@ -99,10 +99,6 @@ class FasmRunner:
         candidate = fasm_dir / "INCLUDE"
         if candidate.exists() and candidate.is_dir():
             return str(candidate.resolve())
-
-        # Check C:\proekts\FASM\INCLUDE
-        if os.path.exists(r"C:\proekts\FASM\INCLUDE"):
-            return r"C:\proekts\FASM\INCLUDE"
 
         return str(fasm_dir.resolve())
 
