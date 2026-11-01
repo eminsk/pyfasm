@@ -451,6 +451,7 @@ section '.idata' import data readable writeable
         onefile: bool = True,
         include_bins: Optional[List[str]] = None,
         include_venv: bool = False,
+        export_fasm_dir: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
         """
         Bundles a project, its dependencies, and tools (ffmpeg, mpv) into a single monolithic standalone executable.
@@ -648,11 +649,38 @@ section '.idata' import data readable writeable
             with open(out_bin, "ab") as f_out:
                 f_out.write(payload_data)
 
+            if export_fasm_dir:
+                from pyfasm.fasm_exporter import FasmExporter
+                exp_dir = Path(export_fasm_dir)
+                if not exp_dir.is_absolute():
+                    exp_dir = proj_path / exp_dir
+                FasmExporter.export(
+                    asm_content=asm_content,
+                    export_dir=str(exp_dir),
+                    app_name=proj_path.name,
+                    target=target_norm,
+                    payload_zip=payload_path,
+                    include_compiler=True,
+                )
+
             # Clean up intermediate zip
             try:
                 payload_path.unlink()
             except Exception:
                 pass
+        elif export_fasm_dir:
+            from pyfasm.fasm_exporter import FasmExporter
+            exp_dir = Path(export_fasm_dir)
+            if not exp_dir.is_absolute():
+                exp_dir = proj_path / exp_dir
+            FasmExporter.export(
+                asm_content=asm_content,
+                export_dir=str(exp_dir),
+                app_name=proj_path.name,
+                target=target_norm,
+                payload_zip=None,
+                include_compiler=True,
+            )
 
         # Set permissions and code sign
         try:

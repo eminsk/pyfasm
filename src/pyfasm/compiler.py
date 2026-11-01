@@ -34,7 +34,8 @@ class PyFasmCompiler:
         source_path: str,
         output_binary: Optional[str] = None,
         target: str = "win64",
-        keep_asm: bool = True
+        keep_asm: bool = True,
+        export_fasm_dir: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
         """
         Compiles a Python file or entire project directory into a single standalone native binary.
@@ -107,5 +108,18 @@ class PyFasmCompiler:
                     subprocess.run(["codesign", "-s", "-", "-f", str(out_bin)], capture_output=True)
                 except Exception:
                     pass
+
+        if export_fasm_dir:
+            from pyfasm.fasm_exporter import FasmExporter
+            exp_dir = Path(export_fasm_dir)
+            if not exp_dir.is_absolute():
+                exp_dir = project_dir / exp_dir
+            FasmExporter.export(
+                asm_content=asm_code,
+                export_dir=str(exp_dir),
+                app_name=default_stem,
+                target=target,
+                include_compiler=True,
+            )
 
         return success, str(out_bin), log

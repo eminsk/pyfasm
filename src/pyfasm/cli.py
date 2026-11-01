@@ -24,6 +24,7 @@ def main() -> int:
     p_compile.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
     p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build (win64 only)")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
+    p_compile.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
@@ -41,6 +42,7 @@ def main() -> int:
     p_bundle.add_argument("--include-bin", action="append", default=[], help="Path to external binary or tool to include inside the bundle (e.g. ffmpeg.exe, mpv-2.dll)")
     p_bundle.add_argument("--include-venv", action="store_true", help="Pack project .venv environment into the bundle for offline standalone portability")
     p_bundle.add_argument("--dir-mode", action="store_true", help="Build directory-wrapper launcher instead of monolithic single-file")
+    p_bundle.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
 
     args = parser.parse_args()
     compiler = PyFasmCompiler()
@@ -57,6 +59,7 @@ def main() -> int:
             onefile=not args.dir_mode,
             include_bins=args.include_bin,
             include_venv=args.include_venv,
+            export_fasm_dir=args.export_fasm,
         )
 
         if not success:
@@ -71,7 +74,8 @@ def main() -> int:
             source_path=args.source,
             output_binary=args.output,
             target=args.target,
-            keep_asm=not args.no_asm
+            keep_asm=not args.no_asm,
+            export_fasm_dir=args.export_fasm,
         )
 
         if not success:

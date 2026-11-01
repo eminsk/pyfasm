@@ -2,6 +2,8 @@
 PyFASM: Free-Threaded (No-GIL) Python to Pure FASM x64 Native Compiler.
 """
 from pyfasm.compiler import PyFasmCompiler
+from pyfasm.bundler import ProjectBundler
+from pyfasm.fasm_exporter import FasmExporter
 from pyfasm.cli import main
 
-__all__ = ["PyFasmCompiler", "main"]
+__all__ = ["PyFasmCompiler", "ProjectBundler", "FasmExporter", "main"]
