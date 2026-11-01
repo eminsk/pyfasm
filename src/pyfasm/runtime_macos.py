@@ -215,27 +215,32 @@ _pyfasm_print_int:
     ret
 
 _pyfasm_print_float:
+    ; XMM0 = double
     push    rbp
     mov     rbp, rsp
     sub     rsp, 48
+    and     rsp, -16
 
-    movq    xmm0, rcx
     xorps   xmm1, xmm1
     ucomisd xmm0, xmm1
     jae     .flt_pos
     ; Negative
+    movsd   [rsp + 32], xmm0
     mov     byte [rsp], '-'
     mov     rax, 0x2000004
     mov     rdi, 1
     mov     rsi, rsp
     mov     rdx, 1
     syscall
+    movsd   xmm0, [rsp + 32]
     xorps   xmm1, xmm1
     subsd   xmm1, xmm0
-    movapd  xmm0, xmm1
+    movaps  xmm0, xmm1
 
 .flt_pos:
+    movsd   [rsp + 32], xmm0
     cvttsd2si rax, xmm0
+    mov     [rsp + 40], rax
     mov     rcx, rax
     call    _pyfasm_print_int
 
@@ -248,10 +253,10 @@ _pyfasm_print_float:
     syscall
 
     ; Fraction (6 decimals)
-    cvttsd2si rax, xmm0
-    cvtsi2sd  xmm2, rax
-    subsd     xmm0, xmm2
-    mulsd     xmm0, [flt_1m]
+    movsd   xmm0, [rsp + 32]
+    cvtsi2sd xmm2, [rsp + 40]
+    subsd   xmm0, xmm2
+    mulsd   xmm0, [flt_1m]
     cvttsd2si rax, xmm0
     mov     rcx, rax
     call    _pyfasm_print_int
