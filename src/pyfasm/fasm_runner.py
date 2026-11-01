@@ -27,6 +27,11 @@ class FasmRunner:
         if explicit_path and os.path.exists(explicit_path):
             return str(Path(explicit_path).resolve())
 
+        # Check bundled repository tools/fasm
+        repo_tools = Path(__file__).resolve().parents[2] / "tools" / "fasm" / ("FASM.EXE" if os.name == "nt" else "fasm")
+        if repo_tools.exists():
+            return str(repo_tools.resolve())
+
         # Check system PATH
         path_which = shutil.which("fasm") or shutil.which("fasm.exe")
         if path_which:
