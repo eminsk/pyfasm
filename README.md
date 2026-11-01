@@ -46,6 +46,9 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
   * `--target dll`: Windows 64-bit Dynamic Link Libraries (`.dll`) callable instantly from Python via `ctypes` or from C/C++.
   * `--target linux`: Native Linux x86-64 ELF64 executables (`.elf`) using pure kernel syscalls (`sys_write`, `sys_exit`, `sys_mmap`, `sys_nanosleep`) with zero libc dependency.
   * `--target macos` / `--target apple`: Apple macOS x86-64 Mach-O 64-bit executables (`.macho`) using direct Darwin BSD kernel syscalls.
+* **Multi-Module Single-File Compilation**:
+  * Automatically discovers and compiles all internal modules, subpackages, and libraries in a project into a **single standalone machine code binary** (`.exe`, `.elf`, `.macho`).
+  * Recursively traverses local `import` and `from ... import ...` statements, registers aliases, and prevents circular dependencies while strictly skipping external/virtualenv directories.
 * **Cross-Platform Project Bundler (`pyfasm bundle`)**:
   * Bundles complex Python applications into native standalone launcher executables for **Windows** (`.exe`), **Linux** (`.elf`), and **Apple macOS** (`.macho`) that automatically discover virtual environments and launch in Free-Threaded (No-GIL) mode when available.
 
@@ -235,13 +238,23 @@ uv run pyfasm compile examples/01_hello.py -o hello_linux.elf --target linux
 uv run pyfasm compile examples/01_hello.py -o hello_mac.macho --target macos
 ```
 
-### 4. Inspect Generated FASM Assembly
+### 4. Compile Multi-Module Project into 1 Single Standalone Binary
+
+```bash
+# Compiles an entire multi-file project into 1 standalone binary (auto-resolves all local imports):
+uv run pyfasm compile ./my_project -o my_app.exe
+
+# Or compile from entry script (auto-resolves all imported helper modules):
+uv run pyfasm compile my_project/main.py -o my_app.exe
+```
+
+### 5. Inspect Generated FASM Assembly
 
 ```bash
 uv run pyfasm emit-asm examples/02_fibonacci.py
 ```
 
-### 5. Compile to High-Performance Windows DLL
+### 6. Compile to High-Performance Windows DLL
 
 ```bash
 uv run pyfasm compile my_math.py -o my_math.dll --target dll

@@ -12,14 +12,14 @@ from pyfasm.compiler import PyFasmCompiler
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="pyfasm",
-        description="PyFASM: Free-Threaded (No-GIL) Python to Pure FASM x64 Native Compiler"
+        description="PyFASM: Ahead-of-Time (AOT) Python to Pure FASM x64 Native Compiler & Bundler (Zero-GIL)"
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Subcommand: compile
-    p_compile = subparsers.add_parser("compile", help="Compile a Python file to native x64 executable")
-    p_compile.add_argument("source", help="Path to input Python source file (.py)")
+    p_compile = subparsers.add_parser("compile", help="Compile a Python file or project directory to a single native x64 binary")
+    p_compile.add_argument("source", help="Path to input Python source file (.py) or project directory")
     p_compile.add_argument("-o", "--output", help="Path to output binary (.exe, .dll, .elf, .macho, or .bin)")
     p_compile.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
     p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build (win64 only)")
@@ -27,7 +27,7 @@ def main() -> int:
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
-    p_asm.add_argument("source", help="Path to input Python source file (.py)")
+    p_asm.add_argument("source", help="Path to input Python source file (.py) or project directory")
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
     p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
 
@@ -58,8 +58,6 @@ def main() -> int:
             return 1
 
         print(f"[PyFASM SUCCESS] Project bundled into native executable: {out_bin}")
-        if log:
-            print(f"FASM log: {log}")
         return 0
 
     if args.command == "compile":
@@ -92,12 +90,34 @@ def main() -> int:
             print(f"[PyFASM ERROR] File not found: {args.source}", file=sys.stderr)
             return 1
 
-        source_code = src.read_text(encoding="utf-8")
-        asm_code = compiler.compile_source_to_asm(source_code, target=args.target)
+        if src.is_dir():
+            candidates = ["main.py", "app.py", "bot.py", "run.py", "index.py"]
+            entry_file = None
+            for cand in candidates:
+                cand_p = src / cand
+                if cand_p.exists():
+                    entry_file = cand_p
+                    break
+            if not entry_file:
+                py_files = sorted(list(src.glob("*.py")))
+                entry_file = py_files[0] if py_files else None
+            project_dir = src
+            src_file = entry_file
+        else:
+            project_dir = src.parent
+            src_file = src
+
+        from pyfasm.ast_parser import AstAnalyzer
+        from pyfasm.codegen_x64 import X64CodeGen
+
+        analyzer = AstAnalyzer(project_root=project_dir)
+        parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
+        codegen = X64CodeGen(parsed_mod, target=args.target)
+        asm_code = codegen.generate()
 
         if args.output:
             out_asm = Path(args.output).resolve()
-            out_asm.write_text(asm_code, encoding="ascii")
+            out_asm.write_text(asm_code, encoding="utf-8")
             print(f"[PyFASM] Assembly written to: {out_asm}")
         else:
             print(asm_code)

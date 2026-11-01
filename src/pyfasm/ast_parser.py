@@ -1,11 +1,13 @@
 """
 AST Parser and Semantic Analyzer for PyFASM.
-Traverses Python AST, extracts functions, variables, and type information.
+Traverses Python AST, extracts functions, variables, and type information
+across single files or complete multi-module project libraries.
 """
 from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Set
 from pyfasm.types import PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR
 
 
@@ -50,11 +52,13 @@ class ParsedModule:
 
 
 class AstAnalyzer:
-    """Extracts function signatures, local variables, and string/float literals."""
+    """Extracts function signatures, local variables, and literals across single files or multi-module projects."""
 
-    def __init__(self):
+    def __init__(self, project_root: Optional[Path | str] = None):
         self.strings: List[StringLiteral] = []
         self.floats: List[FloatLiteral] = []
+        self.project_root: Optional[Path] = Path(project_root).resolve() if project_root else None
+        self._visited_files: Set[Path] = set()
         self._str_counter = 0
         self._flt_counter = 0
 
@@ -77,6 +81,7 @@ class AstAnalyzer:
         return label
 
     def parse_source(self, source_code: str) -> ParsedModule:
+        """Parses a raw Python source code string into a ParsedModule."""
         tree = ast.parse(source_code)
         module = ParsedModule()
 
@@ -100,6 +105,127 @@ class AstAnalyzer:
                     module.main_func = fn
 
         return module
+
+    def parse_file(self, file_path: str | Path, project_root: Optional[Path | str] = None) -> ParsedModule:
+        """
+        Parses an entry Python file and recursively discovers and compiles all
+        imported local project modules into 1 unified standalone module.
+        """
+        entry_path = Path(file_path).resolve()
+        if project_root:
+            self.project_root = Path(project_root).resolve()
+        elif not self.project_root:
+            self.project_root = entry_path.parent
+
+        module = ParsedModule()
+        self._visited_files.clear()
+
+        # Recursively parse entry script and all internal project dependencies
+        self._parse_file_recursive(entry_path, module, is_entry=True)
+
+        module.string_literals = self.strings
+        module.float_literals = self.floats
+        return module
+
+    def _resolve_local_module(self, mod_name: str, current_dir: Path) -> Optional[Path]:
+        """Resolves an imported module name to a local .py file, strictly ignoring pyfasm itself."""
+        # Never add or import pyfasm itself ("естественно добавлять саму себя не должна уже")
+        if mod_name == "pyfasm" or mod_name.startswith("pyfasm."):
+            return None
+
+        parts = mod_name.split(".")
+        # 1. Try relative to current directory
+        cand1 = current_dir.joinpath(*parts).with_suffix(".py")
+        if cand1.exists() and cand1.is_file():
+            return cand1
+        cand2 = current_dir.joinpath(*parts, "__init__.py")
+        if cand2.exists() and cand2.is_file():
+            return cand2
+
+        # 2. Try relative to project root
+        if self.project_root:
+            cand3 = self.project_root.joinpath(*parts).with_suffix(".py")
+            if cand3.exists() and cand3.is_file():
+                return cand3
+            cand4 = self.project_root.joinpath(*parts, "__init__.py")
+            if cand4.exists() and cand4.is_file():
+                return cand4
+
+        return None
+
+    def _parse_file_recursive(self, path: Path, module: ParsedModule, is_entry: bool = False) -> None:
+        real_path = path.resolve()
+
+        # Prevent circular imports and duplicate processing
+        if real_path in self._visited_files:
+            return
+        self._visited_files.add(real_path)
+
+        # Ignore virtual environments, cache, and git folders
+        path_str = str(real_path).lower()
+        if any(ign in path_str for ign in [".venv", "venv", "__pycache__", "site-packages", ".git"]):
+            return
+
+        # Never add pyfasm source itself
+        if "pyfasm" in real_path.parts and "src" in real_path.parts:
+            try:
+                import pyfasm
+                pyfasm_pkg_dir = Path(pyfasm.__file__).parent.resolve()
+                if pyfasm_pkg_dir in real_path.parents or real_path == pyfasm_pkg_dir:
+                    return
+            except Exception:
+                pass
+
+        if not real_path.exists() or not real_path.is_file():
+            return
+
+        try:
+            source_code = real_path.read_text(encoding="utf-8")
+            tree = ast.parse(source_code)
+        except Exception:
+            return
+
+        # 1. Collect string & float constants across the AST
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, str):
+                    self.get_or_create_string(node.value)
+                elif isinstance(node.value, float):
+                    self.get_or_create_float(node.value)
+
+        # 2. Extract functions from this module
+        mod_prefix = real_path.stem
+        for stmt in tree.body:
+            if isinstance(stmt, ast.FunctionDef):
+                fn = self._analyze_function(stmt)
+                # Primary name
+                if fn.name not in module.functions:
+                    module.functions[fn.name] = fn
+                # Namespaced alias (e.g., utils_add, math_calc)
+                alias_name = f"{mod_prefix}_{fn.name}"
+                if alias_name not in module.functions:
+                    module.functions[alias_name] = fn
+
+                if is_entry and fn.name == "main":
+                    module.main_func = fn
+
+        # 3. Discover and recursively parse imported project modules
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    # Never import self or pyfasm
+                    if alias.name == "pyfasm" or alias.name.startswith("pyfasm."):
+                        continue
+                    dep = self._resolve_local_module(alias.name, real_path.parent)
+                    if dep and dep != real_path:
+                        self._parse_file_recursive(dep, module, is_entry=False)
+            elif isinstance(stmt, ast.ImportFrom):
+                if stmt.module:
+                    if stmt.module == "pyfasm" or stmt.module.startswith("pyfasm."):
+                        continue
+                    dep = self._resolve_local_module(stmt.module, real_path.parent)
+                    if dep and dep != real_path:
+                        self._parse_file_recursive(dep, module, is_entry=False)
 
     def _analyze_function(self, node: ast.FunctionDef) -> FunctionSymbol:
         # Determine return type
@@ -176,8 +302,6 @@ class AstAnalyzer:
                     offset += 8
 
         # 16-byte alignment + shadow space
-        # In x64 Windows ABI, stack frames should be a multiple of 16 bytes
-        # plus 32 bytes shadow space for outgoing calls
         aligned_stack = ((offset + 15) // 16) * 16 + 32
 
         return FunctionSymbol(

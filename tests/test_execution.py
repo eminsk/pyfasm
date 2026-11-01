@@ -300,3 +300,91 @@ def main() -> int:
     content = Path(bin_path).read_bytes()
     # Check Mach-O 64-bit magic: 0xFEEDFACF (little endian: \xcf\xfa\xed\xfe)
     assert content[:4] == b"\xcf\xfa\xed\xfe", "Missing Mach-O 64-bit header magic"
+
+
+def test_end_to_end_multimodule_single_file_compilation(tmp_path: Path):
+    target, ext = get_host_target()
+    proj = tmp_path / "multi_mod_app"
+    proj.mkdir()
+
+    # Module 1: math_lib.py
+    (proj / "math_lib.py").write_text("""
+def multiply(a: int, b: int) -> int:
+    return a * b
+
+def add_bonus(x: int) -> int:
+    return x + 15
+""", encoding="utf-8")
+
+    # Module 2: helpers.py
+    (proj / "helpers.py").write_text("""
+import math_lib
+
+def compute_total(base: int, factor: int) -> int:
+    m = math_lib.multiply(base, factor)
+    return math_lib.add_bonus(m)
+""", encoding="utf-8")
+
+    # Entry module: main.py
+    (proj / "main.py").write_text("""
+import helpers
+
+def main() -> int:
+    # (10 * 3) + 15 = 45
+    ans = helpers.compute_total(10, 3)
+    print(ans)
+    return 0
+""", encoding="utf-8")
+
+    out_bin = proj / f"bundled_app{ext}"
+    compiler = PyFasmCompiler()
+
+    # Compile the entire project directory into a SINGLE standalone binary
+    success, bin_path, log = compiler.compile_file(str(proj), str(out_bin), target=target)
+    assert success, f"Multi-module compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+
+    # Execute binary and verify output
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        assert "45" in res.stdout.strip()
+
+
+def test_multimodule_compilation_from_entry_file(tmp_path: Path):
+    target, ext = get_host_target()
+    proj = tmp_path / "entry_app"
+    proj.mkdir()
+
+    (proj / "core_utils.py").write_text("""
+def calculate_area(w: int, h: int) -> int:
+    return w * h
+""", encoding="utf-8")
+
+    main_py = proj / "main.py"
+    main_py.write_text("""
+from core_utils import calculate_area
+
+def main() -> int:
+    area = calculate_area(7, 8)
+    print(area)
+    return 0
+""", encoding="utf-8")
+
+    out_bin = proj / f"area_tool{ext}"
+    compiler = PyFasmCompiler()
+
+    # Compile passing main.py — it automatically resolves core_utils into 1 binary
+    success, bin_path, log = compiler.compile_file(str(main_py), str(out_bin), target=target)
+    assert success, f"Compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+
+    if sys.platform != "darwin":
+        if os.name != "nt":
+            os.chmod(bin_path, 0o755)
+        res = subprocess.run([bin_path], capture_output=True, text=True)
+        assert res.returncode == 0
+        assert "56" in res.stdout.strip()
+

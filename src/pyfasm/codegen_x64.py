@@ -159,16 +159,33 @@ class X64CodeGen:
 
         self.emit_raw("")
 
-        # Generate User Functions
-        for fn in self.module.functions.values():
-            self._generate_function(fn)
+        # Generate User Functions (group aliases)
+        fn_to_names: dict[int, list[str]] = {}
+        for name, fn in self.module.functions.items():
+            fn_id = id(fn)
+            if fn_id not in fn_to_names:
+                fn_to_names[fn_id] = []
+            if name not in fn_to_names[fn_id]:
+                fn_to_names[fn_id].append(name)
 
-    def _generate_function(self, fn: FunctionSymbol) -> None:
+        seen_funcs = set()
+        for fn_id, names in fn_to_names.items():
+            fn = next(f for f in self.module.functions.values() if id(f) == fn_id)
+            if fn.name in seen_funcs:
+                continue
+            seen_funcs.add(fn.name)
+            self._generate_function(fn, aliases=names)
+
+    def _generate_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
         self.current_func = fn
-        self.emit_raw(f"; ============================================================")
+        self.emit_raw("; ============================================================")
         self.emit_raw(f"; Function: {fn.name}")
-        self.emit_raw(f"; ============================================================")
-        self.emit_raw(f"{fn.name}:")
+        self.emit_raw("; ============================================================")
+        if aliases:
+            for alias in aliases:
+                self.emit_raw(f"{alias}:")
+        else:
+            self.emit_raw(f"{fn.name}:")
 
         # Prolog
         self.emit("push rbp")
@@ -495,6 +512,18 @@ class X64CodeGen:
         func_name = ""
         if isinstance(call.func, ast.Name):
             func_name = call.func.id
+        elif isinstance(call.func, ast.Attribute):
+            attr_name = call.func.attr
+            if isinstance(call.func.value, ast.Name):
+                prefix = call.func.value.id
+                if f"{prefix}_{attr_name}" in self.module.functions:
+                    func_name = f"{prefix}_{attr_name}"
+                elif attr_name in self.module.functions:
+                    func_name = attr_name
+                else:
+                    func_name = f"{prefix}_{attr_name}"
+            else:
+                func_name = attr_name
 
         # Built-in runtime calls
         if func_name in ("print", "print_int"):
