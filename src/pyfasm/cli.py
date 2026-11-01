@@ -20,16 +20,16 @@ def main() -> int:
     # Subcommand: compile
     p_compile = subparsers.add_parser("compile", help="Compile a Python file to native x64 executable")
     p_compile.add_argument("source", help="Path to input Python source file (.py)")
-    p_compile.add_argument("-o", "--output", help="Path to output binary (.exe or .bin)")
-    p_compile.add_argument("--target", choices=["win64", "myos", "dll"], default="win64", help="Target OS platform (win64, myos, dll)")
-    p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build")
+    p_compile.add_argument("-o", "--output", help="Path to output binary (.exe, .dll, .elf, .macho, or .bin)")
+    p_compile.add_argument("--target", choices=["win64", "dll", "linux", "macos", "apple", "myos"], default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build (win64 only)")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
     p_asm.add_argument("source", help="Path to input Python source file (.py)")
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
-    p_asm.add_argument("--target", choices=["win64", "myos", "dll"], default="win64", help="Target OS platform")
+    p_asm.add_argument("--target", choices=["win64", "dll", "linux", "macos", "apple", "myos"], default="win64", help="Target OS platform")
 
     # Subcommand: bundle
     p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project (like yt2005) into a native x64 launcher executable")

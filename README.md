@@ -2,13 +2,12 @@
 
 [![Python: 3.15 No-GIL](https://img.shields.io/badge/Python-3.15%20Free--Threaded%20(No--GIL)-blue.svg)](https://python.org)
 [![Backend: FASM x64](https://img.shields.io/badge/Backend-Flat%20Assembler%20x64-orange.svg)](https://flatassembler.net)
-[![Tests: 11 Passed](https://img.shields.io/badge/Tests-11%20Passed-brightgreen.svg)]()
-[![Targets: Win64 | DLL | MyOS 10](https://img.shields.io/badge/Targets-Win64%20PE%20%7C%20DLL%20%7C%20MyOS%2010%20x64-purple.svg)]()
+[![Tests: 13 Passed](https://img.shields.io/badge/Tests-13%20Passed-brightgreen.svg)]()
+[![Targets: Windows | Linux | macOS | MyOS 10](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20MyOS%2010-purple.svg)]()
 
+**PyFASM** — революционный нативный кроссплатформенный компилятор, транслирующий код Python напрямую в чистый машинный код **x86_64 Flat Assembler (FASM)** с **полным отсутствием GIL (Global Interpreter Lock)** и поддержкой истинного аппаратного параллелизма процессора.
 
-**PyFASM** — революционный нативный компилятор, транслирующий код Python напрямую в чистый машинный код **x86_64 Flat Assembler (FASM)** с **полным отсутствием GIL (Global Interpreter Lock)** и поддержкой истинного аппаратного параллелизма процессора.
-
-Разработан специально для создания сверхлёгких, автономных бинарных файлов без зависимостей как для **Windows 10 x64** (автономные `.exe`), так и для микроядерной операционной системы **MyOS 10 x64** (плоские бинарники `.bin`).
+Разработан для создания автономных бинарных файлов без зависимостей под **все ключевые платформы**: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), **Apple macOS** (Mach-O 64), а также для микроядерной ОС **MyOS 10 x64** (плоские бинарники `.bin`).
 
 ---
 
@@ -16,22 +15,24 @@
 
 * **Полное отсутствие GIL (Zero-GIL Multithreading)**:
   * В скомпилированном бинарнике нет виртуальной машины и нет глобального замка интерпретатора.
-  * Потоки создаются как нативные системные потоки ядра (`CreateThread` в Windows / потоки в MyOS) и выполняются параллельно на разных физических ядрах CPU на 100% мощности.
+  * Потоки создаются как нативные системные потоки ядра (`CreateThread` в Windows, `sys_clone` в Linux) и выполняются параллельно на разных физических ядрах CPU на 100% мощности.
   * Поддержка аппаратных атомарных инструкций процессора (`lock add`, `lock sub`).
 * **Экстремальная компактность**:
   * Скомпилированные исполняемые файлы весят всего **512 байт – 3.5 КБ**!
-  * Не требуют установки Python, `python.exe` или сторонних DLL (`python315.dll`).
+  * Не требуют установки Python, `python.exe` или сторонних DLL/библиотек.
 * **Молниеносная скорость (Bare-Metal Speed)**:
   * Чистый x86_64 машинный код со скоростью C / C++ / FASM.
   * Числа Фибоначчи (N=40) — **0 миллисекунд**.
   * Решето Эратосфена (до 100 000 простых чисел) — **0 миллисекунд**.
   * 8 параллельных потоков на 2 000 000 атомарных операций — **47 миллисекунд**.
-* **Тройная целевая платформа**:
-  * `--target win64`: автономные 64-битные приложения Windows PE64 Console.
-  * `--target myos`: 64-битные плоские бинарные файлы для операционной системы MyOS 10.
+* **Полная кроссплатформенность (5 платформ)**:
+  * `--target win64`: автономные 64-битные приложения Windows PE64 Console (`.exe`).
   * `--target dll`: нативные динамические библиотеки Windows PE64 DLL (`.dll`) для моментального подключения в Python (`ctypes`) или C/C++.
+  * `--target linux`: нативные исполняемые файлы Linux x86-64 ELF64 (`.elf`) на прямых системных вызовах ядра Linux (`sys_write`, `sys_exit`, `sys_mmap`, `sys_nanosleep`).
+  * `--target macos` / `--target apple`: нативные автономные бинарники Apple macOS x86-64 Mach-O 64 (`.macho`) на вызовах Darwin BSD ядра.
+  * `--target myos`: 64-битные плоские бинарные файлы для операционной системы MyOS 10 с прямым выводом в VGA и COM1.
 * **Бандлер проектов (`pyfasm bundle`)**:
-  * Позволяет упаковывать комплексные проекты (например, `yt2005` с CustomTkinter, requests, yt-dlp) в нативный исполняемый файл `.exe`, который автоматически конфигурирует и запускает проект в режиме Free-Threaded (No-GIL)!
+  * Позволяет упаковывать комплексные проекты (например, `yt2005` с CustomTkinter, requests, yt-dlp, streamlink, twitch-dl) в нативный исполняемый файл `.exe`, который автоматически конфигурирует и запускает проект в режиме Free-Threaded (No-GIL)!
 
 ---
 
@@ -103,16 +104,22 @@ uv run pyfasm compile examples/01_hello.py --run
 # 2. Компиляция многопоточного теста:
 uv run pyfasm compile examples/04_multithread_parallel.py --run
 
-# 3. Компиляция бинарника для MyOS 10:
+# 3. Компиляция нативного исполняемого файла для Linux (ELF64):
+uv run pyfasm compile examples/01_hello.py -o hello_linux.elf --target linux
+
+# 4. Компиляция нативного исполняемого файла для Apple macOS (Mach-O 64):
+uv run pyfasm compile examples/01_hello.py -o hello_mac.macho --target macos
+
+# 5. Компиляция бинарника для MyOS 10 (Bare-Metal):
 uv run pyfasm compile examples/01_hello.py -o hello_myos.bin --target myos
 
-# 4. Просмотр сгенерированного ассемблерного кода FASM:
+# 6. Просмотр сгенерированного ассемблерного кода FASM:
 uv run pyfasm emit-asm examples/02_fibonacci.py
 
-# 5. Компиляция Python-модуля в нативную высокоскоростную DLL:
+# 7. Компиляция Python-модуля в нативную высокоскоростную DLL:
 uv run pyfasm compile my_kernel.py -o my_kernel.dll --target dll
 
-# 6. Упаковка комплексного проекта (например, yt2005) в нативный лаунчер:
+# 8. Упаковка комплексного проекта (например, yt2005) в нативный лаунчер:
 uv run pyfasm bundle "c:\proekts\yt2005" -o "c:\proekts\yt2005\yt2005.exe"
 ```
 

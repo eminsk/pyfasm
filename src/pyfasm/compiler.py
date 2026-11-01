@@ -46,6 +46,10 @@ class PyFasmCompiler:
                 out_bin = src.with_suffix(".exe")
             elif target == "dll":
                 out_bin = src.with_suffix(".dll")
+            elif target == "linux":
+                out_bin = src.with_suffix(".elf")
+            elif target in ("macos", "apple"):
+                out_bin = src.with_suffix(".macho")
             else:
                 out_bin = src.with_suffix(".bin")
         else:

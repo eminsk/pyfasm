@@ -190,5 +190,50 @@ def test_bundler_creates_native_launcher(tmp_path: Path):
     assert Path(bin_path).stat().st_size > 0
 
 
+def test_compile_linux_elf64(tmp_path: Path):
+    source = """
+def main() -> int:
+    print_str("Hello from Linux ELF64!")
+    print_newline()
+    return 0
+"""
+    src_file = tmp_path / "hello_linux.py"
+    src_file.write_text(source, encoding="utf-8")
+    out_elf = tmp_path / "hello_linux.elf"
+
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_elf), target="linux")
+
+    assert success, f"Linux ELF compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+    content = Path(bin_path).read_bytes()
+    # Check ELF magic: \x7fELF
+    assert content[:4] == b"\x7fELF", "Missing standard ELF header magic"
+    # Check 64-bit class
+    assert content[4] == 2, "Expected 64-bit ELF executable"
+
+
+def test_compile_macos_macho64(tmp_path: Path):
+    source = """
+def main() -> int:
+    print_str("Hello from Apple macOS Mach-O!")
+    print_newline()
+    return 0
+"""
+    src_file = tmp_path / "hello_mac.py"
+    src_file.write_text(source, encoding="utf-8")
+    out_macho = tmp_path / "hello_mac.macho"
+
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_macho), target="macos")
+
+    assert success, f"macOS Mach-O compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+    content = Path(bin_path).read_bytes()
+    # Check Mach-O 64-bit magic: 0xFEEDFACF (little endian: \xcf\xfa\xed\xfe)
+    assert content[:4] == b"\xcf\xfa\xed\xfe", "Missing Mach-O 64-bit header magic"
+
+
+
 
 

@@ -40,6 +40,12 @@ class X64CodeGen:
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_header
             self.emit_raw(get_win64_runtime_header(is_dll=(self.target == "dll")))
+        elif self.target == "linux":
+            from pyfasm.runtime_linux import get_linux_runtime_header
+            self.emit_raw(get_linux_runtime_header())
+        elif self.target in ("macos", "apple"):
+            from pyfasm.runtime_macos import get_macos_runtime_header
+            self.emit_raw(get_macos_runtime_header())
         else:
             from pyfasm.runtime_myos import get_myos_runtime_header
             self.emit_raw(get_myos_runtime_header())
@@ -58,6 +64,12 @@ class X64CodeGen:
                 fn_names = list(self.module.functions.keys())
                 self.emit_raw(get_win64_export_section("pyfasm_module.dll", fn_names))
             self.emit_raw(get_win64_runtime_imports())
+        elif self.target == "linux":
+            from pyfasm.runtime_linux import get_linux_runtime_code
+            self.emit_raw(get_linux_runtime_code())
+        elif self.target in ("macos", "apple"):
+            from pyfasm.runtime_macos import get_macos_runtime_code
+            self.emit_raw(get_macos_runtime_code())
         else:
             from pyfasm.runtime_myos import get_myos_runtime_code
             self.emit_raw(get_myos_runtime_code())
@@ -68,6 +80,12 @@ class X64CodeGen:
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_data
             self.emit_raw(get_win64_runtime_data())
+        elif self.target == "linux":
+            from pyfasm.runtime_linux import get_linux_runtime_data
+            self.emit_raw(get_linux_runtime_data())
+        elif self.target in ("macos", "apple"):
+            from pyfasm.runtime_macos import get_macos_runtime_data
+            self.emit_raw(get_macos_runtime_data())
         else:
             from pyfasm.runtime_myos import get_myos_runtime_data
             self.emit_raw(get_myos_runtime_data())
@@ -91,6 +109,10 @@ class X64CodeGen:
     def _generate_text_section(self) -> None:
         if self.target in ("win64", "dll"):
             self.emit_raw("section '.text' code readable executable")
+        elif self.target == "linux":
+            self.emit_raw("segment readable executable")
+        elif self.target in ("macos", "apple"):
+            self.emit_raw("align 16")
         else:
             self.emit_raw("align 16")
         self.emit_raw("")
@@ -101,18 +123,31 @@ class X64CodeGen:
         else:
             # Global Entry Point
             self.emit_raw("_pyfasm_entry_point:")
-            self.emit("sub rsp, 40", "shadow space for Windows x64 ABI")
+            self.emit("push rbp")
+            self.emit("mov rbp, rsp")
+            self.emit("sub rsp, 32", "shadow/local frame")
+            self.emit("and rsp, -16", "16-byte stack alignment")
             self.emit("call _pyfasm_init_io", "initialize runtime I/O")
 
             if self.module.main_func:
                 self.emit("call main", "execute user main()")
-                self.emit("mov ecx, eax", "exit code")
+                self.emit("mov ecx, eax", "exit code in ecx (Windows)")
+                self.emit("mov edi, eax", "exit code in edi (Linux/macOS)")
             else:
                 self.emit("xor ecx, ecx", "exit code 0")
+                self.emit("xor edi, edi", "exit code 0")
 
             if self.target == "win64":
                 self.emit("call [ExitProcess]")
+            elif self.target == "linux":
+                self.emit("mov rax, 60", "sys_exit")
+                self.emit("syscall")
+            elif self.target in ("macos", "apple"):
+                self.emit("mov rax, 0x2000001", "Darwin sys_exit")
+                self.emit("syscall")
             else:
+                self.emit("mov rsp, rbp")
+                self.emit("pop rbp")
                 self.emit("ret")
 
         self.emit_raw("")
