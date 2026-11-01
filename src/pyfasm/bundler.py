@@ -1,7 +1,8 @@
 """
 Project Bundler for PyFASM.
-Packages complex Python applications into a native Windows x64 launcher executable
-with smart virtual environment and No-GIL runtime detection.
+Packages complex Python applications into native standalone launcher executables
+for Windows (PE64), Linux (ELF64), and Apple macOS (Mach-O 64) with smart virtual
+environment and No-GIL runtime detection.
 """
 from __future__ import annotations
 import os
@@ -14,7 +15,7 @@ from pyfasm.fasm_runner import FasmRunner
 
 
 class ProjectBundler:
-    """Builds a high-performance native launcher using FASM for complex Python projects."""
+    """Builds high-performance native launchers using FASM for complex Python projects across Windows, Linux, and macOS."""
 
     def __init__(self, fasm_runner: Optional[FasmRunner] = None):
         self.fasm_runner = fasm_runner or FasmRunner()
@@ -23,16 +24,166 @@ class ProjectBundler:
         self,
         entry_script: str,
         is_gui: bool = True,
-        app_title: str = "PyFASM Application"
+        app_title: str = "PyFASM Application",
+        target: str = "win64",
     ) -> str:
         """
-        Generates clean FASM x64 assembly for a native process launcher.
+        Generates clean FASM x64 assembly for a native process launcher across target platforms.
+        Supported targets: 'win64', 'linux', 'macos' / 'apple'.
         """
-        subsystem = "GUI 5.0" if is_gui else "console 5.0"
-
-        # Escape paths for assembly
-        script_escaped = entry_script.replace("\\", "\\\\")
+        target_norm = target.lower()
         proj_dir_path = Path(entry_script).parent
+        script_posix = str(entry_script).replace("\\", "/")
+        proj_dir_posix = str(proj_dir_path).replace("\\", "/")
+
+        # Check if project uses free-threaded Python build
+        is_freethreaded = False
+        pyver_file = proj_dir_path / ".python-version"
+        if pyver_file.exists():
+            try:
+                content = pyver_file.read_text(encoding="utf-8").lower()
+                if "freethreaded" in content or "t-windows" in content or "t-linux" in content:
+                    is_freethreaded = True
+            except Exception:
+                pass
+
+        gil_arg = "-X gil=0 " if is_freethreaded else ""
+
+        # Linux ELF64 Launcher
+        if target_norm == "linux":
+            return f"""; ============================================================
+; PyFASM Native Project Launcher (Linux ELF64 Syscall Engine)
+; ============================================================
+format ELF64 executable 3
+entry start
+
+segment readable writeable
+    work_dir        db '{proj_dir_posix}', 0
+    py_path         db '/usr/bin/env', 0
+    py_arg0         db 'python3', 0
+    py_arg1         db '{script_posix}', 0
+    align 8
+    argv            dq py_arg0, py_arg1, 0
+    env_unbuf       db 'PYTHONUNBUFFERED=1', 0
+    align 8
+    envp            dq env_unbuf, 0
+
+segment readable executable
+start:
+    ; sys_chdir (rax=80, rdi=work_dir)
+    mov     rax, 80
+    lea     rdi, [work_dir]
+    syscall
+
+    ; sys_execve (rax=59, rdi=py_path, rsi=argv, rdx=envp)
+    mov     rax, 59
+    lea     rdi, [py_path]
+    lea     rsi, [argv]
+    lea     rdx, [envp]
+    syscall
+
+    ; Fallback: exit(1) if execve fails
+    mov     rax, 60
+    mov     rdi, 1
+    syscall
+"""
+
+        # Apple macOS Mach-O 64 Launcher
+        if target_norm in ("macos", "apple"):
+            return f"""; ============================================================
+; PyFASM Native Project Launcher (Apple macOS Mach-O 64 Engine)
+; ============================================================
+format binary as 'macho'
+use64
+
+mach_header:
+    dd 0xFEEDFACF           ; magic: MH_MAGIC_64
+    dd 0x01000007           ; cputype: CPU_TYPE_X86_64
+    dd 0x80000003           ; cpusubtype
+    dd 0x00000002           ; filetype: MH_EXECUTE
+    dd 2                    ; ncmds
+    dd sizeof_cmds          ; sizeofcmds
+    dd 0x00200001           ; flags: MH_NOUNDEFS | MH_PIE
+    dd 0                    ; reserved
+
+commands_start:
+lc_segment_text:
+    dd 0x19                 ; cmd: LC_SEGMENT_64
+    dd 72 + 80              ; cmdsize
+    db '__TEXT', 0,0,0,0,0,0,0,0,0,0 ; segname
+    dq 0x100000000          ; vmaddr
+    dq 0x10000              ; vmsize
+    dq 0                    ; fileoff
+    dq file_size            ; filesize
+    dd 7                    ; maxprot
+    dd 5                    ; initprot
+    dd 1                    ; nsects
+    dd 0                    ; flags
+
+sect_text:
+    db '__text', 0,0,0,0,0,0,0,0,0,0 ; sectname
+    db '__TEXT', 0,0,0,0,0,0,0,0,0,0 ; segname
+    dq 0x100000000 + code_start ; addr
+    dq code_size            ; size
+    dd code_start           ; offset
+    dd 4                    ; align
+    dd 0                    ; reloff
+    dd 0                    ; nreloc
+    dd 0x80000400           ; flags
+    dd 0                    ; reserved1
+    dd 0                    ; reserved2
+    dd 0                    ; reserved3
+
+lc_unixthread:
+    dd 0x5                  ; cmd: LC_UNIXTHREAD
+    dd 16 + 168             ; cmdsize
+    dd 4                    ; flavor: x86_THREAD_STATE64
+    dd 42                   ; count
+    dq 0,0,0,0,0,0,0,0      ; registers
+    dq 0,0,0,0,0,0,0,0
+    dq 0x100000000 + start  ; rip
+    dq 0                    ; rflags
+
+sizeof_cmds = $ - commands_start
+
+align 16
+code_start = $ - mach_header
+
+work_dir        db '{proj_dir_posix}', 0
+py_path         db '/usr/bin/env', 0
+py_arg0         db 'python3', 0
+py_arg1         db '{script_posix}', 0
+align 8
+argv            dq py_arg0, py_arg1, 0
+env_unbuf       db 'PYTHONUNBUFFERED=1', 0
+align 8
+envp            dq env_unbuf, 0
+
+start:
+    ; sys_chdir (rax=0x200000C, rdi=work_dir)
+    mov     rax, 0x200000C
+    lea     rdi, [work_dir]
+    syscall
+
+    ; sys_execve (rax=0x200003B, rdi=py_path, rsi=argv, rdx=envp)
+    mov     rax, 0x200003B
+    lea     rdi, [py_path]
+    lea     rsi, [argv]
+    lea     rdx, [envp]
+    syscall
+
+    ; sys_exit (rax=0x2000001, rdi=1)
+    mov     rax, 0x2000001
+    mov     rdi, 1
+    syscall
+
+code_size = $ - code_start
+file_size = $ - mach_header
+"""
+
+        # Windows PE64 Launcher (Default)
+        subsystem = "GUI 5.0" if is_gui else "console 5.0"
+        script_escaped = entry_script.replace("\\", "\\\\")
         proj_dir = str(proj_dir_path).replace("\\", "\\\\")
 
         # Locate venv python
@@ -52,23 +203,10 @@ class ProjectBundler:
                 uv_path = "uv"
         uv_escaped = str(uv_path).replace("\\", "\\\\")
 
-        # Check if project uses free-threaded Python build
-        is_freethreaded = False
-        pyver_file = proj_dir_path / ".python-version"
-        if pyver_file.exists():
-            try:
-                content = pyver_file.read_text(encoding="utf-8").lower()
-                if "freethreaded" in content or "t-windows" in content:
-                    is_freethreaded = True
-            except Exception:
-                pass
-
-        gil_arg = "-X gil=0 " if is_freethreaded else ""
-
         has_venv = bool(venv_escaped)
 
         return f"""; ============================================================
-; PyFASM Native Project Bootstrapper & Launcher
+; PyFASM Native Project Bootstrapper & Launcher (Windows PE64)
 ; ============================================================
 format PE64 {subsystem}
 entry start
@@ -200,17 +338,19 @@ section '.idata' import data readable writeable
         project_dir: str,
         entry_script: Optional[str] = None,
         output_exe: Optional[str] = None,
-        is_gui: bool = True
+        is_gui: bool = True,
+        target: str = "win64",
     ) -> Tuple[bool, str, str]:
         """
-        Bundles a project into a standalone launcher executable.
+        Bundles a project into a standalone launcher executable for the specified target.
+        Supported targets: 'win64', 'linux', 'macos' / 'apple'.
         Returns (success: bool, output_binary_path: str, log_message: str).
         """
         proj_path = Path(project_dir).resolve()
         if not proj_path.exists():
             return False, "", f"Project directory not found: {project_dir}"
 
-        # Detect entry script if not provided (main.py has highest priority)
+        # Detect entry script if not provided
         if not entry_script:
             candidates = [
                 "main.py",
@@ -229,15 +369,29 @@ section '.idata' import data readable writeable
             return False, "", f"Could not determine entry script in {project_dir}"
 
         entry_path = Path(entry_script).resolve()
+
+        # Determine target and output extension
+        target_norm = target.lower()
         if not output_exe:
-            out_bin = proj_path / f"{proj_path.name}.exe"
+            if target_norm == "linux":
+                ext = ".elf"
+            elif target_norm in ("macos", "apple"):
+                ext = ".macho"
+            else:
+                ext = ".exe"
+            out_bin = proj_path / f"{proj_path.name}{ext}"
         else:
             out_bin = Path(output_exe).resolve()
+            if out_bin.suffix.lower() == ".elf":
+                target_norm = "linux"
+            elif out_bin.suffix.lower() == ".macho":
+                target_norm = "macos"
 
         asm_content = self.generate_launcher_asm(
             entry_script=str(entry_path),
             is_gui=is_gui,
-            app_title=proj_path.name
+            app_title=proj_path.name,
+            target=target_norm,
         )
 
         asm_file = out_bin.with_suffix(".asm")

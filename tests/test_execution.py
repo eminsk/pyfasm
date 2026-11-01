@@ -183,11 +183,49 @@ def test_bundler_creates_native_launcher(tmp_path: Path):
     from pyfasm.bundler import ProjectBundler
     compiler = PyFasmCompiler()
     bundler = ProjectBundler(compiler.fasm_runner)
-    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_exe), is_gui=False)
+    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_exe), is_gui=False, target="win64")
 
     assert success, f"Bundler failed:\n{log}"
     assert Path(bin_path).exists()
     assert Path(bin_path).stat().st_size > 0
+
+
+def test_bundler_creates_linux_launcher(tmp_path: Path):
+    proj_dir = tmp_path / "mock_linux_proj"
+    proj_dir.mkdir()
+    entry_file = proj_dir / "main.py"
+    entry_file.write_text("print('Hello Linux App')", encoding="utf-8")
+
+    out_elf = proj_dir / "app_launcher.elf"
+
+    from pyfasm.bundler import ProjectBundler
+    compiler = PyFasmCompiler()
+    bundler = ProjectBundler(compiler.fasm_runner)
+    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_elf), target="linux")
+
+    assert success, f"Bundler failed:\n{log}"
+    assert Path(bin_path).exists()
+    content = Path(bin_path).read_bytes()
+    assert content[:4] == b"\x7fELF", "Expected valid ELF header"
+
+
+def test_bundler_creates_macos_launcher(tmp_path: Path):
+    proj_dir = tmp_path / "mock_mac_proj"
+    proj_dir.mkdir()
+    entry_file = proj_dir / "main.py"
+    entry_file.write_text("print('Hello Mac App')", encoding="utf-8")
+
+    out_macho = proj_dir / "app_launcher.macho"
+
+    from pyfasm.bundler import ProjectBundler
+    compiler = PyFasmCompiler()
+    bundler = ProjectBundler(compiler.fasm_runner)
+    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_macho), target="macos")
+
+    assert success, f"Bundler failed:\n{log}"
+    assert Path(bin_path).exists()
+    content = Path(bin_path).read_bytes()
+    assert content[:4] == b"\xcf\xfa\xed\xfe", "Expected valid Mach-O 64-bit header"
 
 
 def test_compile_linux_elf64(tmp_path: Path):
@@ -232,8 +270,3 @@ def main() -> int:
     content = Path(bin_path).read_bytes()
     # Check Mach-O 64-bit magic: 0xFEEDFACF (little endian: \xcf\xfa\xed\xfe)
     assert content[:4] == b"\xcf\xfa\xed\xfe", "Missing Mach-O 64-bit header magic"
-
-
-
-
-

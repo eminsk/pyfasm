@@ -35,8 +35,9 @@ def main() -> int:
     p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 launcher executable")
     p_bundle.add_argument("project_dir", help="Path to Python project directory")
     p_bundle.add_argument("-e", "--entry", help="Path to main entry script (default: auto-detected)")
-    p_bundle.add_argument("-o", "--output", help="Path to output executable (.exe)")
+    p_bundle.add_argument("-o", "--output", help="Path to output executable (.exe, .elf, .macho)")
     p_bundle.add_argument("--console", action="store_true", help="Build console launcher instead of GUI (shows stdout/stderr)")
+    p_bundle.add_argument("--target", choices=["win64", "linux", "macos", "apple"], default="win64", help="Target OS platform for launcher (win64, linux, macos)")
 
     args = parser.parse_args()
     compiler = PyFasmCompiler()
@@ -48,7 +49,8 @@ def main() -> int:
             project_dir=args.project_dir,
             entry_script=args.entry,
             output_exe=args.output,
-            is_gui=not args.console
+            is_gui=not args.console,
+            target=args.target,
         )
 
         if not success:
