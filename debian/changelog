@@ -1,0 +1,6 @@
+python3-pyfasm (0.1.0-1) stable; urgency=medium
+
+  * Initial release of PyFASM for Debian/Ubuntu APT.
+  * Cross-platform Python to pure x86_64 FASM native compiler.
+
+ -- eminsk <M_N_N@tut.by>  Sat, 31 Oct 2026 22:15:00 -0400
