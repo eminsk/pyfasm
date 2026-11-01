@@ -488,8 +488,14 @@ section '.idata' import data readable writeable
             payload_path = out_bin.with_suffix(".zip")
             with zipfile.ZipFile(payload_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 # 1. Add all .py files and configs
-                skip_dirs = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".vscode"}
-                skip_exts = {".mp4", ".mkv", ".avi", ".webm", ".ts", ".iso", ".zip", ".tar", ".gz", ".log", ".tmp"}
+                skip_dirs = {
+                    ".git", ".venv", "venv", "__pycache__", ".pytest_cache",
+                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode"
+                }
+                skip_exts = {
+                    ".mp4", ".mkv", ".avi", ".webm", ".ts", ".iso", ".zip",
+                    ".tar", ".gz", ".log", ".tmp", ".pyc", ".exe"
+                }
 
                 # Gather files
                 for root, dirs, files in os.walk(proj_path):
@@ -498,8 +504,7 @@ section '.idata' import data readable writeable
                         p = Path(root) / f
                         if p.suffix.lower() in skip_exts:
                             continue
-                        # Skip huge json info dumps if any
-                        if f.endswith(".info.json") and p.stat().st_size > 500_000:
+                        if f.endswith(".info.json"):
                             continue
                         # Skip own output binary
                         if p.resolve() == out_bin.resolve() or p.resolve() == payload_path.resolve():
