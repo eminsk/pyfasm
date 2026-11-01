@@ -79,6 +79,10 @@ class X64CodeGen:
             bytes_str = ", ".join(escaped_bytes)
             self.emit_raw(f"    {slit.label} db {bytes_str}")
 
+        # Emit user float literals
+        for flit in self.module.float_literals:
+            self.emit_raw(f"    {flit.label} dq {flit.value}")
+
         self.emit_raw("")
 
     def _generate_text_section(self) -> None:
@@ -340,8 +344,15 @@ class X64CodeGen:
             elif expr.value is None:
                 self.emit("xor eax, eax")
             elif isinstance(expr.value, float):
-                # Float as integer bitcast or 0 for now
-                self.emit(f"mov rax, {int(expr.value)}")
+                flabel = ""
+                for flit in self.module.float_literals:
+                    if abs(flit.value - expr.value) < 1e-12:
+                        flabel = flit.label
+                        break
+                if flabel:
+                    self.emit(f"mov rax, [{flabel}]", f"float {expr.value}")
+                else:
+                    self.emit("xor eax, eax")
 
         elif isinstance(expr, ast.Name):
             var = self.current_func.local_vars.get(expr.id)
@@ -443,6 +454,38 @@ class X64CodeGen:
                 self.emit("mov rcx, rax")
                 self.emit("call _pyfasm_print_int")
                 self.emit("call _pyfasm_print_newline")
+            return
+
+        if func_name == "print_float":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("movq xmm0, rax")
+                self.emit("call _pyfasm_print_float")
+                self.emit("call _pyfasm_print_newline")
+            return
+
+        if func_name == "print_char":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_print_char")
+            return
+
+        if func_name in ("len", "str_len"):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_str_len")
+            return
+
+        if func_name == "file_write":
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("push rax")
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("pop rdx")
+                self.emit("call _pyfasm_file_write")
             return
 
         if func_name == "print_str":

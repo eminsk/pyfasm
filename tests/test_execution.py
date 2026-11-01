@@ -109,3 +109,33 @@ def main() -> int:
     assert Path(bin_path).exists()
     assert Path(bin_path).stat().st_size > 0
 
+
+def test_end_to_end_float_and_strlen(tmp_path: Path):
+    source = """
+def main() -> int:
+    msg: str = "PyFASM is ultra fast!"
+    length = len(msg)
+    print(length)
+
+    pi = 3.141592
+    print_float(pi)
+    return 0
+"""
+    src_file = tmp_path / "test_float.py"
+    src_file.write_text(source, encoding="utf-8")
+    out_exe = tmp_path / "test_float.exe"
+
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+
+    assert success, f"Compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+
+    res = subprocess.run([bin_path], capture_output=True, text=True)
+    assert res.returncode == 0
+    # len("PyFASM is ultra fast!") = 21
+    assert "21" in res.stdout
+    # 3.141592
+    assert "3." in res.stdout
+
+

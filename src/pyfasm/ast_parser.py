@@ -35,19 +35,28 @@ class StringLiteral:
 
 
 @dataclass
+class FloatLiteral:
+    label: str
+    value: float
+
+
+@dataclass
 class ParsedModule:
     functions: Dict[str, FunctionSymbol] = field(default_factory=dict)
     string_literals: List[StringLiteral] = field(default_factory=list)
+    float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
     main_func: Optional[FunctionSymbol] = None
 
 
 class AstAnalyzer:
-    """Extracts function signatures, local variables, and string literals."""
+    """Extracts function signatures, local variables, and string/float literals."""
 
     def __init__(self):
         self.strings: List[StringLiteral] = []
+        self.floats: List[FloatLiteral] = []
         self._str_counter = 0
+        self._flt_counter = 0
 
     def get_or_create_string(self, text: str) -> str:
         for s in self.strings:
@@ -58,16 +67,29 @@ class AstAnalyzer:
         self.strings.append(StringLiteral(label=label, value=text))
         return label
 
+    def get_or_create_float(self, val: float) -> str:
+        for f in self.floats:
+            if abs(f.value - val) < 1e-12:
+                return f.label
+        self._flt_counter += 1
+        label = f"_flt_lit_{self._flt_counter}"
+        self.floats.append(FloatLiteral(label=label, value=val))
+        return label
+
     def parse_source(self, source_code: str) -> ParsedModule:
         tree = ast.parse(source_code)
         module = ParsedModule()
 
-        # First pass: find string literals across the whole AST
+        # First pass: find string and float constants across the AST
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                self.get_or_create_string(node.value)
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, str):
+                    self.get_or_create_string(node.value)
+                elif isinstance(node.value, float):
+                    self.get_or_create_float(node.value)
 
         module.string_literals = self.strings
+        module.float_literals = self.floats
 
         # Second pass: extract functions
         for stmt in tree.body:
