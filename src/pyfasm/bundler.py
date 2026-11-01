@@ -522,7 +522,7 @@ section '.idata' import data readable writeable
                     skip_dirs.update({".venv", "venv"})
                 skip_exts = {
                     ".mp4", ".mkv", ".avi", ".webm", ".ts", ".iso", ".zip",
-                    ".tar", ".gz", ".log", ".tmp", ".pyc", ".exe"
+                    ".tar", ".gz", ".log", ".tmp", ".pyc", ".exe", ".pdb", ".obj", ".o", ".lib", ".a", ".map", ".bak", ".temp"
                 }
 
                 # Gather files
@@ -622,3 +622,4 @@ section '.idata' import data readable writeable
                 pass
 
         return True, str(out_bin), log
+
