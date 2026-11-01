@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "C:\proekts\FASM"
-          Invoke-WebRequest -Uri "https://flatassembler.net/fasmw17332.zip" -OutFile "$env:TEMP\fasm.zip"
+          curl.exe -L "https://flatassembler.net/fasmw17332.zip" -o "$env:TEMP\fasm.zip"
           Expand-Archive -Path "$env:TEMP\fasm.zip" -DestinationPath "C:\proekts\FASM" -Force
           Write-Output "C:\proekts\FASM" >> $env:GITHUB_PATH
 
