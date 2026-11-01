@@ -21,7 +21,7 @@ def main() -> int:
     p_compile = subparsers.add_parser("compile", help="Compile a Python file to native x64 executable")
     p_compile.add_argument("source", help="Path to input Python source file (.py)")
     p_compile.add_argument("-o", "--output", help="Path to output binary (.exe or .bin)")
-    p_compile.add_argument("--target", choices=["win64", "myos"], default="win64", help="Target OS platform")
+    p_compile.add_argument("--target", choices=["win64", "myos", "dll"], default="win64", help="Target OS platform (win64, myos, dll)")
     p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
 
@@ -29,10 +29,36 @@ def main() -> int:
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
     p_asm.add_argument("source", help="Path to input Python source file (.py)")
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
-    p_asm.add_argument("--target", choices=["win64", "myos"], default="win64", help="Target OS platform")
+    p_asm.add_argument("--target", choices=["win64", "myos", "dll"], default="win64", help="Target OS platform")
+
+    # Subcommand: bundle
+    p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project (like yt2005) into a native x64 launcher executable")
+    p_bundle.add_argument("project_dir", help="Path to Python project directory")
+    p_bundle.add_argument("-e", "--entry", help="Path to main entry script (default: auto-detected)")
+    p_bundle.add_argument("-o", "--output", help="Path to output executable (.exe)")
+    p_bundle.add_argument("--console", action="store_true", help="Build console launcher instead of GUI (shows stdout/stderr)")
 
     args = parser.parse_args()
     compiler = PyFasmCompiler()
+
+    if args.command == "bundle":
+        from pyfasm.bundler import ProjectBundler
+        bundler = ProjectBundler(compiler.fasm_runner)
+        success, out_bin, log = bundler.bundle(
+            project_dir=args.project_dir,
+            entry_script=args.entry,
+            output_exe=args.output,
+            is_gui=not args.console
+        )
+
+        if not success:
+            print(f"[PyFASM ERROR] Project bundling failed:\n{log}", file=sys.stderr)
+            return 1
+
+        print(f"[PyFASM SUCCESS] Project bundled into native executable: {out_bin}")
+        if log:
+            print(f"FASM log: {log}")
+        return 0
 
     if args.command == "compile":
         success, out_bin, log = compiler.compile_file(

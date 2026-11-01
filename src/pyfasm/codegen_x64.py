@@ -37,9 +37,9 @@ class X64CodeGen:
         self.lines = []
 
         # 1. Target Header
-        if self.target == "win64":
+        if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_header
-            self.emit_raw(get_win64_runtime_header())
+            self.emit_raw(get_win64_runtime_header(is_dll=(self.target == "dll")))
         else:
             from pyfasm.runtime_myos import get_myos_runtime_header
             self.emit_raw(get_myos_runtime_header())
@@ -50,10 +50,13 @@ class X64CodeGen:
         # 3. Text Section (Entry point and user functions)
         self._generate_text_section()
 
-        # 4. Runtime Routines
-        if self.target == "win64":
-            from pyfasm.runtime_win64 import get_win64_runtime_code, get_win64_runtime_imports
+        # 4. Runtime Routines and Exports
+        if self.target in ("win64", "dll"):
+            from pyfasm.runtime_win64 import get_win64_runtime_code, get_win64_runtime_imports, get_win64_export_section
             self.emit_raw(get_win64_runtime_code())
+            if self.target == "dll":
+                fn_names = list(self.module.functions.keys())
+                self.emit_raw(get_win64_export_section("pyfasm_module.dll", fn_names))
             self.emit_raw(get_win64_runtime_imports())
         else:
             from pyfasm.runtime_myos import get_myos_runtime_code
@@ -62,7 +65,7 @@ class X64CodeGen:
         return "\n".join(self.lines)
 
     def _generate_data_section(self) -> None:
-        if self.target == "win64":
+        if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_data
             self.emit_raw(get_win64_runtime_data())
         else:
@@ -86,27 +89,31 @@ class X64CodeGen:
         self.emit_raw("")
 
     def _generate_text_section(self) -> None:
-        if self.target == "win64":
+        if self.target in ("win64", "dll"):
             self.emit_raw("section '.text' code readable executable")
         else:
             self.emit_raw("align 16")
         self.emit_raw("")
 
-        # Global Entry Point
-        self.emit_raw("_pyfasm_entry_point:")
-        self.emit("sub rsp, 40", "shadow space for Windows x64 ABI")
-        self.emit("call _pyfasm_init_io", "initialize runtime I/O")
-
-        if self.module.main_func:
-            self.emit("call main", "execute user main()")
-            self.emit("mov ecx, eax", "exit code")
+        if self.target == "dll":
+            from pyfasm.runtime_win64 import get_win64_dll_entry
+            self.emit_raw(get_win64_dll_entry())
         else:
-            self.emit("xor ecx, ecx", "exit code 0")
+            # Global Entry Point
+            self.emit_raw("_pyfasm_entry_point:")
+            self.emit("sub rsp, 40", "shadow space for Windows x64 ABI")
+            self.emit("call _pyfasm_init_io", "initialize runtime I/O")
 
-        if self.target == "win64":
-            self.emit("call [ExitProcess]")
-        else:
-            self.emit("ret")
+            if self.module.main_func:
+                self.emit("call main", "execute user main()")
+                self.emit("mov ecx, eax", "exit code")
+            else:
+                self.emit("xor ecx, ecx", "exit code 0")
+
+            if self.target == "win64":
+                self.emit("call [ExitProcess]")
+            else:
+                self.emit("ret")
 
         self.emit_raw("")
 

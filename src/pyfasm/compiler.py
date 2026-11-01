@@ -44,6 +44,8 @@ class PyFasmCompiler:
         if not output_binary:
             if target == "win64":
                 out_bin = src.with_suffix(".exe")
+            elif target == "dll":
+                out_bin = src.with_suffix(".dll")
             else:
                 out_bin = src.with_suffix(".bin")
         else:

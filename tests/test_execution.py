@@ -139,3 +139,56 @@ def main() -> int:
     assert "3." in res.stdout
 
 
+def test_end_to_end_dll_compilation_and_ctypes(tmp_path: Path):
+    source = """
+def compute_kernel(x: int, y: int) -> int:
+    return (x * 3) + (y * 7)
+
+def get_magic_number() -> int:
+    return 777
+"""
+    src_file = tmp_path / "math_kernel.py"
+    src_file.write_text(source, encoding="utf-8")
+    out_dll = tmp_path / "math_kernel.dll"
+
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), str(out_dll), target="dll")
+
+    assert success, f"DLL compilation failed:\n{log}"
+    assert Path(bin_path).exists()
+
+    # Load with ctypes and test
+    import ctypes
+    lib = ctypes.CDLL(str(bin_path))
+
+    lib.compute_kernel.argtypes = [ctypes.c_int64, ctypes.c_int64]
+    lib.compute_kernel.restype = ctypes.c_int64
+    res1 = lib.compute_kernel(10, 20)
+    # 10*3 + 20*7 = 30 + 140 = 170
+    assert res1 == 170
+
+    lib.get_magic_number.restype = ctypes.c_int64
+    res2 = lib.get_magic_number()
+    assert res2 == 777
+
+
+def test_bundler_creates_native_launcher(tmp_path: Path):
+    proj_dir = tmp_path / "mock_project"
+    proj_dir.mkdir()
+    entry_file = proj_dir / "main.py"
+    entry_file.write_text("print('Hello from bundled app')", encoding="utf-8")
+
+    out_exe = proj_dir / "app_launcher.exe"
+
+    from pyfasm.bundler import ProjectBundler
+    compiler = PyFasmCompiler()
+    bundler = ProjectBundler(compiler.fasm_runner)
+    success, bin_path, log = bundler.bundle(str(proj_dir), str(entry_file), str(out_exe), is_gui=False)
+
+    assert success, f"Bundler failed:\n{log}"
+    assert Path(bin_path).exists()
+    assert Path(bin_path).stat().st_size > 0
+
+
+
+

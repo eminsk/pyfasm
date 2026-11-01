@@ -5,8 +5,14 @@ Provides essential I/O, memory, threading, and atomic operations with strict x64
 from __future__ import annotations
 
 
-def get_win64_runtime_header() -> str:
+def get_win64_runtime_header(is_dll: bool = False) -> str:
     """Returns the FASM PE64 header and inclusion directives."""
+    if is_dll:
+        return """format PE64 DLL
+entry DllEntryPoint
+
+include 'win64a.inc'
+"""
     return """format PE64 console 5.0
 entry _pyfasm_entry_point
 
@@ -359,6 +365,30 @@ _pyfasm_atomic_sub:
     lock sub qword [rcx], rdx
     mov     rax, [rcx]
     ret
+"""
+
+
+def get_win64_dll_entry() -> str:
+    return """
+proc DllEntryPoint hinstDLL, fdwReason, lpvReserved
+    mov eax, 1
+    ret
+endp
+"""
+
+
+def get_win64_export_section(dll_name: str, function_names: list[str]) -> str:
+    """Emits the PE64 .edata export section."""
+    if not function_names:
+        return ""
+    exports = []
+    for fn in function_names:
+        exports.append(f"           {fn}, '{fn}'")
+    exports_str = ", \\\n".join(exports)
+    return f"""
+section '.edata' export data readable
+    export '{dll_name}', \\
+{exports_str}
 """
 
 
