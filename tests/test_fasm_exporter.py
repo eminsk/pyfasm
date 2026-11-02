@@ -85,3 +85,33 @@ def test_fasm_exporter_project_bundle(tmp_path: Path):
     bat_content = (fasm_dir / "build.bat").read_text(encoding="ascii")
     assert f"{proj_dir.name}.asm" in bat_content
     assert f"{proj_dir.name}.zip" in bat_content
+
+
+def test_cli_docs(capsys):
+    from pyfasm.cli import main
+    import sys
+
+    # Test English docs
+    sys.argv = ["pyfasm", "docs"]
+    res = main()
+    assert res == 0
+    captured = capsys.readouterr()
+    assert "PyFASM64: Universal Python-to-Pure FASM" in captured.out
+    assert "What's New in v0.1.14" in captured.out
+
+    # Test Russian docs
+    sys.argv = ["pyfasm", "docs", "--ru"]
+    res_ru = main()
+    assert res_ru == 0
+    captured_ru = capsys.readouterr()
+    assert "PyFASM64: Универсальный нативный компилятор Python" in captured_ru.out
+    assert "Что нового в v0.1.14" in captured_ru.out
+
+
+def test_fasm_modern_sdk_includes_bundled():
+    from pyfasm.fasm_runner import FasmRunner
+    runner = FasmRunner()
+    inc = Path(runner.include_path)
+    assert inc.exists() and inc.is_dir()
+    has_win64 = (inc / "WIN64A.INC").exists() or (inc / "win64a.inc").exists()
+    assert has_win64, f"WIN64A.INC not found in {inc}"

@@ -14,3 +14,5 @@ dist/
 scratch/
 /test_*
 !tests/
+!src/pyfasm/bin/*
+!tools/fasm/*

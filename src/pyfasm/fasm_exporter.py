@@ -17,6 +17,9 @@ class FasmExporter:
 
     @staticmethod
     def get_bundled_tools_dir() -> Path:
+        pkg_dir = Path(__file__).resolve().parent
+        if (pkg_dir / "include").exists():
+            return pkg_dir
         return Path(__file__).resolve().parents[2] / "tools" / "fasm"
 
     @classmethod
@@ -61,6 +64,8 @@ class FasmExporter:
         # 2. Copy include headers
         tools_dir = cls.get_bundled_tools_dir()
         inc_src = tools_dir / "INCLUDE"
+        if not inc_src.exists():
+            inc_src = tools_dir / "include"
         if not inc_src.exists() or not inc_src.is_dir():
             try:
                 from pyfasm.fasm_runner import FasmRunner

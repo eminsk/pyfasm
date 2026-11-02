@@ -1,5 +1,7 @@
 # PyFASM64: Universal Python-to-Pure FASM x86_64 Native Compiler
 
+> 🌐 **Language / Язык:** **English** | [🇷🇺 Русский (Russian Documentation)](README_RU.md)
+
 [![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![GitHub Release](https://img.shields.io/github/v/release/eminsk/pyfasm?style=flat&logo=github&logoColor=white&color=blue)](https://github.com/eminsk/pyfasm/releases)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
@@ -11,7 +13,7 @@
 [![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg?style=flat)](https://peps.python.org/pep-0703/)
 [![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
 [![Targets: Windows | Linux | macOS | DLL](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20DLL-purple.svg?style=flat)]()
-[![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64-red.svg?style=flat)](https://flatassembler.net)
+[![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64%20v1.73.36-red.svg?style=flat)](https://flatassembler.net)
 [![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
 [![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
@@ -22,6 +24,7 @@
 > - 🐛 **Found a bug, compiler issue, or edge case?** Please [Open an Issue](https://github.com/eminsk/pyfasm/issues) — bug reports and platform patches are tracked and resolved quickly!
 > - 💬 **Questions, cross-compilation ideas, or new architectures?** Join our [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
 > - ⭐ **Find PyFASM64 useful?** Give it a star on GitHub — it helps more developers discover the compiler!
+> - 📖 **Documentation:** Read online on GitHub, or use the CLI: `pyfasm docs` (English) or `pyfasm docs --ru` (Russian).
 > - ☕ **Support development (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
 
 **PyFASM64** (package: `pyfasm64`, legacy alias: `pyfasm`) is a high-performance cross-platform native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It generates tiny, self-contained standalone binaries with **zero runtime overhead**, **no virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
@@ -32,6 +35,29 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 > - **Dual CLI Commands**: Both `pyfasm64` and `pyfasm` commands are installed and supported out of the box.
 > - **Dual Python Imports**: Both `import pyfasm64` and `import pyfasm` work seamlessly.
 > - **Zero Breaking Changes**: All compiler options, multi-module imports, targets (`win64`, `linux`, `macos`, `dll`), benchmarks, and the native bundler operate with complete backward compatibility.
+
+---
+
+## What's New in v0.1.14: FASM Modern SDK Integration
+
+Starting with **v0.1.14**, PyFASM64 bundles and deeply integrates the **FASM Modern SDK** (`fasm-modern-sdk v1.73.36` and `fasmg v0.0.26`):
+
+1. **Self-Contained Compiler & Headers**:
+   - The official wheel packages contain all required FASM compiler binaries (`FASM.EXE`, `fasmg.exe`, `fasm.x64`, `fasm.darwin`, `fasm`) and standard Win64/Win32 includes (`win64a.inc`, `win32a.inc`, equates, macros).
+   - Zero configuration needed: no `INCLUDE` environment variable setup required.
+2. **Modern SDK Include Modules**:
+   - `ui_fluent.inc`: High-performance Modern Fluent Dark UI styling, owner-drawn controls, and smooth rounded cards.
+   - `json_fast.inc`: Zero-allocation SIMD-accelerated JSON parser.
+   - `net_https.inc`: Zero-dependency native WinINet/POSIX sockets HTTPS/TLS network client.
+   - `data_structures.inc`: Dynamic array vectors, string buffers, and hash tables.
+   - `syntax_color.inc`: Lexical tokenization and realtime syntax highlighting engine.
+3. **Unicode & UTF-8 / UTF-16LE Engine**:
+   - Integrated native runtime conversion (`_pyfasm_utf8_to_wide`), eliminating Windows Mojibake (corrupted Chinese characters in GUI labels, textboxes, and buttons).
+   - GUI control collision prevention: automatically reuses existing window handles to avoid duplicate listboxes or overlapping frames.
+4. **Built-in Interactive Documentation**:
+   - View English documentation: `pyfasm docs`
+   - View Russian documentation: `pyfasm docs --ru`
+   - Open documentation in markdown viewer/browser: `pyfasm docs --open`
 
 ---
 
@@ -93,7 +119,7 @@ PyFASM64 is architected from the ground up as a retargetable, zero-runtime compi
     └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘
               │                   │                   │
               └───────────────────┼───────────────────┘
-                                  ▼ (Bundled FASM Assembler)
+                                  ▼ (FASM Modern SDK Assembler v1.73.36)
               ┌───────────────────┼───────────────────┐
               ▼                   ▼                   ▼
     [ Windows PE64 .exe ]  [ Linux ELF64 .elf ] [ Apple Mach-O .macho ]
@@ -117,59 +143,6 @@ PyFASM64 is architected from the ground up as a retargetable, zero-runtime compi
 | **Memory Allocation** | `VirtualAlloc` (MEM_COMMIT) | `syscall` (rax = 9 `sys_mmap`) | `syscall` (rax = `0x20000C5`) |
 | **High-Precision Time**| `GetTickCount` / RDTSC | `sys_nanosleep` (35) / RDTSC | `sys_nanosleep` (`0x20000EB`) / RDTSC |
 | **Runtime Dependencies** | None (kernel32 only) | **Zero libc / Zero glibc** | **Zero libSystem / Zero dyld**|
-
----
-
-## Deep Dive: Supported OS Architectures
-
-### 1. Windows x86-64 Architecture (`--target win64`, `--target dll`)
-* **PE64 Header Structure**: PyFASM64 emits valid Portable Executable (PE32+) headers matching the Windows loader specification. The file contains `.text` (executable code), `.data` (writable static variables and strings), and `.idata` (Import Directory Table for `kernel32.dll`).
-* **Calling Convention**: Strictly adheres to the Microsoft x64 Calling Convention. The compiler automatically provisions the required 32-byte shadow space (home space) before every API call and ensures the stack pointer (`RSP`) is aligned to a 16-byte boundary prior to `call` instructions.
-* **Shared Libraries (`--target dll`)**: Emits proper Export Directory Tables with `IMAGE_FILE_DLL` characteristics, allowing Python modules compiled by PyFASM64 to be loaded instantly via Python's standard `ctypes.CDLL` or linked by C/C++ applications.
-
-### 2. Linux x86-64 Architecture (`--target linux`)
-* **ELF64 Executable Header**: Uses FASM's native `format ELF64 executable 3` targeting System V ABI without requiring external linkers (`ld`) or GCC.
-* **Pure Direct Syscalls**: Implements all system services through direct x86_64 `syscall` instructions:
-  * `sys_write` (rax = 1): Outputs text directly to stdout file descriptor (rdi = 1).
-  * `sys_exit` (rax = 60): Terminates the process cleanly with the return code in `rdi`.
-  * `sys_mmap` (rax = 9): Dynamically allocates memory pages with `PROT_READ | PROT_WRITE` and `MAP_PRIVATE | MAP_ANONYMOUS`.
-  * `sys_munmap` (rax = 11): Unmaps allocated pages back to the kernel.
-  * `sys_nanosleep` (rax = 35): High-precision thread sleep without external libraries.
-* **Universal Portability**: Because PyFASM64 does not link against `libc.so.6`, the generated binaries run unchanged on **any Linux distribution**, including Alpine Linux (musl), Ubuntu, Debian, Red Hat, Arch Linux, and container base images (`scratch`, `busybox`).
-
-### 3. Apple macOS x86-64 Architecture (`--target macos` / `--target apple`)
-* **Mach-O 64-bit Header**: Emits a compliant 64-bit Mach-O binary (`MH_MAGIC_64 = 0xFEEDFACF`) with `CPU_TYPE_X86_64` and `CPU_SUBTYPE_LIB64`.
-* **Direct Kernel Load Commands**: Employs `LC_SEGMENT_64` (defining the `__TEXT` segment and `__text` section) combined with `LC_UNIXTHREAD` to initialize the CPU state and register pointer (`RIP`) directly to the PyFASM64 entry point.
-* **Darwin BSD Syscall Class**: Darwin 64-bit syscalls utilize the BSD system call class mask `0x2000000`:
-  * `sys_write`: `rax = 0x2000004` (rdi = 1, rsi = buffer, rdx = length).
-  * `sys_exit`: `rax = 0x2000001` (rdi = exit code).
-  * `sys_mmap`: `rax = 0x20000C5` (anonymous private memory pages).
-  * `sys_nanosleep`: `rax = 0x20000EB` (thread sleep).
-* **Zero dyld Overhead**: Bypasses Apple's dynamic linker `dyld` and `libSystem.B.dylib` entirely, resulting in standalone executables that start instantaneously without security dyld-cache overhead.
-
----
-
-## Cross-Platform Project Bundler (`pyfasm64 bundle`)
-
-The PyFASM64 bundler creates native standalone launcher executables that package complex Python applications for **Windows**, **Linux**, and **Apple macOS**:
-
-```bash
-# Bundle for Windows (generates native PE64 app.exe):
-uv run pyfasm64 bundle ./my_app -o ./my_app/app.exe --target win64
-
-# Bundle for Linux (generates native ELF64 app.elf using direct sys_execve):
-uv run pyfasm64 bundle ./my_app -o ./my_app/app.elf --target linux
-
-# Bundle for Apple macOS (generates native Mach-O app.macho using Darwin syscalls):
-uv run pyfasm64 bundle ./my_app -o ./my_app/app.macho --target macos
-```
-
-*(Note: `pyfasm bundle ...` can be used interchangeably)*
-
-**How It Works**:
-1. **Virtual Environment Auto-Detection**: Inspects the project directory for `.venv`, locating local project virtual environments.
-2. **No-GIL / Free-Threaded Detection**: Checks `.python-version` and system configuration; if a free-threaded Python build (3.13t-3.16t) is detected, it automatically executes with `-X gil=0` to unlock true multicore parallelism.
-3. **Pure Native Launcher**: The launcher itself is an ultra-fast compiled binary (~350 bytes to 2.5 KB) that sets `PYTHONUNBUFFERED=1` and spawns the application process with zero startup latency.
 
 ---
 
@@ -234,7 +207,20 @@ uv sync
 
 Both `pyfasm64` and `pyfasm` CLI commands are available and identical in syntax and options:
 
-### 1. Compile and Run on Windows (PE64)
+### 1. View Built-in Documentation
+
+```bash
+# View primary English documentation:
+uv run pyfasm docs
+
+# View Russian documentation:
+uv run pyfasm docs --ru
+
+# Open in default markdown viewer / editor:
+uv run pyfasm docs --open
+```
+
+### 2. Compile and Run on Windows (PE64)
 
 ```bash
 # Compile to native Windows x64 .exe and execute immediately:
@@ -247,21 +233,21 @@ uv run pyfasm compile examples/01_hello.py --run
 uv run pyfasm64 compile examples/04_multithread_parallel.py --run
 ```
 
-### 2. Compile for Linux (ELF64)
+### 3. Compile for Linux (ELF64)
 
 ```bash
 # Generates native Linux x86-64 ELF executable using direct kernel syscalls:
 uv run pyfasm64 compile examples/01_hello.py -o hello_linux.elf --target linux
 ```
 
-### 3. Compile for Apple macOS (Mach-O 64)
+### 4. Compile for Apple macOS (Mach-O 64)
 
 ```bash
 # Generates native Apple macOS x86-64 Mach-O binary using Darwin BSD syscalls:
 uv run pyfasm64 compile examples/01_hello.py -o hello_mac.macho --target macos
 ```
 
-### 4. Compile Multi-Module Project into 1 Single Standalone Binary
+### 5. Compile Multi-Module Project into 1 Single Standalone Binary
 
 ```bash
 # Compiles an entire multi-file project into 1 standalone binary (auto-resolves all local imports):
@@ -271,16 +257,23 @@ uv run pyfasm64 compile ./my_project -o my_app.exe
 uv run pyfasm64 compile my_project/main.py -o my_app.exe
 ```
 
-### 5. Inspect Generated FASM Assembly
+### 6. Inspect Generated FASM Assembly
 
 ```bash
 uv run pyfasm64 emit-asm examples/02_fibonacci.py
 ```
 
-### 6. Compile to High-Performance Windows DLL
+### 7. Compile to High-Performance Windows DLL
 
 ```bash
 uv run pyfasm64 compile my_math.py -o my_math.dll --target dll
+```
+
+### 8. Export Full FASM Project Folder
+
+```bash
+# Exports assembly, headers, compiler, and 1-click build scripts into FASM/ directory:
+uv run pyfasm compile my_app.py --export-fasm
 ```
 
 ---
@@ -299,6 +292,7 @@ uv run pyfasm64 compile my_math.py -o my_math.dll --target dll
 | **Atomic Ops** | `atomic_add(ptr, val)`, `atomic_sub(ptr, val)` | Thread-safe atomic operations via CPU `lock` prefix |
 | **Console I/O** | `print()`, `print_int()`, `print_str()`, `print_newline()` | Low-level buffered stdout streaming |
 | **Timers & Sleep**| `get_tick_count()`, `sleep_ms(ms)` | High-precision timing and thread sleep |
+| **Unicode Strings**| `str` | Transparent UTF-8 to UTF-16LE conversion for Win32 GUI APIs |
 
 ---
 
@@ -324,14 +318,7 @@ uv run pytest
 ```
 
 ```text
-tests/test_bundler.py ......                                             [ 22%]
-tests/test_codegen.py ...                                                [ 33%]
-tests/test_execution.py .............                                    [ 81%]
-tests/test_fasm_exporter.py ..                                           [ 88%]
-tests/test_multithreading.py .                                           [ 92%]
-tests/test_parser.py .                                                   [ 96%]
-tests/test_types.py .                                                    [100%]
-============================== 27 passed in 1.69s ==============================
+============================= 48 passed in 6.37s ==============================
 ```
 
 Verified compatibility matrix:

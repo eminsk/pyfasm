@@ -41,6 +41,18 @@ Issues = "https://github.com/eminsk/pyfasm/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyfasm", "src/pyfasm64"]
+artifacts = [
+    "src/pyfasm/bin/*",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tools",
+    "README.md",
+    "README_RU.md",
+    "LICENSE",
+]
 
 [dependency-groups]
 dev = [

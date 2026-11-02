@@ -44,7 +44,57 @@ def main() -> int:
     p_bundle.add_argument("--dir-mode", action="store_true", help="Build directory-wrapper launcher instead of monolithic single-file")
     p_bundle.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
 
+    # Subcommand: docs
+    p_docs = subparsers.add_parser("docs", help="View PyFASM documentation (English by default, Russian via --ru)")
+    p_docs.add_argument("--ru", "--russian", action="store_true", help="Display Russian documentation instead of English")
+    p_docs.add_argument("--open", action="store_true", help="Open documentation file in default markdown viewer or editor")
+
     args = parser.parse_args()
+
+    if args.command == "docs":
+        doc_filename = "README_RU.md" if args.ru else "README.md"
+        cand_dirs = [
+            Path(__file__).resolve().parent,
+            Path(__file__).resolve().parents[2],
+            Path.cwd(),
+        ]
+        doc_path = None
+        for d in cand_dirs:
+            target = d / doc_filename
+            if target.exists():
+                doc_path = target
+                break
+
+        if not doc_path:
+            for d in cand_dirs:
+                target = d / "README.md"
+                if target.exists():
+                    doc_path = target
+                    break
+
+        if not doc_path:
+            print(f"[PyFASM ERROR] Documentation file {doc_filename} not found.", file=sys.stderr)
+            return 1
+
+        if args.open:
+            import os
+            try:
+                if os.name == "nt":
+                    os.startfile(str(doc_path))
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(doc_path)])
+                else:
+                    subprocess.run(["xdg-open", str(doc_path)])
+                print(f"[PyFASM] Opened documentation: {doc_path}")
+                return 0
+            except Exception as e:
+                print(f"[PyFASM ERROR] Failed to open {doc_path}: {e}", file=sys.stderr)
+                return 1
+
+        content = doc_path.read_text(encoding="utf-8")
+        print(content)
+        return 0
+
     compiler = PyFasmCompiler()
 
     if args.command == "bundle":

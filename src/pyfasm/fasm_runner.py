@@ -33,7 +33,34 @@ class FasmRunner:
         if explicit_path and os.path.exists(explicit_path):
             return str(Path(explicit_path).resolve())
 
-        # Check bundled repository tools/fasm
+        # 1. Check package bundled bin (e.g. site-packages/pyfasm/bin)
+        pkg_bin_dir = Path(__file__).resolve().parent / "bin"
+        if pkg_bin_dir.exists() and pkg_bin_dir.is_dir():
+            if os.name == "nt":
+                for cand_name in ("fasm.exe", "FASM.EXE"):
+                    cand = pkg_bin_dir / cand_name
+                    if cand.exists():
+                        return str(cand.resolve())
+            elif sys.platform == "darwin":
+                for cand_name in ("fasm.darwin", "fasm"):
+                    cand = pkg_bin_dir / cand_name
+                    if cand.exists():
+                        try:
+                            os.chmod(cand, 0o755)
+                        except Exception:
+                            pass
+                        return str(cand.resolve())
+            else:
+                for cand_name in ("fasm.x64", "fasm"):
+                    cand = pkg_bin_dir / cand_name
+                    if cand.exists():
+                        try:
+                            os.chmod(cand, 0o755)
+                        except Exception:
+                            pass
+                        return str(cand.resolve())
+
+        # 2. Check bundled repository tools/fasm
         repo_tools_dir = Path(__file__).resolve().parents[2] / "tools" / "fasm"
         if os.name == "nt":
             cand = repo_tools_dir / "FASM.EXE"
@@ -57,6 +84,22 @@ class FasmRunner:
                     except Exception:
                         pass
                     return str(cand.resolve())
+
+        # Check fasm-modern-sdk paths
+        sdk_candidates = [
+            Path("C:/proekts/fasm-modern-sdk/bin"),
+            Path("D:/proekts/asm/fasm-modern-sdk/bin"),
+            Path.home() / "fasm-modern-sdk" / "bin",
+        ]
+        for sdk_bin in sdk_candidates:
+            if sdk_bin.exists():
+                target_exe = "fasm.exe" if os.name == "nt" else ("fasm.darwin" if sys.platform == "darwin" else "fasm.x64")
+                cand = sdk_bin / target_exe
+                if cand.exists():
+                    return str(cand.resolve())
+                cand_plain = sdk_bin / "fasm"
+                if cand_plain.exists():
+                    return str(cand_plain.resolve())
 
         # Check system PATH
         path_which = shutil.which("fasm") or shutil.which("fasm.exe")
@@ -138,18 +181,38 @@ class FasmRunner:
         if explicit_include and os.path.exists(explicit_include):
             inc_path = Path(explicit_include).resolve()
         else:
-            # Check adjacent to fasm_path
             fasm_dir = Path(self.fasm_path).parent
-            candidate = fasm_dir / "INCLUDE"
-            if candidate.exists() and candidate.is_dir():
-                inc_path = candidate.resolve()
-            else:
-                # Check bundled tools/fasm/INCLUDE
-                bundled_inc = Path(__file__).resolve().parents[2] / "tools" / "fasm" / "INCLUDE"
-                if bundled_inc.exists() and bundled_inc.is_dir():
-                    inc_path = bundled_inc.resolve()
-                else:
-                    inc_path = fasm_dir.resolve()
+            pkg_inc = Path(__file__).resolve().parent / "include"
+            repo_inc = Path(__file__).resolve().parents[2] / "tools" / "fasm" / "INCLUDE"
+            candidates = [
+                pkg_inc,
+                fasm_dir / "INCLUDE",
+                fasm_dir / "include",
+                fasm_dir.parent / "include",
+                fasm_dir.parent / "include" / "core",
+                repo_inc,
+                Path("C:/proekts/fasm-modern-sdk/include"),
+                Path("D:/proekts/asm/fasm-modern-sdk/include"),
+                Path.cwd() / "asm" / "INCLUDE",
+                Path.home() / ".pyfasm" / "fasm" / "INCLUDE",
+                fasm_dir,
+            ]
+            inc_path = None
+            for cand in candidates:
+                if cand.exists() and cand.is_dir():
+                    if (cand / "WIN64A.INC").exists() or (cand / "win64a.inc").exists():
+                        inc_path = cand.resolve()
+                        break
+                    elif (cand / "core" / "WIN64A.INC").exists() or (cand / "core" / "win64a.inc").exists():
+                        inc_path = (cand / "core").resolve()
+                        break
+            if not inc_path:
+                for cand in candidates:
+                    if cand.exists() and cand.is_dir():
+                        inc_path = cand.resolve()
+                        break
+            if not inc_path:
+                inc_path = fasm_dir.resolve()
 
         if os.name != "nt" and inc_path.exists() and inc_path.is_dir():
             self._ensure_case_folded_include(inc_path)
