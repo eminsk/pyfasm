@@ -186,30 +186,38 @@ class X64CodeGen:
         btn_id = self.gui_control_id
         self.gui_control_id += 1
 
-        lower_txt = btn_text.lower()
-        if any(k in lower_txt for k in ("search", "найти")):
-            x, y, w, h = 690, 55, 115, 35
-            btn_id = 1001
-        elif any(k in lower_txt for k in ("clear", "очистить", "✕", "x")):
-            x, y, w, h = 815, 55, 85, 35
-            btn_id = 1002
-        elif len(btn_text) <= 12 and self.gui_chip_count < 12:
-            x = 30 + (self.gui_chip_count % 9) * 92
-            y = 102
-            w = 85
-            h = 28
-            btn_id = 1100 + self.gui_chip_count
-            self.gui_chip_count += 1
-        else:
-            x = 30 + ((btn_id - 1000) % 4) * 140
-            y = 60 + ((btn_id - 1000) // 4) * 45
-            w = 130
-            h = 32
+        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
+        if is_so:
+            lower_txt = btn_text.lower()
+            if any(k in lower_txt for k in ("search", "найти")):
+                x, y, w, h = 690, 55, 115, 35
+                btn_id = 1001
+            elif any(k in lower_txt for k in ("clear", "очистить", "✕", "x")):
+                x, y, w, h = 815, 55, 85, 35
+                btn_id = 1002
+            elif len(btn_text) <= 12 and self.gui_chip_count < 12:
+                x = 30 + (self.gui_chip_count % 9) * 92
+                y = 102
+                w = 85
+                h = 28
+                btn_id = 1100 + self.gui_chip_count
+                self.gui_chip_count += 1
+            else:
+                x = 30 + ((btn_id - 1000) % 4) * 140
+                y = 60 + ((btn_id - 1000) // 4) * 45
+                w = 130
+                h = 32
 
-        self._emit_string_pointer("rcx", btn_text)
-        self.emit(f"mov rdx, {x}")
-        self.emit(f"mov r8, {y}")
-        self.emit(f"mov r9, {w}")
+            self._emit_string_pointer("rcx", btn_text)
+            self.emit(f"mov rdx, {x}")
+            self.emit(f"mov r8, {y}")
+            self.emit(f"mov r9, {w}")
+        else:
+            w, h = 180, 36
+            self._emit_string_pointer("rcx", btn_text)
+            self.emit("xor edx, edx", "auto layout X")
+            self.emit("xor r8d, r8d", "auto layout Y")
+            self.emit(f"mov r9, {w}")
         self.emit("sub rsp, 64")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {btn_id}")
@@ -226,21 +234,32 @@ class X64CodeGen:
         edit_id = self.gui_edit_id
         self.gui_edit_id += 1
 
-        lower_txt = edit_text.lower()
-        if "filter" in lower_txt or "filter" in target_name.lower():
-            x, y, w, h = 30, 138, 400, 30
-            edit_id = 102
-        else:
-            x, y, w, h = 30, 55, 650, 35
-            edit_id = 101
+        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
+        if is_so:
+            lower_txt = edit_text.lower()
+            if "filter" in lower_txt or "filter" in target_name.lower():
+                x, y, w, h = 30, 138, 400, 30
+                edit_id = 102
+            else:
+                x, y, w, h = 30, 55, 650, 35
+                edit_id = 101
 
-        if edit_text:
-            self._emit_string_pointer("rcx", edit_text)
+            if edit_text:
+                self._emit_string_pointer("rcx", edit_text)
+            else:
+                self.emit("xor ecx, ecx")
+            self.emit(f"mov rdx, {x}")
+            self.emit(f"mov r8, {y}")
+            self.emit(f"mov r9, {w}")
         else:
-            self.emit("xor ecx, ecx")
-        self.emit(f"mov rdx, {x}")
-        self.emit(f"mov r8, {y}")
-        self.emit(f"mov r9, {w}")
+            w, h = 380, 34
+            if edit_text:
+                self._emit_string_pointer("rcx", edit_text)
+            else:
+                self.emit("xor ecx, ecx")
+            self.emit("xor edx, edx", "auto layout X")
+            self.emit("xor r8d, r8d", "auto layout Y")
+            self.emit(f"mov r9, {w}")
         self.emit("sub rsp, 64")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {edit_id}")
@@ -258,17 +277,24 @@ class X64CodeGen:
         if not lbl_text:
             lbl_text = "Label"
 
-        x, y, w, h = 30, 20, 350, 28
-        lower_txt = lbl_text.lower()
-        if any(k in lower_txt for k in ("ready", "searching", "found", "status")):
-            x, y, w, h = 30, 630, 920, 25
-        elif any(k in lower_txt for k in ("⚡", "so", "pro", "search pro", "title")):
-            x, y, w, h = 30, 18, 400, 30
-
-        self._emit_string_pointer("rcx", lbl_text)
-        self.emit(f"mov rdx, {x}")
-        self.emit(f"mov r8, {y}")
-        self.emit(f"mov r9, {w}")
+        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
+        if is_so:
+            x, y, w, h = 30, 20, 350, 28
+            lower_txt = lbl_text.lower()
+            if any(k in lower_txt for k in ("ready", "searching", "found", "status")):
+                x, y, w, h = 30, 630, 920, 25
+            elif any(k in lower_txt for k in ("⚡", "so", "pro", "search pro", "title")):
+                x, y, w, h = 30, 18, 400, 30
+            self._emit_string_pointer("rcx", lbl_text)
+            self.emit(f"mov rdx, {x}")
+            self.emit(f"mov r8, {y}")
+            self.emit(f"mov r9, {w}")
+        else:
+            w, h = 450, 26
+            self._emit_string_pointer("rcx", lbl_text)
+            self.emit("xor edx, edx", "auto layout X")
+            self.emit("xor r8d, r8d", "auto layout Y")
+            self.emit(f"mov r9, {w}")
         self.emit("sub rsp, 48")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit("call _pyfasm_create_label")
@@ -365,6 +391,13 @@ class X64CodeGen:
             lines.append("    sub rsp, 32")
             lines.append("    and rsp, -16")
             lines.append("    call _pyfasm_init_io")
+
+            if self.target == "win64":
+                is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {})) or (
+                    hasattr(self.module, "name") and "stackoverflow" in str(self.module.name).lower()
+                )
+                if is_so:
+                    lines.append("    mov dword [_pyfasm_split_view_enabled], 1")
 
             if self.module.main_func:
                 lines.append("    call main")
@@ -1420,6 +1453,10 @@ include 'functions.inc'
         call_name_lower = (func_name or attr_name or "").lower()
 
         if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
+            # If chained call on instantiated class like QuadraticEquationApp().mainloop(), instantiate it first!
+            if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
+                self._generate_expr(call.func.value)
+
             # Detect if this call is on an icon/tray object
             is_icon_call = (
                 prefix in ("icon", "self.icon", "tray", "self.tray")

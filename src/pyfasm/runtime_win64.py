@@ -109,7 +109,7 @@ section '.data' data readable writeable
     align 8
     _pyfasm_wnd_class_w     du 'PyFasmWindowClassW', 0
     _pyfasm_tray_class_w    du 'PyFasmTrayClassW', 0
-    _pyfasm_wnd_title_w     du 'Stack Overflow Search Pro', 0
+    _pyfasm_wnd_title_w     du 'PyFASM Application', 0
     _pyfasm_wnd_title_w_ptr dq _pyfasm_wnd_title_w
 
     szButtonClassW          du 'BUTTON', 0
@@ -122,6 +122,10 @@ section '.data' data readable writeable
     ; Dark Theme GDI Brushes & Attributes
     align 8
     _pyfasm_dark_mode_val   dd 1
+    _pyfasm_caption_color   dd 001A110Fh
+    _pyfasm_caption_text_color dd 00FFFFFFh
+    wszDarkModeExplorer     du 'DarkMode_Explorer', 0
+    _pyfasm_split_view_enabled dd 0
     _pyfasm_hbr_bg          dq 0 ; #0f111a
     _pyfasm_hbr_card        dq 0 ; #1d1f2e
     _pyfasm_hbr_input       dq 0 ; #141620
@@ -1928,20 +1932,30 @@ _pyfasm_create_window:
 
     call    _pyfasm_init_gui
 
-    ; Determine title
+    ; Determine title dynamically from _pyfasm_wnd_title_ptr if set
+    mov     rcx, [_pyfasm_wnd_title_ptr]
+    test    rcx, rcx
+    jz      .use_default_title
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8d, 1024
+    call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .title_done
+.use_default_title:
     lea     r8, [_pyfasm_wnd_title_w]
+.title_done:
 
     ; Determine width
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .w_ok
-    mov     r10, 1420
+    mov     r10, 1100
 .w_ok:
 
-    ; CreateWindowExW(0, _pyfasm_wnd_class_w, title, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, width, height, 0, 0, hInstance, 0)
+    ; CreateWindowExW(0, _pyfasm_wnd_class_w, title, WS_OVERLAPPEDWINDOW, 40, 40, width, height, 0, 0, hInstance, 0)
     xor     ecx, ecx
     lea     rdx, [_pyfasm_wnd_class_w]
-    mov     r9d, 10CF0000h          ; WS_OVERLAPPEDWINDOW | WS_VISIBLE
+    mov     r9d, 00CF0000h          ; WS_OVERLAPPEDWINDOW (not WS_VISIBLE - hidden until styled!)
     mov     qword [rsp + 32], 40    ; X
     mov     qword [rsp + 40], 40    ; Y
     mov     [rsp + 48], r10         ; nWidth
@@ -1971,15 +1985,52 @@ _pyfasm_create_window:
     call    [SendMessageW]
 .skip_wm_seticon:
 
-    ; Set DWM Immersive Dark Mode on titlebar
+    ; Set DWM Immersive Dark Mode on titlebar (Attribute 20 for Win10 20H1+ and Win11)
     mov     rcx, [_pyfasm_h_wnd]
     mov     edx, 20                 ; DWMWA_USE_IMMERSIVE_DARK_MODE
     lea     r8, [_pyfasm_dark_mode_val]
     mov     r9d, 4
     call    [DwmSetWindowAttribute]
 
-    ; Build Modern Split-View Controls if not created yet
-    cmp     qword [_pyfasm_h_listbox], 0
+    ; Fallback Attribute 19 (for Windows 10 versions before 20H1)
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 19                 ; DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
+    lea     r8, [_pyfasm_dark_mode_val]
+    mov     r9d, 4
+    call    [DwmSetWindowAttribute]
+
+    ; Attribute 35: DWMWA_CAPTION_COLOR (Windows 11)
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 35
+    lea     r8, [_pyfasm_caption_color]
+    mov     r9d, 4
+    call    [DwmSetWindowAttribute]
+
+    ; Attribute 36: DWMWA_TEXT_COLOR (Windows 11)
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 36
+    lea     r8, [_pyfasm_caption_text_color]
+    mov     r9d, 4
+    call    [DwmSetWindowAttribute]
+
+    ; Apply Windows 10/11 DarkMode theme via UXTHEME
+    mov     rcx, [_pyfasm_h_wnd]
+    lea     rdx, [wszDarkModeExplorer]
+    xor     r8, r8
+    call    [SetWindowTheme]
+
+    ; Force non-client frame update to apply dark title bar immediately
+    mov     rcx, [_pyfasm_h_wnd]
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 48], 27h   ; SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+    call    [SetWindowPos]
+
+    ; Build Modern Split-View Controls only if explicitly enabled by project
+    cmp     dword [_pyfasm_split_view_enabled], 1
     jne     .skip_build_controls
 
     ; 1. Brand Logo / Application Icon
@@ -4240,7 +4291,139 @@ _pyfasm_wnd_proc:
     je      .action_beep
     cmp     eax, 1004               ; Copy Answer
     je      .action_beep
+
+    ; Language / Bookmarks Tabs (1010..1012)
+    cmp     eax, 1010
+    je      .sel_item_0
+    cmp     eax, 1011
+    je      .sel_item_2
+    cmp     eax, 1012
+    je      .sel_item_3
+
+    ; Quick Search Chips (1020..1028)
+    cmp     eax, 1020
+    jb      .cmd_done
+    cmp     eax, 1028
+    ja      .cmd_done
+
+    cmp     eax, 1020
+    je      .chip_py
+    cmp     eax, 1021
+    je      .chip_js
+    cmp     eax, 1022
+    je      .chip_react
+    cmp     eax, 1023
+    je      .chip_fast
+    cmp     eax, 1024
+    je      .chip_async
+    cmp     eax, 1025
+    je      .chip_pandas
+    cmp     eax, 1026
+    je      .chip_docker
+    cmp     eax, 1027
+    je      .chip_cpp
+    cmp     eax, 1028
+    je      .chip_rust
     jmp     .cmd_done
+
+.chip_py:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipPyText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_0
+
+.chip_js:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipJsText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 1
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_1
+
+.chip_react:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipReactText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 1
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_1
+
+.chip_fast:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipFastText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 3
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_3
+
+.chip_async:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipAsyncText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_0
+
+.chip_pandas:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipPandasText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 3
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_3
+
+.chip_docker:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipDockText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 2
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_2
+
+.chip_cpp:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipCppText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    mov     r8d, 2
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_2
+
+.chip_rust:
+    mov     rcx, [_pyfasm_h_search_edit]
+    lea     rdx, [wszChipRustText]
+    call    [SetWindowTextW]
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 186h
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .sel_item_0
 
 .action_clear:
     mov     rcx, [_pyfasm_h_search_edit]
@@ -4697,6 +4880,7 @@ section '.idata' import data readable writeable
             gdi32, 'GDI32.DLL', \\
             shell32, 'SHELL32.DLL', \\
             dwmapi, 'DWMAPI.DLL', \\
+            uxtheme, 'UXTHEME.DLL', \\
             advapi32, 'ADVAPI32.DLL', \\
             wininet, 'WININET.DLL'
 
@@ -4725,7 +4909,8 @@ section '.idata' import data readable writeable
            RegisterClassExW, 'RegisterClassExW', \\
            CreateWindowExA, 'CreateWindowExA', \\
            CreateWindowExW, 'CreateWindowExW', \\
-           ShowWindow, 'ShowWindow', \\
+           ShowWindow, 'ShowWindow', \
+             SetWindowPos, 'SetWindowPos', \\
            UpdateWindow, 'UpdateWindow', \\
            SetForegroundWindow, 'SetForegroundWindow', \\
            SetWindowTextA, 'SetWindowTextA', \\
@@ -4781,6 +4966,9 @@ section '.idata' import data readable writeable
 
     import dwmapi, \\
            DwmSetWindowAttribute, 'DwmSetWindowAttribute'
+
+    import uxtheme, \\
+           SetWindowTheme, 'SetWindowTheme' 
 
     import advapi32, \\
            RegOpenKeyExA, 'RegOpenKeyExA', \\
