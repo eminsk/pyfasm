@@ -381,9 +381,11 @@ def get_win64_export_section(dll_name: str, function_names: list[str]) -> str:
     """Emits the PE64 .edata export section."""
     if not function_names:
         return ""
+    from pyfasm.codegen_x64 import safe_asm_label
     exports = []
     for fn in function_names:
-        exports.append(f"           {fn}, '{fn}'")
+        safe_fn = safe_asm_label(fn)
+        exports.append(f"           {safe_fn}, '{fn}'")
     exports_str = ", \\\n".join(exports)
     return f"""
 section '.edata' export data readable

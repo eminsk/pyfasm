@@ -4,9 +4,38 @@ Emits clean, optimized Flat Assembler (FASM) assembly instructions.
 """
 from __future__ import annotations
 import ast
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR
+
+RESERVED_FASM_KEYWORDS: Set[str] = {
+    # Registers
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+    "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
+    "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+    "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+    # Common x86 instructions & mnemonics
+    "add", "sub", "mul", "imul", "div", "idiv", "inc", "dec",
+    "and", "or", "xor", "not", "neg", "test", "cmp",
+    "mov", "lea", "push", "pop", "call", "ret", "jmp",
+    "loop", "loope", "loopne", "in", "out", "int", "nop", "hlt",
+    "shl", "shr", "sal", "sar", "rol", "ror", "cqo", "cdq",
+    # FASM directives & sections
+    "section", "segment", "data", "text", "code", "include",
+    "format", "entry", "extrn", "public", "org", "align",
+    "db", "dw", "dd", "dq", "rb", "rw", "rd", "rq",
+    "macro", "struc", "virtual", "end", "repeat", "while", "if", "else",
+}
+
+
+def safe_asm_label(name: str) -> str:
+    """Escapes identifiers that conflict with FASM reserved keywords or instructions."""
+    if name.lower() in RESERVED_FASM_KEYWORDS:
+        return f"fn_{name}"
+    return name
 
 
 def _unwrap_slice(node: ast.AST) -> ast.AST:
@@ -26,6 +55,7 @@ class X64CodeGen:
         self._label_counter = 0
         self.current_func: Optional[FunctionSymbol] = None
         self.loop_stack: List[Tuple[str, str]] = []  # (start_label, end_label)
+        self.unresolved_symbols: Set[str] = set()
 
     def new_label(self, prefix: str = "L") -> str:
         self._label_counter += 1
@@ -176,16 +206,34 @@ class X64CodeGen:
             seen_funcs.add(fn.name)
             self._generate_function(fn, aliases=names)
 
+        # Fallback stubs for unresolved external Python symbols
+        if self.unresolved_symbols:
+            self.emit_raw("")
+            self.emit_raw("; ============================================================")
+            self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
+            self.emit_raw("; ============================================================")
+            for sym in sorted(self.unresolved_symbols):
+                lbl = safe_asm_label(sym)
+                self.emit_raw(f"{lbl}:")
+                self.emit("push rbp")
+                self.emit("mov rbp, rsp")
+                self.emit("xor eax, eax", f"fallback stub for external symbol '{sym}'")
+                self.emit("mov rsp, rbp")
+                self.emit("pop rbp")
+                self.emit("ret")
+                self.emit_raw("")
+
     def _generate_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
         self.current_func = fn
         self.emit_raw("; ============================================================")
         self.emit_raw(f"; Function: {fn.name}")
         self.emit_raw("; ============================================================")
+        fn_lbl = safe_asm_label(fn.name)
         if aliases:
             for alias in aliases:
-                self.emit_raw(f"{alias}:")
+                self.emit_raw(f"{safe_asm_label(alias)}:")
         else:
-            self.emit_raw(f"{fn.name}:")
+            self.emit_raw(f"{fn_lbl}:")
 
         # Prolog
         self.emit("push rbp")
@@ -209,7 +257,7 @@ class X64CodeGen:
                 self._generate_statement(stmt)
 
         # Epilog
-        self.emit_raw(f".epilog_{fn.name}:")
+        self.emit_raw(f".epilog_{safe_asm_label(fn.name)}:")
         self.emit("mov rsp, rbp")
         self.emit("pop rbp")
         self.emit("ret")
@@ -222,7 +270,7 @@ class X64CodeGen:
                 self._generate_expr(stmt.value)
             else:
                 self.emit("xor eax, eax", "return 0 / void")
-            self.emit(f"jmp .epilog_{self.current_func.name}")
+            self.emit(f"jmp .epilog_{safe_asm_label(self.current_func.name)}")
 
         elif isinstance(stmt, ast.Assign):
             # Target = Expr
@@ -424,9 +472,12 @@ class X64CodeGen:
             var = self.current_func.local_vars.get(expr.id)
             if var:
                 self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
+            elif expr.id in self.module.functions:
+                safe_fn = safe_asm_label(expr.id)
+                self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
             else:
-                # Could be global function pointer
-                self.emit(f"lea rax, [{expr.id}]", f"address of {expr.id}")
+                self.unresolved_symbols.add(expr.id)
+                self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
         elif isinstance(expr, ast.BinOp):
             self._generate_expr(expr.left)
@@ -655,9 +706,12 @@ class X64CodeGen:
         for i in range(min(n_args, 4)):
             self.emit(f"pop {arg_regs[i]}")
 
+        if func_name not in self.module.functions:
+            self.unresolved_symbols.add(func_name)
+
         # Allocate 32 bytes shadow space
         self.emit("sub rsp, 32", "shadow space for callee")
-        self.emit(f"call {func_name}")
+        self.emit(f"call {safe_asm_label(func_name)}")
         self.emit("add rsp, 32", "restore shadow space")
 
         # If more than 4 arguments, cleanup extra stack args

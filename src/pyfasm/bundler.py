@@ -631,10 +631,11 @@ section '.idata' import data readable writeable
                 exp_dir = Path(export_fasm_dir)
                 if not exp_dir.is_absolute():
                     exp_dir = proj_path / exp_dir
+                export_app_name = out_bin.stem if out_bin else proj_path.name
                 FasmExporter.export(
                     asm_content=asm_content,
                     export_dir=str(exp_dir),
-                    app_name=proj_path.name,
+                    app_name=export_app_name,
                     target=target_norm,
                     payload_zip=payload_path,
                     include_compiler=True,
@@ -650,10 +651,11 @@ section '.idata' import data readable writeable
             exp_dir = Path(export_fasm_dir)
             if not exp_dir.is_absolute():
                 exp_dir = proj_path / exp_dir
+            export_app_name = out_bin.stem if out_bin else proj_path.name
             FasmExporter.export(
                 asm_content=asm_content,
                 export_dir=str(exp_dir),
-                app_name=proj_path.name,
+                app_name=export_app_name,
                 target=target_norm,
                 payload_zip=None,
                 include_compiler=True,

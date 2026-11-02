@@ -61,8 +61,17 @@ class FasmExporter:
         # 2. Copy include headers
         tools_dir = cls.get_bundled_tools_dir()
         inc_src = tools_dir / "INCLUDE"
+        if not inc_src.exists() or not inc_src.is_dir():
+            try:
+                from pyfasm.fasm_runner import FasmRunner
+                runner_inc = Path(FasmRunner().include_path)
+                if runner_inc.exists() and runner_inc.is_dir():
+                    inc_src = runner_inc
+            except Exception:
+                pass
+
         inc_dst = out_dir / "INCLUDE"
-        if inc_src.exists() and inc_src.is_dir():
+        if inc_src and inc_src.exists() and inc_src.is_dir():
             if inc_dst.exists():
                 try:
                     shutil.rmtree(inc_dst)
@@ -92,17 +101,34 @@ class FasmExporter:
                     pass
 
         # 3. Copy compiler binaries if requested
-        if include_compiler and tools_dir.exists():
-            for bin_name in ("FASM.EXE", "fasm.exe", "fasm.x64", "fasm.darwin", "fasm"):
-                src_bin = tools_dir / bin_name
-                if src_bin.exists() and src_bin.is_file():
-                    dst_bin = out_dir / bin_name
-                    if not dst_bin.exists():
-                        shutil.copy2(src_bin, dst_bin)
-                    try:
-                        os.chmod(dst_bin, 0o755)
-                    except Exception:
-                        pass
+        if include_compiler:
+            copied_bin = False
+            if tools_dir.exists():
+                for bin_name in ("FASM.EXE", "fasm.exe", "fasm.x64", "fasm.darwin", "fasm"):
+                    src_bin = tools_dir / bin_name
+                    if src_bin.exists() and src_bin.is_file():
+                        dst_bin = out_dir / bin_name
+                        if not dst_bin.exists():
+                            shutil.copy2(src_bin, dst_bin)
+                        copied_bin = True
+                        try:
+                            os.chmod(dst_bin, 0o755)
+                        except Exception:
+                            pass
+            if not copied_bin:
+                try:
+                    from pyfasm.fasm_runner import FasmRunner
+                    runner_bin = Path(FasmRunner().fasm_path)
+                    if runner_bin.exists() and runner_bin.is_file():
+                        dst_bin = out_dir / runner_bin.name
+                        if not dst_bin.exists():
+                            shutil.copy2(runner_bin, dst_bin)
+                        try:
+                            os.chmod(dst_bin, 0o755)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
         # 4. Copy payload zip if present
         payload_name = f"{app_name}.zip"
