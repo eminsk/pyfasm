@@ -123,3 +123,24 @@ def main() -> int:
     compiler = PyFasmCompiler()
     success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
     assert success is True, f"Compilation of numeric-prefixed file failed: {log}"
+
+
+def test_codegen_handles_boolean_constants_and_instruction_shadowing(tmp_path: Path):
+    source = """
+def main() -> int:
+    flag = False
+    flag_on = True
+    s = str(123)
+    if flag:
+        return 1
+    return 0
+"""
+    src_file = tmp_path / "bool_and_str.py"
+    src_file.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+    assert "mov rax, 0" in asm
+    assert "mov rax, 1" in asm
+    assert "call fn_str" in asm
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Compilation failed: {log}"

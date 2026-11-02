@@ -24,11 +24,16 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
     "mov", "lea", "push", "pop", "call", "ret", "jmp",
     "loop", "loope", "loopne", "in", "out", "int", "nop", "hlt",
     "shl", "shr", "sal", "sar", "rol", "ror", "cqo", "cdq",
-    # FASM directives & sections
+    "str", "wait", "pause", "enter", "leave", "bound", "lock",
+    "bt", "bts", "btr", "btc", "bsf", "bsr", "syscall", "sysret",
+    # FASM directives & operators
     "section", "segment", "data", "text", "code", "include",
     "format", "entry", "extrn", "public", "org", "align",
     "db", "dw", "dd", "dq", "rb", "rw", "rd", "rq",
     "macro", "struc", "virtual", "end", "repeat", "while", "if", "else",
+    "type", "size", "ptr", "near", "far", "short",
+    "byte", "word", "dword", "pword", "qword", "tbyte", "dqword", "qqword",
+    "as", "eq", "eqtype", "defined", "used",
 }
 
 
@@ -448,8 +453,12 @@ class X64CodeGen:
     def _generate_expr(self, expr: ast.expr) -> None:
         """Evaluates expr, placing 64-bit result in RAX."""
         if isinstance(expr, ast.Constant):
-            if isinstance(expr.value, int):
+            if isinstance(expr.value, bool):
+                self.emit(f"mov rax, {1 if expr.value else 0}")
+            elif isinstance(expr.value, int):
                 self.emit(f"mov rax, {expr.value}")
+            elif expr.value is None:
+                self.emit("xor eax, eax")
             elif isinstance(expr.value, str):
                 # Find string label
                 label = ""
@@ -461,10 +470,6 @@ class X64CodeGen:
                     self.emit(f"lea rax, [{label}]")
                 else:
                     self.emit("xor eax, eax")
-            elif isinstance(expr.value, bool):
-                self.emit(f"mov rax, {1 if expr.value else 0}")
-            elif expr.value is None:
-                self.emit("xor eax, eax")
             elif isinstance(expr.value, float):
                 flabel = ""
                 for flit in self.module.float_literals:
