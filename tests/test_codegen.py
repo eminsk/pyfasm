@@ -477,3 +477,41 @@ def calc_something(x: int):
     assert "mov rcx, rcx" not in opt, "mov rcx, rcx should be eliminated"
     assert "add rsp, 0" not in opt, "add rsp, 0 should be eliminated"
     assert "jmp .L_next" not in opt, "jmp immediately preceding .L_next: should be eliminated"
+
+
+def test_constant_folding_and_builtin_math_functions():
+    from pyfasm import PyFasmCompiler
+    from pyfasm.ast_parser import AstAnalyzer
+    import ast
+
+    source = """
+def test_all():
+    timeout = 60 * 1000
+    megabyte = 1024 * 1024
+    val_abs = abs(-42)
+    val_min = min(10, 20)
+    val_max = max(10, 20)
+    items = [100, 200, 300]
+    total_items = len(items)
+    return total_items
+"""
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+
+    # Verify constant folding took place (60000 and 1048576 directly emitted)
+    assert "mov rax, 60000" in asm, "60 * 1000 must be folded into 60000"
+    assert "mov rax, 1048576" in asm, "1024 * 1024 must be folded into 1048576"
+
+    # Verify branchless abs
+    assert "xor rax, rdx" in asm and "sub rax, rdx" in asm, "abs() must use branchless cqo; xor; sub"
+
+    # Verify min/max conditional moves
+    assert "cmovg rax, r11" in asm, "min() must use cmovg"
+    assert "cmovl rax, r11" in asm, "max() must use cmovl"
+
+    # Verify list allocation
+    assert "allocate list of 3 items" in asm or "_pyfasm_alloc" in asm
+    assert "load length from header" in asm
+
+    # Verify reciprocal fast integer print in runtime
+    assert "0CCCCCCCCCCCCCCCDh" in asm, "Reciprocal multiplier 0CCCCCCCCCCCCCCCDh must be in runtime"

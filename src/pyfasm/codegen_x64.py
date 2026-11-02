@@ -905,6 +905,20 @@ include 'functions.inc'
             self.emit("pop rax")
             self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
 
+        elif isinstance(expr, ast.List):
+            num_elts = len(expr.elts)
+            alloc_bytes = max(16, (num_elts + 2) * 8)
+            self.emit(f"mov ecx, {alloc_bytes}", f"allocate list of {num_elts} items")
+            self.emit("call _pyfasm_alloc")
+            self.emit("mov r8, rax", "list base pointer")
+            self.emit(f"mov qword [r8], {num_elts}", "store list length")
+            for idx, elt in enumerate(expr.elts):
+                self.emit("push r8")
+                self._generate_expr(elt)
+                self.emit("pop r8")
+                self.emit(f"mov [r8 + {(idx + 1) * 8}], rax", f"store list[{idx}]")
+            self.emit("mov rax, r8", "return list pointer")
+
         elif isinstance(expr, ast.Call):
             self._generate_call(expr)
 
@@ -984,6 +998,34 @@ include 'functions.inc'
                             func_name = f"{prefix}_{attr_name}"
             else:
                 func_name = attr_name
+
+        # Built-in math & introspection functions
+        if func_name == "abs" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("cqo")
+            self.emit("xor rax, rdx")
+            self.emit("sub rax, rdx", "branchless abs(rax)")
+            return
+
+        if func_name == "min" and len(call.args) >= 2:
+            self._generate_expr(call.args[0])
+            self.emit("push rax")
+            self._generate_expr(call.args[1])
+            self.emit("mov r11, rax")
+            self.emit("pop rax")
+            self.emit("cmp rax, r11")
+            self.emit("cmovg rax, r11", "min(a, b)")
+            return
+
+        if func_name == "max" and len(call.args) >= 2:
+            self._generate_expr(call.args[0])
+            self.emit("push rax")
+            self._generate_expr(call.args[1])
+            self.emit("mov r11, rax")
+            self.emit("pop rax")
+            self.emit("cmp rax, r11")
+            self.emit("cmovl rax, r11", "max(a, b)")
+            return
 
         # Check Win32 MessageBox call (e.g. ctypes.windll.user32.MessageBoxW / MessageBoxA)
         func_dump = ast.dump(call.func)
@@ -1208,9 +1250,18 @@ include 'functions.inc'
 
         if func_name in ("len", "str_len"):
             if call.args:
-                self._generate_expr(call.args[0])
-                self.emit("mov rcx, rax")
-                self.emit("call _pyfasm_str_len")
+                arg0 = call.args[0]
+                is_list_var = False
+                if isinstance(arg0, ast.Name) and self.current_func:
+                    var = self.current_func.local_vars.get(arg0.id)
+                    if var and var.var_type.is_list():
+                        is_list_var = True
+                self._generate_expr(arg0)
+                if is_list_var:
+                    self.emit("mov rax, [rax]", "load length from header")
+                else:
+                    self.emit("mov rcx, rax")
+                    self.emit("call _pyfasm_str_len")
             return
 
         if func_name == "file_write":

@@ -105,6 +105,62 @@ class ParsedModule:
         return self.has_library("cv2", "opencv", "ffmpeg", "pyaudio", "sounddevice", "pil", "pillow")
 
 
+class ConstantFolder(ast.NodeTransformer):
+    """Evaluates compile-time constant expressions (Constant Folding)."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
+            lv, rv = node.left.value, node.right.value
+            try:
+                res = None
+                if isinstance(node.op, ast.Add):
+                    res = lv + rv
+                elif isinstance(node.op, ast.Sub):
+                    res = lv - rv
+                elif isinstance(node.op, ast.Mult):
+                    res = lv * rv
+                elif isinstance(node.op, ast.FloorDiv) and rv != 0:
+                    res = lv // rv
+                elif isinstance(node.op, ast.Mod) and rv != 0:
+                    res = lv % rv
+                elif isinstance(node.op, ast.Pow):
+                    res = lv ** rv
+                elif isinstance(node.op, ast.BitAnd):
+                    res = lv & rv
+                elif isinstance(node.op, ast.BitOr):
+                    res = lv | rv
+                elif isinstance(node.op, ast.BitXor):
+                    res = lv ^ rv
+                elif isinstance(node.op, ast.LShift):
+                    res = lv << rv
+                elif isinstance(node.op, ast.RShift):
+                    res = lv >> rv
+
+                if res is not None:
+                    return ast.Constant(value=res)
+            except Exception:
+                pass
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.operand, ast.Constant):
+            v = node.operand.value
+            try:
+                if isinstance(node.op, ast.USub):
+                    return ast.Constant(value=-v)
+                elif isinstance(node.op, ast.UAdd):
+                    return ast.Constant(value=+v)
+                elif isinstance(node.op, ast.Invert):
+                    return ast.Constant(value=~v)
+                elif isinstance(node.op, ast.Not):
+                    return ast.Constant(value=not v)
+            except Exception:
+                pass
+        return node
+
+
 class AstAnalyzer:
     """Extracts function signatures, local variables, and literals across single files or multi-module projects."""
 
@@ -176,6 +232,7 @@ class AstAnalyzer:
     def parse_source(self, source_code: str) -> ParsedModule:
         """Parses a raw Python source code string into a ParsedModule."""
         tree = ast.parse(source_code)
+        tree = ConstantFolder().visit(tree)
         module = ParsedModule()
 
         # First pass: find imports, string and float constants across the AST
@@ -286,6 +343,7 @@ class AstAnalyzer:
         try:
             source_code = real_path.read_text(encoding="utf-8")
             tree = ast.parse(source_code)
+            tree = ConstantFolder().visit(tree)
         except Exception:
             return
 

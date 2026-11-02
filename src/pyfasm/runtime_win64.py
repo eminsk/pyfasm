@@ -428,15 +428,22 @@ _pyfasm_print_int:
 .positive:
     lea     rdi, [rbp - 48]         ; end of temporary digit buffer
     mov     byte [rdi], 0           ; null-terminator
-    mov     rbx, 10
+    mov     rsi, rax
+    mov     r9, 0CCCCCCCCCCCCCCCDh  ; reciprocal multiplier for fast division by 10 (from porth/Lemire)
 
 .digit_loop:
-    xor     rdx, rdx
-    div     rbx                     ; rax = quotient, rdx = remainder
-    add     dl, '0'
+    mov     rax, rsi
+    mul     r9                      ; rdx = (rsi * r9) >> 64
+    shr     rdx, 3                  ; rdx = quotient
+    lea     rcx, [rdx + rdx * 4]
+    add     rcx, rcx                ; rcx = quotient * 10
+    mov     rax, rsi
+    sub     rax, rcx                ; rax = remainder (0..9)
+    add     al, '0'
     dec     rdi
-    mov     [rdi], dl
-    test    rax, rax
+    mov     [rdi], al
+    mov     rsi, rdx                ; update quotient
+    test    rsi, rsi
     jnz     .digit_loop
 
     ; Print digits string
