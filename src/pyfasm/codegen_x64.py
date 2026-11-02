@@ -118,6 +118,24 @@ class X64CodeGen:
             self.module.string_literals.append(StringLiteral(label=label, value=text))
         self.emit(f"lea {reg}, [{label}]")
 
+    def _generate_fstring_part(self, part: ast.AST) -> None:
+        if isinstance(part, ast.Constant):
+            self._emit_string_pointer("rax", str(part.value))
+        elif isinstance(part, ast.FormattedValue):
+            self._generate_expr(part.value)
+            is_str_part = False
+            if isinstance(part.value, ast.Name) and self.current_func:
+                v = self.current_func.local_vars.get(part.value.id)
+                if v and v.var_type.is_str():
+                    is_str_part = True
+            elif isinstance(part.value, ast.Constant) and isinstance(part.value.value, str):
+                is_str_part = True
+            if not is_str_part:
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_int_to_str")
+        else:
+            self._generate_expr(part)
+
     def _generate_button_control(self, call: ast.Call, target_name: str) -> None:
         btn_text = self._get_kwarg_string_val(call, "text")
         if not btn_text and call.args:
@@ -404,12 +422,15 @@ class X64CodeGen:
             for sym in sorted(self.unresolved_symbols):
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
-                self.emit("push rbp")
-                self.emit("mov rbp, rsp")
-                self.emit("xor eax, eax", f"fallback stub for external symbol '{sym}'")
-                self.emit("mov rsp, rbp")
-                self.emit("pop rbp")
-                self.emit("ret")
+                if sym == "str":
+                    self.emit("jmp _pyfasm_int_to_str")
+                else:
+                    self.emit("push rbp")
+                    self.emit("mov rbp, rsp")
+                    self.emit("xor eax, eax", f"fallback stub for external symbol '{sym}'")
+                    self.emit("mov rsp, rbp")
+                    self.emit("pop rbp")
+                    self.emit("ret")
                 self.emit_raw("")
 
         funcs_code = "\n".join(self.lines)
@@ -631,15 +652,43 @@ include 'functions.inc'
                     if var:
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                 elif isinstance(target, ast.Subscript):
-                    # arr[idx] = val
-                    self.emit("push rax", "save value to assign")
-                    self._generate_expr(_unwrap_slice(target.slice))  # index -> RAX
-                    self.emit("push rax", "save index")
-                    self._generate_expr(target.value)  # arr pointer -> RAX
-                    self.emit("mov r8, rax", "array base pointer")
-                    self.emit("pop r11", "index")
-                    self.emit("pop rax", "value")
-                    self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
+                    slice_unwrapped = _unwrap_slice(target.slice)
+                    is_dict_target = False
+                    if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
+                        is_dict_target = True
+                    elif isinstance(target.value, ast.Name) and self.current_func:
+                        v = self.current_func.local_vars.get(target.value.id)
+                        if v and v.var_type.is_dict():
+                            is_dict_target = True
+
+                    if is_dict_target:
+                        # d[k] = val
+                        self.emit("push rax", "save value to assign")
+                        self._generate_expr(slice_unwrapped)
+                        self.emit("push rax", "save key")
+                        self._generate_expr(target.value)
+                        self.emit("mov rcx, rax", "dict_ptr")
+                        self.emit("pop rdx", "key")
+                        self.emit("pop r8", "val")
+                        self.emit("call _pyfasm_dict_set")
+                    else:
+                        # arr[idx] = val
+                        self.emit("push rax", "save value to assign")
+                        self._generate_expr(slice_unwrapped)  # index -> RAX
+                        self.emit("push rax", "save index")
+                        self._generate_expr(target.value)  # arr pointer -> RAX
+                        self.emit("mov r8, rax", "array base pointer")
+                        self.emit("pop r11", "index")
+                        self.emit("pop rax", "value")
+                        is_list_target = False
+                        if isinstance(target.value, ast.Name) and self.current_func:
+                            v = self.current_func.local_vars.get(target.value.id)
+                            if v and (v.var_type.is_list() or v.var_type.is_tuple()):
+                                is_list_target = True
+                        if is_list_target:
+                            self.emit("mov [r8 + (r11 + 1) * 8], rax", "store list[idx] = val")
+                        else:
+                            self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
                 elif isinstance(target, ast.Attribute):
                     # obj.field = val (e.g. self.x = 10)
                     self.emit("push rax", "save value to assign")
@@ -662,13 +711,22 @@ include 'functions.inc'
             if isinstance(stmt.target, ast.Name):
                 var = self.current_func.local_vars.get(stmt.target.id)
                 if var:
-                    self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
-                    self.emit("push rax")
-                    self._generate_expr(stmt.value)  # RHS in RAX
-                    self.emit("mov r11, rax")
-                    self.emit("pop rax")
-                    self._generate_binop_instr(stmt.op)
-                    self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
+                    if var.var_type.is_str() and isinstance(stmt.op, ast.Add):
+                        self.emit(f"mov rcx, [rbp - {var.stack_offset}]", f"load {var.name}")
+                        self.emit("push rcx")
+                        self._generate_expr(stmt.value)
+                        self.emit("mov rdx, rax")
+                        self.emit("pop rcx")
+                        self.emit("call _pyfasm_str_concat")
+                        self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
+                    else:
+                        self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
+                        self.emit("push rax")
+                        self._generate_expr(stmt.value)  # RHS in RAX
+                        self.emit("mov r11, rax")
+                        self.emit("pop rax")
+                        self._generate_binop_instr(stmt.op)
+                        self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
 
         elif isinstance(stmt, ast.Expr):
             self._generate_expr(stmt.value)
@@ -856,6 +914,30 @@ include 'functions.inc'
                 self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
 
         elif isinstance(expr, ast.BinOp):
+            is_str_add = False
+            if isinstance(expr.op, ast.Add):
+                if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
+                    is_str_add = True
+                elif isinstance(expr.right, ast.Constant) and isinstance(expr.right.value, str):
+                    is_str_add = True
+                elif isinstance(expr.left, ast.Name) and self.current_func:
+                    var = self.current_func.local_vars.get(expr.left.id)
+                    if var and var.var_type.is_str():
+                        is_str_add = True
+                elif isinstance(expr.right, ast.Name) and self.current_func:
+                    var = self.current_func.local_vars.get(expr.right.id)
+                    if var and var.var_type.is_str():
+                        is_str_add = True
+
+            if is_str_add:
+                self._generate_expr(expr.left)
+                self.emit("push rax")
+                self._generate_expr(expr.right)
+                self.emit("mov rdx, rax", "str2")
+                self.emit("pop rcx", "str1")
+                self.emit("call _pyfasm_str_concat")
+                return
+
             self._generate_expr(expr.left)
             self.emit("push rax")
             self._generate_expr(expr.right)
@@ -875,35 +957,158 @@ include 'functions.inc'
                 self.emit("movzx rax, al")
 
         elif isinstance(expr, ast.Compare):
-            self._generate_expr(expr.left)
-            self.emit("push rax")
-            self._generate_expr(expr.comparators[0])
-            self.emit("mov r11, rax")
-            self.emit("pop rax")
-            self.emit("cmp rax, r11")
             op = expr.ops[0]
-            if isinstance(op, ast.Eq):
+            if isinstance(op, ast.In):
+                self._generate_expr(expr.comparators[0])
+                self.emit("push rax")
+                self._generate_expr(expr.left)
+                self.emit("mov rdx, rax", "needle / item")
+                self.emit("pop rcx", "container")
+                is_dict_target = False
+                if isinstance(expr.comparators[0], ast.Name) and self.current_func:
+                    sym = self.current_func.local_vars.get(expr.comparators[0].id)
+                    if sym and sym.var_type.is_dict():
+                        is_dict_target = True
+                if is_dict_target:
+                    self.emit("call _pyfasm_dict_contains")
+                else:
+                    self.emit("call _pyfasm_str_contains")
+            elif isinstance(op, ast.NotIn):
+                self._generate_expr(expr.comparators[0])
+                self.emit("push rax")
+                self._generate_expr(expr.left)
+                self.emit("mov rdx, rax")
+                self.emit("pop rcx")
+                is_dict_target = False
+                if isinstance(expr.comparators[0], ast.Name) and self.current_func:
+                    sym = self.current_func.local_vars.get(expr.comparators[0].id)
+                    if sym and sym.var_type.is_dict():
+                        is_dict_target = True
+                if is_dict_target:
+                    self.emit("call _pyfasm_dict_contains")
+                else:
+                    self.emit("call _pyfasm_str_contains")
+                self.emit("xor rax, 1")
+            elif isinstance(op, ast.Is):
+                self._generate_expr(expr.left)
+                self.emit("push rax")
+                self._generate_expr(expr.comparators[0])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
                 self.emit("sete al")
-            elif isinstance(op, ast.NotEq):
+                self.emit("movzx rax, al")
+            elif isinstance(op, ast.IsNot):
+                self._generate_expr(expr.left)
+                self.emit("push rax")
+                self._generate_expr(expr.comparators[0])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
                 self.emit("setne al")
-            elif isinstance(op, ast.Lt):
-                self.emit("setl al")
-            elif isinstance(op, ast.LtE):
-                self.emit("setle al")
-            elif isinstance(op, ast.Gt):
-                self.emit("setg al")
-            elif isinstance(op, ast.GtE):
-                self.emit("setge al")
-            self.emit("movzx rax, al")
+                self.emit("movzx rax, al")
+            else:
+                self._generate_expr(expr.left)
+                self.emit("push rax")
+                self._generate_expr(expr.comparators[0])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                if isinstance(op, ast.Eq):
+                    self.emit("sete al")
+                elif isinstance(op, ast.NotEq):
+                    self.emit("setne al")
+                elif isinstance(op, ast.Lt):
+                    self.emit("setl al")
+                elif isinstance(op, ast.LtE):
+                    self.emit("setle al")
+                elif isinstance(op, ast.Gt):
+                    self.emit("setg al")
+                elif isinstance(op, ast.GtE):
+                    self.emit("setge al")
+                self.emit("movzx rax, al")
 
         elif isinstance(expr, ast.Subscript):
-            # arr[idx]
-            self._generate_expr(expr.value)  # arr pointer -> RAX
-            self.emit("push rax")
-            self._generate_expr(_unwrap_slice(expr.slice))  # index -> RAX
-            self.emit("mov r11, rax")
-            self.emit("pop rax")
-            self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
+            slice_unwrapped = _unwrap_slice(expr.slice)
+            is_dict_val = False
+            if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
+                is_dict_val = True
+            elif isinstance(expr.value, ast.Name) and self.current_func:
+                v = self.current_func.local_vars.get(expr.value.id)
+                if v and v.var_type.is_dict():
+                    is_dict_val = True
+
+            if is_dict_val:
+                self._generate_expr(expr.value)
+                self.emit("push rax")
+                self._generate_expr(slice_unwrapped)
+                self.emit("mov rdx, rax", "key")
+                self.emit("pop rcx", "dict_ptr")
+                self.emit("xor r8, r8", "default = 0")
+                self.emit("call _pyfasm_dict_get")
+            else:
+                self._generate_expr(expr.value)  # arr pointer -> RAX
+                self.emit("push rax")
+                self._generate_expr(slice_unwrapped)  # index -> RAX
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                is_list_val = False
+                if isinstance(expr.value, ast.Name) and self.current_func:
+                    v = self.current_func.local_vars.get(expr.value.id)
+                    if v and (v.var_type.is_list() or v.var_type.is_tuple()):
+                        is_list_val = True
+                if is_list_val:
+                    self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
+                else:
+                    self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
+
+        elif isinstance(expr, ast.Dict):
+            num_keys = len(expr.keys)
+            cap = 16
+            while cap < max(16, num_keys * 2):
+                cap *= 2
+            self.emit(f"mov ecx, {cap}", f"create dict with capacity {cap}")
+            self.emit("call _pyfasm_dict_create")
+            self.emit("push rax", "save dict_ptr on stack")
+            for k_expr, v_expr in zip(expr.keys, expr.values):
+                if k_expr is None:
+                    continue
+                self._generate_expr(v_expr)
+                self.emit("push rax", "save val to insert")
+                self._generate_expr(k_expr)
+                self.emit("mov rdx, rax", "key")
+                self.emit("pop r8", "val")
+                self.emit("mov rcx, [rsp]", "dict_ptr from top of stack")
+                self.emit("call _pyfasm_dict_set")
+            self.emit("pop rax", "return dict pointer")
+
+        elif isinstance(expr, ast.Tuple):
+            num_elts = len(expr.elts)
+            alloc_bytes = max(16, (num_elts + 2) * 8)
+            self.emit(f"mov ecx, {alloc_bytes}", f"allocate tuple of {num_elts} items")
+            self.emit("call _pyfasm_alloc")
+            self.emit("mov r8, rax", "tuple base pointer")
+            self.emit(f"mov qword [r8], {num_elts}", "store tuple length")
+            for idx, elt in enumerate(expr.elts):
+                self.emit("push r8")
+                self._generate_expr(elt)
+                self.emit("pop r8")
+                self.emit(f"mov [r8 + {(idx + 1) * 8}], rax", f"store tuple[{idx}]")
+            self.emit("mov rax, r8", "return tuple pointer")
+
+        elif isinstance(expr, ast.JoinedStr):
+            if not expr.values:
+                self._emit_string_pointer("rax", "")
+            else:
+                self._generate_fstring_part(expr.values[0])
+                self.emit("push rax", "save first part")
+                for part in expr.values[1:]:
+                    self._generate_fstring_part(part)
+                    self.emit("mov rdx, rax", "next part")
+                    self.emit("pop rcx", "accumulated string")
+                    self.emit("call _pyfasm_str_concat")
+                    self.emit("push rax", "save combined")
+                self.emit("pop rax", "final combined string")
 
         elif isinstance(expr, ast.List):
             num_elts = len(expr.elts)
@@ -998,6 +1203,114 @@ include 'functions.inc'
                             func_name = f"{prefix}_{attr_name}"
             else:
                 func_name = attr_name
+
+        # Ecosystem adapters (darkdetect, requests, beautifulsoup4)
+        if func_name in ("isDark", "is_dark", "darkdetect_isDark") or (attr_name in ("isDark", "is_dark") and prefix == "darkdetect"):
+            self.emit("call _pyfasm_is_dark_theme")
+            return
+
+        if func_name in ("isLight", "is_light", "darkdetect_isLight") or (attr_name in ("isLight", "is_light") and prefix == "darkdetect"):
+            self.emit("call _pyfasm_is_dark_theme")
+            self.emit("xor rax, 1")
+            return
+
+        if func_name in ("theme", "darkdetect_theme") or (attr_name == "theme" and prefix == "darkdetect"):
+            self.emit("call _pyfasm_darkdetect_theme")
+            return
+
+        # Built-in string methods
+        if attr_name == "lower" and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var:
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                self.emit("call _pyfasm_str_lower")
+                return
+
+        if attr_name == "upper" and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var:
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                self.emit("call _pyfasm_str_upper")
+                return
+
+        if attr_name == "strip" and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var:
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                self.emit("call _pyfasm_str_strip")
+                return
+
+        if attr_name == "startswith" and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var:
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                self.emit("call _pyfasm_str_startswith")
+                return
+
+        if attr_name == "endswith" and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var:
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                self.emit("call _pyfasm_str_endswith")
+                return
+
+        # Dict get method
+        if attr_name == "get" and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var and (var.var_type.is_dict() or len(call.args) >= 2 or (isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str))):
+                if len(call.args) >= 2:
+                    self._generate_expr(call.args[1])
+                    self.emit("push rax", "default val")
+                else:
+                    self.emit("push 0", "default val = 0")
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "key")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "dict_ptr")
+                self.emit("pop r8", "default")
+                self.emit("call _pyfasm_dict_get")
+                return
+
+        # List append
+        if attr_name == "append" and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var and var.var_type.is_list():
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "item to append")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
+                self.emit("call _pyfasm_list_append")
+                return
+
+        # str(val) conversion
+        if func_name == "str" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.unresolved_symbols.add("str")
+            self.emit("call fn_str")
+            return
+
+        if (func_name == "get" and prefix == "requests") or func_name == "requests_get" or (attr_name == "get" and prefix in ("requests", "http")):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "URL string pointer")
+                self.emit("call _pyfasm_http_get")
+                return
+
+        if attr_name in ("get_text", "strip_tags", "clean_html") or func_name in ("get_text", "strip_tags", "clean_html"):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_strip_html")
+                return
+            elif prefix:
+                var = self.current_func.local_vars.get(prefix) if self.current_func else None
+                if var:
+                    self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
+                    self.emit("call _pyfasm_strip_html")
+                    return
 
         # Built-in math & introspection functions
         if func_name == "abs" and call.args:
@@ -1251,14 +1564,21 @@ include 'functions.inc'
         if func_name in ("len", "str_len"):
             if call.args:
                 arg0 = call.args[0]
-                is_list_var = False
+                is_list_or_tuple = False
+                is_dict_arg = False
                 if isinstance(arg0, ast.Name) and self.current_func:
                     var = self.current_func.local_vars.get(arg0.id)
-                    if var and var.var_type.is_list():
-                        is_list_var = True
+                    if var:
+                        if var.var_type.is_list() or var.var_type.is_tuple():
+                            is_list_or_tuple = True
+                        elif var.var_type.is_dict():
+                            is_dict_arg = True
                 self._generate_expr(arg0)
-                if is_list_var:
+                if is_list_or_tuple:
                     self.emit("mov rax, [rax]", "load length from header")
+                elif is_dict_arg:
+                    self.emit("mov rcx, rax")
+                    self.emit("call _pyfasm_dict_len")
                 else:
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_str_len")
