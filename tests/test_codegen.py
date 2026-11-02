@@ -169,47 +169,12 @@ def main() -> int:
     assert Path(bin_path).exists()
 
     # Verify execution output
-    import subprocess
-    res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
-    assert res.returncode == 0
-
-
-def test_native_win32_ui_controls(tmp_path: Path):
-    source = """
-import customtkinter as ctk
-
-class DemoApp(ctk.CTk):
-    def __init__(self):
-        self.title("Native Demo")
-        self.lbl = ctk.CTkLabel(self, text="Header Title")
-        self.entry = ctk.CTkEntry(self, placeholder_text="Type query...")
-        self.btn = ctk.CTkButton(self, text="Search", command=self.do_action)
-        self.lst = ctk.CTkScrollableFrame(self)
-
-    def do_action(self):
-        q = self.entry.get()
-        self.entry.delete(0, "end")
-
-def main():
-    app = DemoApp()
-    app.mainloop()
-"""
-    compiler = PyFasmCompiler()
-    asm = compiler.compile_source_to_asm(source, target="win64")
-
-    assert "call _pyfasm_create_label" in asm
-    assert "call _pyfasm_create_edit" in asm
-    assert "call _pyfasm_create_button" in asm
-    assert "call _pyfasm_create_listbox" in asm
-    assert "call _pyfasm_get_edit_text" in asm
-    assert "call _pyfasm_run_window_loop" in asm
-
-    src_file = tmp_path / "gui_demo.py"
-    src_file.write_text(source, encoding="utf-8")
-    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
-    assert success is True, f"GUI compilation failed: {log}"
-
-    assert "125" in res.stdout
+    import sys
+    if sys.platform == "win32":
+        import subprocess
+        res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
+        assert res.returncode == 0
+        assert "125" in res.stdout
 
 
 def test_codegen_modular_asm_folder_structure(tmp_path: Path):
@@ -306,9 +271,11 @@ def main() -> int:
     success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
     assert success is True, f"Multi-class compilation failed: {log}"
 
-    import subprocess
-    res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
-    assert res.returncode == 0
+    import sys
+    if sys.platform == "win32":
+        import subprocess
+        res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
+        assert res.returncode == 0
 
 
 def test_native_win32_ui_controls(tmp_path: Path):
