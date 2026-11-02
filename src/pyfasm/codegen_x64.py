@@ -4,6 +4,7 @@ Emits clean, optimized Flat Assembler (FASM) assembly instructions.
 """
 from __future__ import annotations
 import ast
+from pathlib import Path
 import re
 from typing import List, Dict, Optional, Tuple, Set
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral
@@ -61,7 +62,8 @@ def _unwrap_slice(node: ast.AST) -> ast.AST:
 class X64CodeGen:
     """Translates a ParsedModule into a complete FASM assembly program."""
 
-    def __init__(self, module: ParsedModule, target: str = "win64"):
+    def __init__(self, module: ParsedModule, target: str = "win64", icon_path: Optional[str] = None):
+        self.icon_path = icon_path
         self.module = module
         self.target = target
         self.lines: List[str] = []
@@ -448,6 +450,22 @@ class X64CodeGen:
             return "\n".join(lines)
         return ""
 
+    def _get_resources_section(self) -> str:
+        if self.target in ("win64", "dll") and self.icon_path and Path(self.icon_path).exists():
+            icon_posix = str(Path(self.icon_path).resolve()).replace("\\", "/")
+            return f"""include 'macro/resource.inc'
+
+section '.rsrc' resource data readable
+
+directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
+
+resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
+resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
+
+icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
+"""
+        return ""
+
     def generate_modular(self) -> Dict[str, str]:
         """
         Generates clean, modular FASM source files:
@@ -519,13 +537,18 @@ include 'runtime.inc'
 include 'functions.inc'
 """
         from pyfasm.optimizer import optimize_fasm_code
-        return {
+        res_dict = {
             "main.asm": main_asm,
             "constants.inc": constants_inc,
             "runtime.inc": runtime_inc,
             "functions.inc": optimize_fasm_code(functions_inc),
             "imports.inc": imports_inc,
         }
+        rsrc_content = self._get_resources_section()
+        if rsrc_content:
+            res_dict["resources.inc"] = rsrc_content
+            res_dict["main.asm"] = main_asm.strip() + "\n\ninclude 'resources.inc'\n"
+        return res_dict
 
     def generate(self) -> str:
         header = self._get_runtime_header()
@@ -534,7 +557,11 @@ include 'functions.inc'
         funcs = self._get_functions_section()
         runtime = self._get_runtime_code()
         imports = self._get_imports_section()
-        raw = "\n".join([header, data, entry, funcs, runtime, imports])
+        rsrc = self._get_resources_section()
+        raw_parts = [header, data, entry, funcs, runtime, imports]
+        if rsrc:
+            raw_parts.append(rsrc)
+        raw = "\n".join(raw_parts)
         from pyfasm.optimizer import optimize_fasm_code
         return optimize_fasm_code(raw)
 

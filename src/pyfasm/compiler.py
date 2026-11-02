@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from pyfasm.ast_parser import AstAnalyzer, ParsedModule
 from pyfasm.codegen_x64 import X64CodeGen
 from pyfasm.fasm_runner import FasmRunner
@@ -21,12 +21,17 @@ class PyFasmCompiler:
         self,
         source_code: str,
         target: str = "win64",
-        project_dir: Optional[str] = None
+        project_dir: Optional[str] = None,
+        icon_path: Optional[str] = None,
     ) -> str:
         """Parses Python source code and returns complete FASM x64 assembly."""
         analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_source(source_code)
-        codegen = X64CodeGen(parsed_mod, target=target)
+        if not icon_path and project_dir:
+            cand = Path(project_dir) / "icon.ico"
+            if cand.exists():
+                icon_path = str(cand.resolve())
+        codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
         return codegen.generate()
 
     def compile_file(
@@ -36,6 +41,7 @@ class PyFasmCompiler:
         target: str = "win64",
         keep_asm: bool = True,
         export_fasm_dir: Optional[str] = None,
+        icon_path: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
         """
         Compiles a Python file or entire project directory into a single standalone native binary.
@@ -69,9 +75,14 @@ class PyFasmCompiler:
             src_file = src
             default_stem = src.stem
 
+        if not icon_path and project_dir:
+            cand = project_dir / "icon.ico"
+            if cand.exists():
+                icon_path = str(cand.resolve())
+
         analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
-        codegen = X64CodeGen(parsed_mod, target=target)
+        codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
         asm_code = codegen.generate()
 
         if not output_binary:
@@ -133,3 +144,99 @@ class PyFasmCompiler:
             )
 
         return success, str(out_bin), log
+
+    @staticmethod
+    def clean_cache(
+        project_dir: Optional[str] = None,
+        clean_apps: bool = False,
+        clean_all: bool = False,
+        dry_run: bool = False,
+    ) -> Tuple[int, int, List[str]]:
+        """
+        Cleans compiler caches, intermediate asm directories, __pycache__, stamps, and global extracted bundles.
+        Returns (files_removed_count, bytes_freed, list_of_removed_items).
+        """
+        import shutil
+        removed_items: List[str] = []
+        bytes_freed = 0
+        files_count = 0
+
+        dirs_to_clean: List[Path] = []
+        files_to_clean: List[Path] = []
+
+        proj_path = Path(project_dir or ".").resolve()
+
+        if not clean_apps or clean_all:
+            if proj_path.exists():
+                # 1. Project intermediate asm/ directory
+                asm_dir = proj_path / "asm"
+                if asm_dir.is_dir():
+                    dirs_to_clean.append(asm_dir)
+
+                # 2. Project __pycache__ directories
+                for p in proj_path.rglob("__pycache__"):
+                    if ".venv" not in p.parts:
+                        dirs_to_clean.append(p)
+
+                # 3. Project .pytest_cache
+                pytest_cache = proj_path / ".pytest_cache"
+                if pytest_cache.is_dir():
+                    dirs_to_clean.append(pytest_cache)
+
+                # 4. Local stamp and temp files
+                for stamp in proj_path.glob(".stamp_*"):
+                    files_to_clean.append(stamp)
+                for fasm_tmp in proj_path.glob("*.fasm_tmp*"):
+                    files_to_clean.append(fasm_tmp)
+
+        if clean_apps or clean_all:
+            # Global unpacked standalone application bundle cache
+            candidates = []
+            if os.name == "nt":
+                local_app_data = os.environ.get("LOCALAPPDATA")
+                if local_app_data:
+                    candidates.append(Path(local_app_data) / "pyfasm")
+            else:
+                home = Path.home()
+                candidates.append(home / ".cache" / "pyfasm")
+                candidates.append(home / ".local" / "share" / "pyfasm")
+
+            for c in candidates:
+                if c.is_dir():
+                    dirs_to_clean.append(c)
+
+        for f in files_to_clean:
+            try:
+                size = f.stat().st_size
+            except Exception:
+                size = 0
+            bytes_freed += size
+            files_count += 1
+            removed_items.append(str(f))
+            if not dry_run:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+        for d in dirs_to_clean:
+            d_size = 0
+            d_count = 0
+            try:
+                for sub in d.rglob("*"):
+                    if sub.is_file():
+                        d_size += sub.stat().st_size
+                        d_count += 1
+            except Exception:
+                pass
+            bytes_freed += d_size
+            files_count += d_count
+            removed_items.append(str(d))
+            if not dry_run:
+                try:
+                    shutil.rmtree(d, ignore_errors=True)
+                except Exception:
+                    pass
+
+        return files_count, bytes_freed, removed_items
+

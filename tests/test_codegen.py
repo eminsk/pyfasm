@@ -515,3 +515,49 @@ def test_all():
 
     # Verify reciprocal fast integer print in runtime
     assert "0CCCCCCCCCCCCCCCDh" in asm, "Reciprocal multiplier 0CCCCCCCCCCCCCCCDh must be in runtime"
+
+
+def test_icon_pe_resource_compilation(tmp_path: Path):
+    from pyfasm import PyFasmCompiler
+    import shutil
+    import sys
+
+    # Copy real icon if available or create minimal valid 16x16 .ico
+    real_ico = Path("C:/proekts/0122/icon.ico")
+    target_ico = tmp_path / "icon.ico"
+    if real_ico.exists():
+        shutil.copyfile(real_ico, target_ico)
+    else:
+        # Minimal valid 16x16 32-bpp icon header + BMP image data
+        target_ico.write_bytes(b"\x00\x00\x01\x00\x01\x00\x10\x10\x00\x00\x01\x00 \x00\x68\x04\x00\x00\x16\x00\x00\x00" + b"\x00" * 1128)
+
+    source = """
+def main():
+    print("Icon test running")
+"""
+    src_file = tmp_path / "app.py"
+    src_file.write_text(source, encoding="utf-8")
+
+    compiler = PyFasmCompiler()
+    success, out_exe, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Compilation with icon failed: {log}"
+    assert Path(out_exe).exists()
+
+    asm_file = tmp_path / "asm" / "resources.inc"
+    assert asm_file.exists(), "resources.inc must be generated when icon.ico is present"
+    rsrc_content = asm_file.read_text(encoding="utf-8")
+    assert "section '.rsrc' resource data readable" in rsrc_content
+    assert "directory 3, _pyfasm_icons, 14, _pyfasm_group_icons" in rsrc_content
+    assert "icon _pyfasm_main_icon" in rsrc_content
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        h_large = wintypes.HICON()
+        h_small = wintypes.HICON()
+        extracted = ctypes.windll.shell32.ExtractIconExW(str(out_exe), 0, ctypes.byref(h_large), ctypes.byref(h_small), 1)
+        assert extracted > 0, "Windows must extract the embedded icon from the PE executable"
+        if h_large.value:
+            ctypes.windll.user32.DestroyIcon(h_large)
+        if h_small.value:
+            ctypes.windll.user32.DestroyIcon(h_small)

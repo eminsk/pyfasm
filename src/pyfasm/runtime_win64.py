@@ -142,6 +142,61 @@ section '.data' data readable writeable
     _pyfasm_h_font_ui       dq 0
     _pyfasm_h_font_bold     dq 0
     _pyfasm_h_font_mono     dq 0
+    _pyfasm_h_font_title    dq 0
+    _pyfasm_h_icon_big      dq 0
+    _pyfasm_h_icon_small    dq 0
+    wszIconFile             du 'icon.ico', 0
+    wszPillAns1             du '1 ans', 0
+    wszPillAns3             du '3 ans', 0
+    wszBrandBadge           du 'SO', 0
+    wszBrandAppTitle        du 'Search Pro', 0
+    wszBtnBothText          du 'Both v', 0
+    wszBtnRelText           du 'Relevance v', 0
+    wszBtnDarkText          du 'Dark v', 0
+    wszLblQuickText         du 'Quick Search:', 0
+    wszTabEnText            du 'English (25)', 0
+    wszTabRuText            du 'Russian (4)', 0
+    wszTabBmText            du 'Bookmarks (0)', 0
+    wszChipPyText           du 'python', 0
+    wszChipJsText           du 'javascript', 0
+    wszChipReactText        du 'react', 0
+    wszChipFastText         du 'fastapi', 0
+    wszChipAsyncText        du 'asyncio', 0
+    wszChipPandasText       du 'pandas', 0
+    wszChipDockText         du 'docker', 0
+    wszChipCppText          du 'c++', 0
+    wszChipRustText         du 'rust', 0
+    wszBtnSaveText          du 'Save', 0
+    wszBtnCopyQText         du 'Copy Question', 0
+    wszBtnCopyLText         du 'Copy Link', 0
+    wszBtnBrowseText        du 'Browse', 0
+    wszBtnCopyAText         du 'Copy Answer', 0
+    wszBtnCopyCText         du 'Copy Code', 0
+    wszCodeHdrText          du 'Python - 4 lines                                       Wrap | Copy Code', 0
+
+    ; Rich Question Card 0
+    wszCard0Meta            du '^ 0    1.1k views                   Apr 12, 2021', 0
+    wszCard0Title           du 'talib abstract API vs talib', 0
+    wszCard0Excerpt         du 'Why talib.abstract does not cover all functions on talib? examples would be CDL3BLACKCROWS...', 0
+    wszCard0Tags            du '[python]  [algorithmic-trading]  [ta-lib]        RamA', 0
+
+    ; Rich Question Card 1
+    wszCard1Meta            du '^ 3    6.3k views                   Aug 23, 2015', 0
+    wszCard1Title           du 'nodejs talib MACD', 0
+    wszCard1Excerpt         du 'I am using talib technical analysis library in Node.js to calculate MACD. I used AAPL data to calculate MACD...', 0
+    wszCard1Tags            du '[node.js]  [finance]  [google-finance]           Stefano Piovesan', 0
+
+    ; Rich Question Card 2
+    wszCard2Meta            du '^ 0    1.5k views                   Feb 12, 2014', 0
+    wszCard2Title           du 'Using Talib in AlgoTrader with Esper', 0
+    wszCard2Excerpt         du 'I have installed the open source version of AlgoTrader and I am working on integrating Talib technical indicators...', 0
+    wszCard2Tags            du '[java]  [python]  [eclipse]                      Nema Tikaja', 0
+
+    ; Rich Question Card 3
+    wszCard3Meta            du '^ 1    2.5k views                   Nov 02, 2021', 0
+    wszCard3Title           du 'import talib - ModuleNotFoundError: No module named talib', 0
+    wszCard3Excerpt         du 'I have an issue with TA-Lib import I have created a view for my python project and when I import talib and run...', 0
+    wszCard3Tags            du '[python]  [import]  [ta-lib]                     Farhad', 0
 
     ; Split View HWND Handles
     align 8
@@ -1627,6 +1682,47 @@ _pyfasm_init_gui:
     call    [CreatePen]
     mov     [_pyfasm_hpen_orange], rax
 
+    ; Load Application Icons (ID 1 from PE resources, or fallback to 'icon.ico' file)
+    mov     rcx, [_pyfasm_h_inst]
+    mov     edx, 1                  ; ID 1
+    mov     r8d, 1                  ; IMAGE_ICON
+    mov     r9d, 32                 ; cx = 32
+    mov     qword [rsp + 32], 32    ; cy = 32
+    mov     qword [rsp + 40], 0     ; LR_DEFAULTCOLOR
+    call    [LoadImageW]
+    mov     [_pyfasm_h_icon_big], rax
+
+    mov     rcx, [_pyfasm_h_inst]
+    mov     edx, 1                  ; ID 1
+    mov     r8d, 1                  ; IMAGE_ICON
+    mov     r9d, 16                 ; cx = 16
+    mov     qword [rsp + 32], 16    ; cy = 16
+    mov     qword [rsp + 40], 0     ; LR_DEFAULTCOLOR
+    call    [LoadImageW]
+    mov     [_pyfasm_h_icon_small], rax
+
+    ; Fallback: if not embedded in PE resource, try loading 'icon.ico' from disk
+    cmp     qword [_pyfasm_h_icon_big], 0
+    jne     .icon_loaded_ok
+    xor     ecx, ecx
+    lea     rdx, [wszIconFile]
+    mov     r8d, 1                  ; IMAGE_ICON
+    mov     r9d, 32
+    mov     qword [rsp + 32], 32
+    mov     qword [rsp + 40], 10h   ; LR_LOADFROMFILE
+    call    [LoadImageW]
+    mov     [_pyfasm_h_icon_big], rax
+
+    xor     ecx, ecx
+    lea     rdx, [wszIconFile]
+    mov     r8d, 1                  ; IMAGE_ICON
+    mov     r9d, 16
+    mov     qword [rsp + 32], 16
+    mov     qword [rsp + 40], 10h   ; LR_LOADFROMFILE
+    call    [LoadImageW]
+    mov     [_pyfasm_h_icon_small], rax
+.icon_loaded_ok:
+
     xor     ecx, ecx
     mov     edx, 1
     mov     r8d, 00554133h          ; #334155 (Dark Slate Border)
@@ -1648,15 +1744,16 @@ _pyfasm_init_gui:
     mov     [_pyfasm_hpen_green_pill], rax
 
     ; Create Modern Segoe UI Fonts
-    mov     rcx, -14                ; nHeight = 14
+    ; 1. Normal UI Font (Segoe UI, 14px, FW_NORMAL 400)
+    mov     rcx, -14
     xor     edx, edx
     xor     r8d, r8d
     xor     r9d, r9d
-    mov     qword [rsp + 32], 400   ; FW_NORMAL
+    mov     qword [rsp + 32], 400
     mov     qword [rsp + 40], 0
     mov     qword [rsp + 48], 0
     mov     qword [rsp + 56], 0
-    mov     qword [rsp + 64], 1     ; DEFAULT_CHARSET
+    mov     qword [rsp + 64], 1
     mov     qword [rsp + 72], 0
     mov     qword [rsp + 80], 0
     mov     qword [rsp + 88], 5     ; CLEARTYPE_QUALITY
@@ -1666,6 +1763,63 @@ _pyfasm_init_gui:
     call    [CreateFontW]
     mov     [_pyfasm_h_font_ui], rax
     mov     [_pyfasm_h_font], rax
+
+    ; 2. Bold UI Font (Segoe UI, 14px, FW_BOLD 700)
+    mov     rcx, -14
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 700   ; FW_BOLD
+    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     qword [rsp + 64], 1
+    mov     qword [rsp + 72], 0
+    mov     qword [rsp + 80], 0
+    mov     qword [rsp + 88], 5     ; CLEARTYPE_QUALITY
+    mov     qword [rsp + 96], 0
+    lea     rax, [wszSegoeUI]
+    mov     [rsp + 104], rax
+    call    [CreateFontW]
+    mov     [_pyfasm_h_font_bold], rax
+
+    ; 3. Large Title Font (Segoe UI, 18px, FW_BOLD 700)
+    mov     rcx, -18
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 700   ; FW_BOLD
+    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     qword [rsp + 64], 1
+    mov     qword [rsp + 72], 0
+    mov     qword [rsp + 80], 0
+    mov     qword [rsp + 88], 5     ; CLEARTYPE_QUALITY
+    mov     qword [rsp + 96], 0
+    lea     rax, [wszSegoeUI]
+    mov     [rsp + 104], rax
+    call    [CreateFontW]
+    mov     [_pyfasm_h_font_title], rax
+
+    ; 4. Monospace Code Font (Consolas, 13px, FW_NORMAL 400)
+    mov     rcx, -13
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 400
+    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     qword [rsp + 64], 1
+    mov     qword [rsp + 72], 0
+    mov     qword [rsp + 80], 0
+    mov     qword [rsp + 88], 5     ; CLEARTYPE_QUALITY
+    mov     qword [rsp + 96], 0
+    lea     rax, [wszConsolas]
+    mov     [rsp + 104], rax
+    call    [CreateFontW]
+    mov     [_pyfasm_h_font_mono], rax
 
     ; Load standard arrow cursor IDC_ARROW (32512)
     xor     ecx, ecx
@@ -1682,14 +1836,16 @@ _pyfasm_init_gui:
     mov     dword [_pyfasm_wc + 20], 0      ; cbWndExtra
     mov     rax, [_pyfasm_h_inst]
     mov     qword [_pyfasm_wc + 24], rax    ; hInstance
-    mov     qword [_pyfasm_wc + 32], 0      ; hIcon
+    mov     rax, [_pyfasm_h_icon_big]
+    mov     qword [_pyfasm_wc + 32], rax    ; hIcon (32x32)
     mov     qword [_pyfasm_wc + 40], r11    ; hCursor (IDC_ARROW)
     mov     rax, [_pyfasm_hbr_bg]
     mov     qword [_pyfasm_wc + 48], rax    ; hbrBackground = solid dark brush!
     mov     qword [_pyfasm_wc + 56], 0      ; lpszMenuName
     lea     rax, [_pyfasm_wnd_class_w]
     mov     qword [_pyfasm_wc + 64], rax    ; lpszClassName
-    mov     qword [_pyfasm_wc + 72], 0      ; hIconSm
+    mov     rax, [_pyfasm_h_icon_small]
+    mov     qword [_pyfasm_wc + 72], rax    ; hIconSm (16x16)
 
     lea     rcx, [_pyfasm_wc]
     call    [RegisterClassExW]
@@ -1799,6 +1955,22 @@ _pyfasm_create_window:
     call    [CreateWindowExW]
     mov     [_pyfasm_h_wnd], rax
 
+    ; Set Window & Taskbar Icons
+    cmp     qword [_pyfasm_h_icon_big], 0
+    jz      .skip_wm_seticon
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 80h                ; WM_SETICON
+    mov     r8d, 1                  ; ICON_BIG (Taskbar & Alt+Tab)
+    mov     r9, [_pyfasm_h_icon_big]
+    call    [SendMessageW]
+
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 80h                ; WM_SETICON
+    xor     r8d, r8d                ; ICON_SMALL (Titlebar & Tray)
+    mov     r9, [_pyfasm_h_icon_small]
+    call    [SendMessageW]
+.skip_wm_seticon:
+
     ; Set DWM Immersive Dark Mode on titlebar
     mov     rcx, [_pyfasm_h_wnd]
     mov     edx, 20                 ; DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -1810,15 +1982,19 @@ _pyfasm_create_window:
     cmp     qword [_pyfasm_h_listbox], 0
     jne     .skip_build_controls
 
-    ; 1. Logo Badge (Modern Orange Header Pill)
+    ; 1. Brand Logo / Application Icon
+    cmp     qword [_pyfasm_h_icon_big], 0
+    jz      .create_logo_button_fallback
+
+    ; Static icon control inside app header: 32x32 at (20, 14)
     xor     ecx, ecx
-    lea     rdx, [szButtonClassW]
-    lea     r8, [wszLogoText]
-    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
-    mov     qword [rsp + 32], 25
-    mov     qword [rsp + 40], 18
-    mov     qword [rsp + 48], 150
-    mov     qword [rsp + 56], 34
+    lea     rdx, [szStaticClassW]
+    xor     r8, r8
+    mov     r9d, 50000003h          ; WS_CHILD | WS_VISIBLE | SS_ICON
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 32
+    mov     qword [rsp + 56], 32
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 901
@@ -1828,20 +2004,62 @@ _pyfasm_create_window:
     call    [CreateWindowExW]
     mov     [_pyfasm_h_logo], rax
     mov     rcx, rax
+    mov     edx, 170h               ; STM_SETICON (0x0170)
+    mov     r8, [_pyfasm_h_icon_big]
+    xor     r9d, r9d
+    call    [SendMessageW]
+    jmp     .logo_ctrl_done
+
+.create_logo_button_fallback:
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBrandBadge]
+    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 34
+    mov     qword [rsp + 56], 32
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 901
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     [_pyfasm_h_logo], rax
+.logo_ctrl_done:
+
+    ; 1b. App Title "Search Pro" (Bold White Static Label)
+    xor     ecx, ecx
+    lea     rdx, [szStaticClassW]
+    lea     r8, [wszBrandAppTitle]
+    mov     r9d, 50000000h          ; WS_CHILD | WS_VISIBLE
+    mov     qword [rsp + 32], 58
+    mov     qword [rsp + 40], 16
+    mov     qword [rsp + 48], 115
+    mov     qword [rsp + 56], 28
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 905
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     rcx, rax
     mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_bold]
+    mov     r8, [_pyfasm_h_font_title]
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 2. Search Input
-    xor     ecx, ecx                ; Flat border (no 3D white bevel)
+    ; 2. Search Input Box
+    xor     ecx, ecx
     lea     rdx, [szEditClassW]
     lea     r8, [wszSearchDefText]
     mov     r9d, 50810080h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
-    mov     qword [rsp + 32], 185
-    mov     qword [rsp + 40], 18
-    mov     qword [rsp + 48], 680
-    mov     qword [rsp + 56], 34
+    mov     qword [rsp + 32], 180
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 460
+    mov     qword [rsp + 56], 32
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 100
@@ -1857,15 +2075,15 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 3. Clear Button (Owner-drawn dark button with ✕)
+    ; 3. Clear Button (X)
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
     lea     r8, [wszClearBtnText]
-    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
-    mov     qword [rsp + 32], 875
-    mov     qword [rsp + 40], 18
-    mov     qword [rsp + 48], 40
-    mov     qword [rsp + 56], 34
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 665
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 34
+    mov     qword [rsp + 56], 32
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 1002
@@ -1880,15 +2098,59 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 4. Search Button (Owner-drawn vibrant Stack Overflow orange button)
+    ; 3b. Dropdown Pill 1 "Both v"
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnBothText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 705
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 85
+    mov     qword [rsp + 56], 32
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1003
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     rcx, rax
+    mov     rdx, 30h
+    mov     r8, [_pyfasm_h_font_ui]
+    mov     r9d, 1
+    call    [SendMessageW]
+
+    ; 3c. Dropdown Pill 2 "Relevance v"
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnRelText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 796
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 115
+    mov     qword [rsp + 56], 32
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1004
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     rcx, rax
+    mov     rdx, 30h
+    mov     r8, [_pyfasm_h_font_ui]
+    mov     r9d, 1
+    call    [SendMessageW]
+
+    ; 4. Search Button (Vibrant Orange)
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
     lea     r8, [wszSearchBtnText]
-    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
-    mov     qword [rsp + 32], 925
-    mov     qword [rsp + 40], 18
-    mov     qword [rsp + 48], 90
-    mov     qword [rsp + 56], 34
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 918
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 95
+    mov     qword [rsp + 56], 32
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 1001
@@ -1903,13 +2165,210 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 5. Filter Input (Left Column)
+    ; 4b. Theme Pill "Dark v"
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnDarkText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 1020
+    mov     qword [rsp + 40], 14
+    mov     qword [rsp + 48], 85
+    mov     qword [rsp + 56], 32
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1005
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     rcx, rax
+    mov     rdx, 30h
+    mov     r8, [_pyfasm_h_font_ui]
+    mov     r9d, 1
+    call    [SendMessageW]
+
+    ; 4c. Quick Search Chips Row (y = 56)
+    xor     ecx, ecx
+    lea     rdx, [szStaticClassW]
+    lea     r8, [wszLblQuickText]
+    mov     r9d, 50000000h
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 56
+    mov     qword [rsp + 48], 105
+    mov     qword [rsp + 56], 20
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 906
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     rcx, rax
+    mov     rdx, 30h
+    mov     r8, [_pyfasm_h_font_ui]
+    mov     r9d, 1
+    call    [SendMessageW]
+
+    ; Chip 0: python (x=130, y=54, w=58, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipPyText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 130
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 58
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1020
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 1: javascript (x=194, y=54, w=80, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipJsText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 194
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 80
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1021
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 2: react (x=280, y=54, w=52, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipReactText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 280
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 52
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1022
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 3: fastapi (x=338, y=54, w=58, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipFastText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 338
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 58
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1023
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 4: asyncio (x=402, y=54, w=58, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipAsyncText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 402
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 58
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1024
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 5: pandas (x=466, y=54, w=58, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipPandasText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 466
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 58
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1025
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 6: docker (x=530, y=54, w=58, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipDockText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 530
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 58
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1026
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 7: c++ (x=594, y=54, w=44, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipCppText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 594
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 44
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1027
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Chip 8: rust (x=644, y=54, w=46, h=24)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszChipRustText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 644
+    mov     qword [rsp + 40], 54
+    mov     qword [rsp + 48], 46
+    mov     qword [rsp + 56], 24
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1028
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; 5. Filter Input (y = 86)
     xor     ecx, ecx
     lea     rdx, [szEditClassW]
     lea     r8, [wszFilterDefText]
     mov     r9d, 50810080h
-    mov     qword [rsp + 32], 25
-    mov     qword [rsp + 40], 70
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 86
     mov     qword [rsp + 48], 460
     mov     qword [rsp + 56], 30
     mov     rax, [_pyfasm_h_wnd]
@@ -1926,38 +2385,67 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 6. Tabs Label
+    ; 6. Segmented Language Tabs (y = 122)
+    ; Tab 1: English (25) - Active Orange Tab
     xor     ecx, ecx
-    lea     rdx, [szStaticClassW]
-    lea     r8, [wszTabsDefText]
-    mov     r9d, 50000000h
-    mov     qword [rsp + 32], 25
-    mov     qword [rsp + 40], 108
-    mov     qword [rsp + 48], 460
-    mov     qword [rsp + 56], 24
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszTabEnText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 122
+    mov     qword [rsp + 48], 118
+    mov     qword [rsp + 56], 28
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
-    mov     qword [rsp + 72], 902
+    mov     qword [rsp + 72], 1010
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
-    mov     [_pyfasm_h_tabs_label], rax
-    mov     rcx, rax
-    mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_ui]
-    mov     r9d, 1
-    call    [SendMessageW]
+
+    ; Tab 2: Russian (4)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszTabRuText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 144
+    mov     qword [rsp + 40], 122
+    mov     qword [rsp + 48], 112
+    mov     qword [rsp + 56], 28
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1011
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Tab 3: Bookmarks (0)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszTabBmText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 262
+    mov     qword [rsp + 40], 122
+    mov     qword [rsp + 48], 125
+    mov     qword [rsp + 56], 28
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1012
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
 
     ; 7. ListBox (Left Column) - Owner-Drawn Question Cards
     xor     ecx, ecx
     lea     rdx, [szListBoxClassW]
     xor     r8, r8
     mov     r9d, 50200151h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT
-    mov     qword [rsp + 32], 25
-    mov     qword [rsp + 40], 136
+    mov     qword [rsp + 32], 20
+    mov     qword [rsp + 40], 160
     mov     qword [rsp + 48], 460
-    mov     qword [rsp + 56], 660
+    mov     qword [rsp + 56], 645
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 3001
@@ -1973,11 +2461,11 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; Configure 78px card height
+    ; Configure 102px card height
     mov     rcx, [_pyfasm_h_listbox]
     mov     edx, 1A0h               ; LB_SETITEMHEIGHT
     xor     r8d, r8d
-    mov     r9d, 78
+    mov     r9d, 102
     call    [SendMessageW]
 
     ; Populate Initial ListBox Items
@@ -2031,7 +2519,7 @@ _pyfasm_create_window:
     mov     [_pyfasm_h_title_label], rax
     mov     rcx, rax
     mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_ui]
+    mov     r8, [_pyfasm_h_font_title]
     mov     r9d, 1
     call    [SendMessageW]
 
@@ -2058,7 +2546,76 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 10. Tags
+    ; 9b. Action Toolbar (y = 132)
+    ; Button: Save (x=505)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnSaveText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 505
+    mov     qword [rsp + 40], 132
+    mov     qword [rsp + 48], 68
+    mov     qword [rsp + 56], 26
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1030
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Button: Copy Question (x=580)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnCopyQText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 580
+    mov     qword [rsp + 40], 132
+    mov     qword [rsp + 48], 115
+    mov     qword [rsp + 56], 26
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1031
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Button: Copy Link (x=702)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnCopyLText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 702
+    mov     qword [rsp + 40], 132
+    mov     qword [rsp + 48], 90
+    mov     qword [rsp + 56], 26
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1032
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; Button: Browse (x=1305)
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [wszBtnBrowseText]
+    mov     r9d, 5001000Bh
+    mov     qword [rsp + 32], 1305
+    mov     qword [rsp + 40], 132
+    mov     qword [rsp + 48], 70
+    mov     qword [rsp + 56], 26
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 1033
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+
+    ; 10. Tags (y = 166)
     xor     ecx, ecx
     lea     rdx, [szStaticClassW]
     lea     r8, [wszQTags1]
@@ -2192,7 +2749,7 @@ _pyfasm_create_window:
     mov     [_pyfasm_h_ans_edit], rax
     mov     rcx, rax
     mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_ui]
+    mov     r8, [_pyfasm_h_font_mono]
     mov     r9d, 1
     call    [SendMessageW]
 
@@ -2286,6 +2843,18 @@ _pyfasm_create_label:
     mov     [rsp + 104], rdx
     mov     [rsp + 80], r8
     mov     [rsp + 72], r9
+
+    ; If modern split-view is active and label is targeted at header (y < 60),
+    ; avoid creating overlapping duplicate controls over the header bar
+    cmp     qword [_pyfasm_h_listbox], 0
+    jz      .do_create_label_body
+    cmp     qword [rsp + 80], 60
+    jae     .do_create_label_body
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.do_create_label_body:
     mov     rax, [rbp + 48]
     test    rax, rax
     jnz     .lbl_h_ok
@@ -2837,6 +3406,8 @@ _pyfasm_wnd_proc:
     call    [DeleteObject]
     mov     rcx, [_pyfasm_h_font_mono]
     call    [DeleteObject]
+    mov     rcx, [_pyfasm_h_font_title]
+    call    [DeleteObject]
 
     xor     ecx, ecx
     call    [PostQuitMessage]
@@ -2854,12 +3425,11 @@ _pyfasm_wnd_proc:
     je      .draw_logo_badge
     cmp     eax, 3001               ; ListBox Owner-Drawn Question Cards
     je      .draw_question_card
-    call    [DefWindowProcW]
-    jmp     .wnd_proc_ret
+    jmp     .draw_pill_button
 
 .wnd_measureitem:
     ; rsi = MEASUREITEMSTRUCT*
-    mov     dword [rsi + 16], 78    ; itemHeight = 78px
+    mov     dword [rsi + 16], 102   ; itemHeight = 102px
     mov     eax, 1
     jmp     .wnd_proc_ret
 
@@ -2911,7 +3481,7 @@ _pyfasm_wnd_proc:
     mov     qword [rsp + 48], 8
     call    [RoundRect]
 
-    ; 3. Draw Green Score Pill [left+12, top+8, left+72, top+26]
+    ; 3. Draw Green Score Pill [left+12, top+8, left+68, top+24]
     mov     rcx, [rsi + 32]
     mov     rdx, [_pyfasm_hbr_green_pill]
     call    [SelectObject]
@@ -2925,15 +3495,15 @@ _pyfasm_wnd_proc:
     movsxd  r8, dword [rsi + 44]
     add     r8, 8
     movsxd  r9, dword [rsi + 40]
-    add     r9, 72
+    add     r9, 68
     movsxd  rax, dword [rsi + 44]
-    add     rax, 26
+    add     rax, 24
     mov     qword [rsp + 32], rax
     mov     qword [rsp + 40], 4
     mov     qword [rsp + 48], 4
     call    [RoundRect]
 
-    ; Pill text in white
+    ; Pill text in white (e.g. "1 ans")
     mov     rcx, [rsi + 32]
     mov     edx, 00FFFFFFh
     call    [SetTextColor]
@@ -2941,11 +3511,18 @@ _pyfasm_wnd_proc:
     mov     edx, 1                  ; TRANSPARENT
     call    [SetBkMode]
     mov     rcx, [rsi + 32]
-    mov     rdx, [_pyfasm_h_font_ui]
+    mov     rdx, [_pyfasm_h_font_bold]
     call    [SelectObject]
 
+    mov     eax, dword [rsi + 8]    ; itemID
+    cmp     eax, 1
+    je      .ans_is_3
+    lea     rdx, [wszPillAns1]
+    jmp     .draw_pill_lbl
+.ans_is_3:
+    lea     rdx, [wszPillAns3]
+.draw_pill_lbl:
     mov     rcx, [rsi + 32]
-    lea     rdx, [wszPillText]
     mov     r8d, -1
     mov     eax, dword [rsi + 40]
     add     eax, 12
@@ -2954,66 +3531,283 @@ _pyfasm_wnd_proc:
     add     eax, 8
     mov     dword [_pyfasm_rc_client + 4], eax
     mov     eax, dword [rsi + 40]
-    add     eax, 72
+    add     eax, 68
     mov     dword [_pyfasm_rc_client + 8], eax
     mov     eax, dword [rsi + 44]
-    add     eax, 26
+    add     eax, 24
     mov     dword [_pyfasm_rc_client + 12], eax
     lea     r9, [_pyfasm_rc_client]
     mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE
     call    [DrawTextW]
 
-    ; 4. Card Title Text
+    ; Line 1: Meta text (Score, Views, Date) [left+74, top+7, right-14, top+24]
     mov     rcx, [rsi + 32]
-    mov     rdx, [_pyfasm_h_font_bold]
+    mov     rdx, [_pyfasm_h_font_ui]
     call    [SelectObject]
-
-    mov     ecx, [rsi + 16]
-    test    ecx, 1
-    jz      .title_normal
     mov     rcx, [rsi + 32]
-    mov     edx, 00FFFFFFh          ; bright white
-    call    [SetTextColor]
-    jmp     .draw_title_str
-.title_normal:
-    mov     rcx, [rsi + 32]
-    mov     edx, 00E2E8F0h          ; slate white
+    mov     edx, 0094A3B8h          ; #B8A394 slate
     call    [SetTextColor]
 
-.draw_title_str:
+    mov     eax, dword [rsi + 8]    ; itemID
+    cmp     eax, 0
+    je      .meta_0
+    cmp     eax, 1
+    je      .meta_1
+    cmp     eax, 2
+    je      .meta_2
+    lea     rdx, [wszCard3Meta]
+    jmp     .draw_card_meta
+.meta_0:
+    lea     rdx, [wszCard0Meta]
+    jmp     .draw_card_meta
+.meta_1:
+    lea     rdx, [wszCard1Meta]
+    jmp     .draw_card_meta
+.meta_2:
+    lea     rdx, [wszCard2Meta]
+.draw_card_meta:
     mov     rcx, [rsi + 32]
-    mov     edx, 1
-    call    [SetBkMode]
-
-    ; Title rect: left+12, top+32, right-14, bottom-4
+    mov     r8d, -1
     mov     eax, dword [rsi + 40]
-    add     eax, 12
+    add     eax, 74
     mov     dword [_pyfasm_rc_client], eax
     mov     eax, dword [rsi + 44]
-    add     eax, 32
+    add     eax, 7
     mov     dword [_pyfasm_rc_client + 4], eax
     mov     eax, dword [rsi + 48]
     sub     eax, 14
     mov     dword [_pyfasm_rc_client + 8], eax
-    mov     eax, dword [rsi + 52]
-    sub     eax, 4
+    mov     eax, dword [rsi + 44]
+    add     eax, 24
     mov     dword [_pyfasm_rc_client + 12], eax
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 820h  ; DT_LEFT | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
 
-    ; Retrieve text for this listbox item
-    mov     rcx, [_pyfasm_h_listbox]
-    mov     edx, 189h               ; LB_GETTEXT
-    movsxd  r8, dword [rsi + 8]     ; itemID
-    lea     r9, [_pyfasm_card_text_buf]
-    call    [SendMessageW]
+    ; Line 2: Card Title Text (Bold White) [left+12, top+28, right-14, top+48]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_bold]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh          ; pure white
+    call    [SetTextColor]
+
+    mov     eax, dword [rsi + 8]
+    cmp     eax, 0
+    je      .title_0
+    cmp     eax, 1
+    je      .title_1
+    cmp     eax, 2
+    je      .title_2
+    lea     rdx, [wszCard3Title]
+    jmp     .draw_title_str
+.title_0:
+    lea     rdx, [wszCard0Title]
+    jmp     .draw_title_str
+.title_1:
+    lea     rdx, [wszCard1Title]
+    jmp     .draw_title_str
+.title_2:
+    lea     rdx, [wszCard2Title]
+.draw_title_str:
+    mov     rcx, [rsi + 32]
+    mov     r8d, -1
+    mov     eax, dword [rsi + 40]
+    add     eax, 12
+    mov     dword [_pyfasm_rc_client], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 28
+    mov     dword [_pyfasm_rc_client + 4], eax
+    mov     eax, dword [rsi + 48]
+    sub     eax, 14
+    mov     dword [_pyfasm_rc_client + 8], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 48
+    mov     dword [_pyfasm_rc_client + 12], eax
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 820h  ; DT_LEFT | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
+
+    ; Line 3: Excerpt Text (Slate) [left+12, top+50, right-14, top+70]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_ui]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     edx, 00CBD5E1h          ; slate light gray
+    call    [SetTextColor]
+
+    mov     eax, dword [rsi + 8]
+    cmp     eax, 0
+    je      .ex_0
+    cmp     eax, 1
+    je      .ex_1
+    cmp     eax, 2
+    je      .ex_2
+    lea     rdx, [wszCard3Excerpt]
+    jmp     .draw_ex_str
+.ex_0:
+    lea     rdx, [wszCard0Excerpt]
+    jmp     .draw_ex_str
+.ex_1:
+    lea     rdx, [wszCard1Excerpt]
+    jmp     .draw_ex_str
+.ex_2:
+    lea     rdx, [wszCard2Excerpt]
+.draw_ex_str:
+    mov     rcx, [rsi + 32]
+    mov     r8d, -1
+    mov     eax, dword [rsi + 40]
+    add     eax, 12
+    mov     dword [_pyfasm_rc_client], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 50
+    mov     dword [_pyfasm_rc_client + 4], eax
+    mov     eax, dword [rsi + 48]
+    sub     eax, 14
+    mov     dword [_pyfasm_rc_client + 8], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 70
+    mov     dword [_pyfasm_rc_client + 12], eax
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 820h  ; DT_LEFT | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
+
+    ; Line 4: Tags and Author [left+12, top+74, right-14, top+94]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_ui]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     edx, 00F8BD38h          ; #38BDF8 cyan text for tags!
+    call    [SetTextColor]
+
+    mov     eax, dword [rsi + 8]
+    cmp     eax, 0
+    je      .tag_0
+    cmp     eax, 1
+    je      .tag_1
+    cmp     eax, 2
+    je      .tag_2
+    lea     rdx, [wszCard3Tags]
+    jmp     .draw_tag_str
+.tag_0:
+    lea     rdx, [wszCard0Tags]
+    jmp     .draw_tag_str
+.tag_1:
+    lea     rdx, [wszCard1Tags]
+    jmp     .draw_tag_str
+.tag_2:
+    lea     rdx, [wszCard2Tags]
+.draw_tag_str:
+    mov     rcx, [rsi + 32]
+    mov     r8d, -1
+    mov     eax, dword [rsi + 40]
+    add     eax, 12
+    mov     dword [_pyfasm_rc_client], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 74
+    mov     dword [_pyfasm_rc_client + 4], eax
+    mov     eax, dword [rsi + 48]
+    sub     eax, 14
+    mov     dword [_pyfasm_rc_client + 8], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 94
+    mov     dword [_pyfasm_rc_client + 12], eax
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 820h  ; DT_LEFT | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
+
+.card_draw_ret:
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
+.draw_pill_button:
+    ; 1. Clear background
+    mov     rcx, [rsi + 32]         ; hDC
+    lea     rdx, [rsi + 40]         ; rcItem
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    ; 2. Choose brush & pen based on CtlID
+    mov     eax, [rsi + 4]          ; CtlID
+    cmp     eax, 1010               ; Selected Tab: English (25)
+    je      .pill_orange
+
+    ; Default dark pill button
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_card]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_slate]
+    call    [SelectObject]
+    jmp     .do_draw_pill_shape
+
+.pill_orange:
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_orange]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_orange]
+    call    [SelectObject]
+
+.do_draw_pill_shape:
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    movsxd  r8, dword [rsi + 44]
+    movsxd  r9, dword [rsi + 48]
+    movsxd  rax, dword [rsi + 52]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 6
+    mov     qword [rsp + 48], 6
+    call    [RoundRect]
+
+    ; 3. Choose text color
+    mov     eax, [rsi + 4]
+    cmp     eax, 1010               ; Orange tab -> white text
+    je      .pill_txt_white
+    cmp     eax, 1020
+    jb      .pill_txt_slate
+    cmp     eax, 1028
+    jbe     .pill_txt_cyan          ; Chips 1020..1028 -> cyan text
+
+.pill_txt_slate:
+    mov     rcx, [rsi + 32]
+    mov     edx, 00CBD5E1h          ; slate light text
+    call    [SetTextColor]
+    jmp     .do_draw_pill_text
+
+.pill_txt_cyan:
+    mov     rcx, [rsi + 32]
+    mov     edx, 00F8BD38h          ; #38BDF8 cyan
+    call    [SetTextColor]
+    jmp     .do_draw_pill_text
+
+.pill_txt_white:
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh          ; pure white
+    call    [SetTextColor]
+
+.do_draw_pill_text:
+    mov     rcx, [rsi + 32]
+    mov     edx, 1                  ; TRANSPARENT
+    call    [SetBkMode]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_ui]
+    call    [SelectObject]
+
+    ; Get button text directly from window
+    mov     rcx, [rsi + 24]         ; hwndItem
+    lea     rdx, [_pyfasm_card_text_buf]
+    mov     r8d, 256
+    call    [GetWindowTextW]
 
     mov     rcx, [rsi + 32]
     lea     rdx, [_pyfasm_card_text_buf]
     mov     r8d, -1
-    lea     r9, [_pyfasm_rc_client]
-    mov     qword [rsp + 32], 8010h ; DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS
+    lea     r9, [rsi + 40]
+    mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
     call    [DrawTextW]
 
-.card_draw_ret:
     mov     eax, 1
     jmp     .wnd_proc_ret
 
@@ -3155,7 +3949,7 @@ _pyfasm_wnd_proc:
     call    [SelectObject]
 
     mov     rcx, [rsi + 32]
-    lea     rdx, [wszLogoText]
+    lea     rdx, [wszBrandBadge]
     mov     r8d, -1
     lea     r9, [rsi + 40]
     mov     qword [rsp + 32], 825h

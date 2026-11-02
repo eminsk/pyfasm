@@ -154,3 +154,34 @@ def test_bundle_runner_portability(tmp_path):
         # Must use relative or standard portable paths
         assert "%~dp0" in run_bat
         assert "$DIR" in run_sh
+
+
+def test_clean_cache_functionality(tmp_path: Path):
+    from pyfasm import PyFasmCompiler
+
+    # Create fake project cache structure
+    asm_dir = tmp_path / "asm"
+    asm_dir.mkdir()
+    (asm_dir / "main.asm").write_text("; asm", encoding="utf-8")
+
+    pycache_dir = tmp_path / "__pycache__"
+    pycache_dir.mkdir()
+    (pycache_dir / "module.pyc").write_bytes(b"\x00" * 100)
+
+    stamp_file = tmp_path / ".stamp_12345"
+    stamp_file.write_text("1", encoding="utf-8")
+
+    # Test dry run first
+    f_count, b_freed, items = PyFasmCompiler.clean_cache(project_dir=str(tmp_path), dry_run=True)
+    assert f_count >= 2
+    assert b_freed > 0
+    assert asm_dir.exists()
+    assert pycache_dir.exists()
+    assert stamp_file.exists()
+
+    # Test actual clean
+    f_count, b_freed, items = PyFasmCompiler.clean_cache(project_dir=str(tmp_path), dry_run=False)
+    assert f_count >= 2
+    assert not asm_dir.exists()
+    assert not pycache_dir.exists()
+    assert not stamp_file.exists()

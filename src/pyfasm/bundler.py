@@ -30,6 +30,7 @@ class ProjectBundler:
         target: str = "win64",
         onefile: bool = True,
         build_stamp: Optional[str] = None,
+        icon_path: Optional[str] = None,
     ) -> str:
         """
         Generates FASM x64 assembly for a monolithic single-file or directory launcher.
@@ -236,7 +237,7 @@ file_size = $ - mach_header
         stamp_file = build_stamp or f".stamp_{abs(hash(app_name_safe)) % 1000000}"
 
         if onefile:
-            return f"""; ============================================================
+            win_asm = f"""; ============================================================
 ; PyFASM Native Monolithic Single-File Launcher (Windows PE64)
 ; ============================================================
 format PE64 {subsystem}
@@ -355,6 +356,21 @@ section '.idata' import data readable writeable
            CloseHandle, 'CloseHandle', \\
            ExitProcess, 'ExitProcess'
 """
+            if icon_path and Path(icon_path).exists():
+                icon_posix = str(Path(icon_path).resolve()).replace("\\", "/")
+                win_asm += f"""
+include 'macro/resource.inc'
+
+section '.rsrc' resource data readable
+
+directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
+
+resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
+resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
+
+icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
+"""
+            return win_asm
         else:
             # Directory wrapper mode
             script_escaped = entry_script.replace("\\", "\\\\")
@@ -362,7 +378,7 @@ section '.idata' import data readable writeable
             cmd_run = f'if exist "{proj_venv_win_str}" ("{proj_venv_win_str}" {gil_arg}"{script_escaped}") else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" ("%USERPROFILE%\\.local\\bin\\uv.exe" run python {gil_arg}"{script_escaped}") else (python {gil_arg}"{script_escaped}")' if proj_venv_win_str else f'python {gil_arg}"{script_escaped}"'
             cmd_full_win = f'cmd.exe /c {cmd_run}'
 
-            return f"""; ============================================================
+            win_asm = f"""; ============================================================
 ; PyFASM Native Project Bootstrapper & Launcher (Windows PE64)
 ; ============================================================
 format PE64 {subsystem}
@@ -452,6 +468,7 @@ section '.idata' import data readable writeable
         include_bins: Optional[List[str]] = None,
         include_venv: bool = False,
         export_fasm_dir: Optional[str] = None,
+        icon_path: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
         """
         Bundles a project, its dependencies, and tools (ffmpeg, mpv) into a single monolithic standalone executable.
@@ -482,6 +499,8 @@ section '.idata' import data readable writeable
             return False, "", f"Could not determine entry script in {project_dir}"
 
         entry_path = Path(entry_script).resolve()
+        if not icon_path and (proj_path / "icon.ico").exists():
+            icon_path = str((proj_path / "icon.ico").resolve())
 
         # Determine target and output extension
         target_norm = target.lower()
@@ -501,6 +520,9 @@ section '.idata' import data readable writeable
                 target_norm = "macos"
 
         # Generate Launcher Assembly with unique build stamp
+        if not icon_path and (proj_path / "icon.ico").exists():
+            icon_path = str((proj_path / "icon.ico").resolve())
+
         build_stamp = f".stamp_{int(time.time())}"
         asm_content = self.generate_launcher_asm(
             entry_script=str(entry_path),
@@ -509,6 +531,7 @@ section '.idata' import data readable writeable
             target=target_norm,
             onefile=onefile,
             build_stamp=build_stamp,
+            icon_path=icon_path,
         )
 
         asm_file = out_bin.with_suffix(".asm")

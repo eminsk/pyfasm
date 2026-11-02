@@ -278,6 +278,35 @@ uv run pyfasm compile my_app.py --export-fasm
 
 ---
 
+### 9. Application Icon & Windows PE Resources
+
+```bash
+# Compile with application icon embedded into PE resources (.rsrc), window, and taskbar:
+uv run pyfasm compile main.py --icon icon.ico
+
+# Auto-detects icon.ico if present in project directory:
+uv run pyfasm bundle . -o MyApp.exe
+```
+
+### 10. Clean Compiler & Build Caches
+
+```bash
+# Clean local project build artifacts (asm/, __pycache__, .stamp_*):
+uv run pyfasm clean
+
+# Dry-run to inspect items without deleting:
+uv run pyfasm clean --dry-run
+
+# Clean global unpacked application caches (%LOCALAPPDATA%/pyfasm):
+uv run pyfasm clean --apps
+
+# Clean all local and global caches:
+uv run pyfasm clean --all
+```
+
+---
+
+
 ## Supported Python Language Subset
 
 | Feature | Syntax / API | Description |

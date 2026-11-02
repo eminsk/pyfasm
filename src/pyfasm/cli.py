@@ -25,6 +25,7 @@ def main() -> int:
     p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build (win64 only)")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
     p_compile.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
+    p_compile.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources, window, and taskbar")
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
@@ -43,6 +44,15 @@ def main() -> int:
     p_bundle.add_argument("--include-venv", action="store_true", help="Pack project .venv environment into the bundle for offline standalone portability")
     p_bundle.add_argument("--dir-mode", action="store_true", help="Build directory-wrapper launcher instead of monolithic single-file")
     p_bundle.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
+    p_bundle.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources, window, and taskbar")
+
+
+    # Subcommand: clean
+    p_clean = subparsers.add_parser("clean", help="Clean compiler cache, intermediate ASM files, and unpacked application caches")
+    p_clean.add_argument("path", nargs="?", default=".", help="Project directory to clean (default: current directory)")
+    p_clean.add_argument("--all", "-a", action="store_true", help="Clean all caches including global unpacked apps in %%LOCALAPPDATA%%/pyfasm")
+    p_clean.add_argument("--apps", action="store_true", help="Clean only global unpacked standalone application caches")
+    p_clean.add_argument("--dry-run", "-n", action="store_true", help="Show files to be deleted without removing them")
 
     # Subcommand: docs
     p_docs = subparsers.add_parser("docs", help="View PyFASM documentation (English by default, Russian via --ru)")
@@ -97,6 +107,22 @@ def main() -> int:
 
     compiler = PyFasmCompiler()
 
+    if args.command == "clean":
+        files_count, bytes_freed, items = PyFasmCompiler.clean_cache(
+            project_dir=args.path,
+            clean_apps=args.apps,
+            clean_all=args.all,
+            dry_run=args.dry_run,
+        )
+        mb = bytes_freed / (1024 * 1024)
+        action_word = "Would remove" if args.dry_run else "Cleaned"
+        print(f"[PyFASM] {action_word} {len(items)} target location(s) ({files_count} files, {mb:.2f} MB freed).")
+        for item in items[:10]:
+            print(f"  - {item}")
+        if len(items) > 10:
+            print(f"  ... and {len(items) - 10} more targets.")
+        return 0
+
     if args.command == "bundle":
         from pyfasm.bundler import ProjectBundler
         bundler = ProjectBundler(compiler.fasm_runner)
@@ -110,6 +136,7 @@ def main() -> int:
             include_bins=args.include_bin,
             include_venv=args.include_venv,
             export_fasm_dir=args.export_fasm,
+            icon_path=args.icon,
         )
 
         if not success:
@@ -126,6 +153,7 @@ def main() -> int:
             target=args.target,
             keep_asm=not args.no_asm,
             export_fasm_dir=args.export_fasm,
+            icon_path=args.icon,
         )
 
         if not success:
