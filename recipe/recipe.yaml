@@ -1,6 +1,6 @@
 context:
   name: pyfasm64
-  version: "0.1.5"
+  version: "0.1.8"
 
 package:
   name: ${{ name }}

@@ -60,6 +60,7 @@ class ParsedModule:
     string_literals: List[StringLiteral] = field(default_factory=list)
     float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
+    imports: List[str] = field(default_factory=list)
     main_func: Optional[FunctionSymbol] = None
 
 
@@ -97,9 +98,15 @@ class AstAnalyzer:
         tree = ast.parse(source_code)
         module = ParsedModule()
 
-        # First pass: find string and float constants across the AST
+        # First pass: find imports, string and float constants across the AST
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module.imports.append(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    module.imports.append(node.module)
+            elif isinstance(node, ast.Constant):
                 if isinstance(node.value, str):
                     self.get_or_create_string(node.value)
                 elif isinstance(node.value, float):
@@ -199,9 +206,15 @@ class AstAnalyzer:
         except Exception:
             return
 
-        # 1. Collect string & float constants across the AST
+        # 1. Collect imports, string & float constants across the AST
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module.imports.append(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    module.imports.append(node.module)
+            elif isinstance(node, ast.Constant):
                 if isinstance(node.value, str):
                     self.get_or_create_string(node.value)
                 elif isinstance(node.value, float):

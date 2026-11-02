@@ -313,3 +313,35 @@ def main():
     success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
     assert success is True, f"GUI compilation failed: {log}"
 
+
+def test_background_tray_app_codegen(tmp_path: Path):
+    source = """
+import pystray
+
+class PuntoSwitcher:
+    def __init__(self):
+        pass
+
+    def run(self):
+        pass
+
+def main():
+    app = PuntoSwitcher()
+    app.run()
+"""
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+
+    # Verify tray initialization and event loop
+    assert "call _pyfasm_init_tray" in asm
+    assert "call _pyfasm_run_tray_loop" in asm
+    # Verify NO window is created for tray apps!
+    assert "call _pyfasm_ensure_window" not in asm
+    assert "call _pyfasm_run_window_loop" not in asm
+
+    src_file = tmp_path / "tray_app.py"
+    src_file.write_text(source, encoding="utf-8")
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Tray compilation failed: {log}"
+
+

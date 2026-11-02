@@ -1,3 +1,13 @@
+python3-pyfasm64 (0.1.8-1) stable; urgency=medium
+
+  * Release PyFASM64 0.1.8.
+  * Added native Windows taskbar system tray background application engine (zero visible desktop window).
+  * Added UTF-16 Unicode wide string support (du) and Win32 Wide APIs (CreateWindowExW, SetWindowTextW) eliminating all mojibake.
+  * Added Windows 10/11 immersive dark mode (DWMWA_USE_IMMERSIVE_DARK_MODE) and dark GDI control theme.
+  * Added rich master-detail split-view support for search and catalog desktop applications.
+
+ -- eminsk <M_N_N@tut.by>  Mon, 02 Nov 2026 08:05:00 -0500
+
 python3-pyfasm64 (0.1.5-1) stable; urgency=medium
 
   * Release PyFASM64 0.1.5.

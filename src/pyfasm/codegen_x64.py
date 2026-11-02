@@ -519,12 +519,24 @@ include 'functions.inc'
         self.emit("call _pyfasm_alloc")
         self.emit("mov [rbp - 40], rax", "save self instance pointer")
 
-        # Check if GUI class or application
-        is_gui = any(
-            any(k in s.lower() for k in ("app", "window", "gui", "ctk", "tk", "punto"))
+        # Check if Background System Tray Application (Punto Switcher, pystray)
+        module_imports = getattr(self.module, "imports", [])
+        is_tray = any(
+            any(k in s.lower() for k in ("tray", "punto", "pystray"))
             for s in cls_sym.bases + [cls_sym.name]
-        )
-        if is_gui and self.target in ("win64", "dll"):
+        ) or any("pystray" in imp.lower() for imp in module_imports)
+
+        # Check if Desktop GUI class or application
+        is_gui = any(
+            any(k in s.lower() for k in ("app", "window", "gui", "ctk", "tk", "dialog", "form"))
+            for s in cls_sym.bases + [cls_sym.name]
+        ) and not is_tray
+
+        if is_tray and self.target in ("win64", "dll"):
+            self.emit("call _pyfasm_init_tray", "initialize native background system tray icon")
+            self.emit("mov rax, [rbp - 40]")
+            self.emit("mov [_pyfasm_last_gui_instance], rax", "store tray instance pointer")
+        elif is_gui and self.target in ("win64", "dll"):
             self.emit("call _pyfasm_init_gui", "initialize native GUI system")
             self.emit("call _pyfasm_ensure_window", "ensure native Win32 window is created")
             self.emit("mov rax, [rbp - 40]")
@@ -1019,17 +1031,29 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return
 
-        if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
-            # If no custom method defined or app loop call, run the native GUI window loop
-            if func_name not in self.module.functions or prefix in ("app", "self"):
-                self.emit("sub rsp, 32", "shadow space for GUI event loop")
-                self.emit("call _pyfasm_run_window_loop")
-                self.emit("add rsp, 32")
-                return
-
-        # Check Win32 Native GUI controls
         func_dump_lower = ast.dump(call.func).lower()
         call_name_lower = (func_name or attr_name or "").lower()
+
+        if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
+            # If no custom method defined or app loop call, run the native GUI window or tray loop
+            if func_name not in self.module.functions or prefix in ("app", "self", "icon"):
+                module_imports = getattr(self.module, "imports", [])
+                is_tray = any(
+                    any(k in s.lower() for k in ("tray", "punto", "pystray"))
+                    for s in self.module.classes
+                ) or any("pystray" in imp.lower() for imp in module_imports) or prefix == "icon"
+                if is_tray and not any(k in func_dump_lower for k in ("ctk", "tk", "window")):
+                    self.emit("sub rsp, 32", "shadow space for background tray event loop")
+                    self.emit("call _pyfasm_run_tray_loop")
+                    self.emit("add rsp, 32")
+                    return
+                else:
+                    self.emit("sub rsp, 32", "shadow space for GUI event loop")
+                    self.emit("call _pyfasm_run_window_loop")
+                    self.emit("add rsp, 32")
+                    return
+
+        # Check Win32 Native GUI controls
 
         if self.target in ("win64", "dll"):
             # 1. Widget UI methods: .get()
