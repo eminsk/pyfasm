@@ -756,7 +756,11 @@ include 'functions.inc'
                     self.emit("mov r8, rax", "object pointer")
                     self.emit("pop rax", "value to store")
                     offset = self._get_attribute_offset(target.attr)
+                    lbl_skip = self.new_label("skip_store")
+                    self.emit("test r8, r8", "check null pointer")
+                    self.emit(f"jz {lbl_skip}")
                     self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
+                    self.emit_raw(f"{lbl_skip}:")
 
         elif isinstance(stmt, ast.AnnAssign):
             if stmt.value:
@@ -965,13 +969,32 @@ include 'functions.inc'
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
         elif isinstance(expr, ast.Attribute):
-            if isinstance(expr.value, ast.Name) and expr.value.id in ("win32con", "ctypes", "sys", "re"):
-                self.emit("xor eax, eax")
+            def _is_module_or_class(node):
+                if isinstance(node, ast.Name):
+                    if node.id in ("self", "this"):
+                        return False
+                    if self.current_func and hasattr(self.current_func, "local_vars") and node.id in self.current_func.local_vars:
+                        return False
+                    return True
+                if isinstance(node, ast.Attribute):
+                    return _is_module_or_class(node.value)
+                return False
+
+            if _is_module_or_class(expr.value):
+                self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
             else:
                 self._generate_expr(expr.value)
                 self.emit("mov r8, rax", "object pointer")
                 offset = self._get_attribute_offset(expr.attr)
+                lbl_null = self.new_label("null_attr")
+                lbl_done = self.new_label("done_attr")
+                self.emit("test r8, r8", "check null pointer")
+                self.emit(f"jz {lbl_null}")
                 self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
+                self.emit(f"jmp {lbl_done}")
+                self.emit_raw(f"{lbl_null}:")
+                self.emit("xor eax, eax", "null pointer default")
+                self.emit_raw(f"{lbl_done}:")
 
         elif isinstance(expr, ast.BinOp):
             is_str_add = False
@@ -1117,10 +1140,18 @@ include 'functions.inc'
                     v = self.current_func.local_vars.get(expr.value.id)
                     if v and (v.var_type.is_list() or v.var_type.is_tuple()):
                         is_list_val = True
+                lbl_null_arr = self.new_label("null_arr")
+                lbl_done_arr = self.new_label("done_arr")
+                self.emit("test rax, rax", "check null array")
+                self.emit(f"jz {lbl_null_arr}")
                 if is_list_val:
                     self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
                 else:
                     self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
+                self.emit(f"jmp {lbl_done_arr}")
+                self.emit_raw(f"{lbl_null_arr}:")
+                self.emit("xor eax, eax", "null array default")
+                self.emit_raw(f"{lbl_done_arr}:")
 
         elif isinstance(expr, ast.Dict):
             num_keys = len(expr.keys)
