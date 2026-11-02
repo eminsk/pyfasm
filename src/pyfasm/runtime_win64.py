@@ -100,6 +100,12 @@ section '.data' data readable writeable
     _pyfasm_hbr_bg          dq 0 ; #0f111a
     _pyfasm_hbr_card        dq 0 ; #1d1f2e
     _pyfasm_hbr_input       dq 0 ; #141620
+    _pyfasm_hbr_orange      dq 0 ; #f48024
+    _pyfasm_hbr_orange_press dq 0 ; #da670b
+    _pyfasm_hpen_orange     dq 0
+    _pyfasm_hpen_slate      dq 0
+    align 8
+    _pyfasm_rc_client       rd 4
     _pyfasm_h_font_ui       dq 0
     _pyfasm_h_font_bold     dq 0
     _pyfasm_h_font_mono     dq 0
@@ -125,74 +131,75 @@ section '.data' data readable writeable
 
     ; Wide Strings for SO Search Pro
     align 8
-    wszLogoText             du '⚡ SO Search Pro', 0
+    wszTrayIconFile         du 'icon.ico', 0
+    wszLogoText             du ' SO  Search Pro', 0
     wszSearchDefText        du 'talib', 0
-    wszClearBtnText         du '✕', 0
+    wszClearBtnText         du 'X', 0
     wszSearchBtnText        du 'Search', 0
     wszFilterDefText        du 'Filter loaded results (by title or tag)...', 0
-    wszTabsDefText          du '🇬🇧 English (25)      🇷🇺 Russian (4)      ⭐ Bookmarks (0)', 0
-    wszStatusDefText        du 'Loaded question #67061052 with 1 answers     |     ⚡ API Quota: 296/300  |  Connected  |  v2.1', 0
+    wszTabsDefText          du 'English (25)       Russian (4)       Bookmarks (0)', 0
+    wszStatusDefText        du 'Loaded question #67061052 with 1 answers     |     API Quota: 296/300  |  Connected  |  v2.1', 0
 
     ; Questions in list
     align 8
-    wszRes1                 du 'talib abstract API vs talib  (▲ 0,  ✓ 1 ans,  👁 1.1k)', 0
-    wszRes2                 du 'nodejs talib MACD  (▲ 3,  ✓ 3 ans,  👁 6.3k)', 0
-    wszRes3                 du 'Using Talib in AlgoTrader with Esper  (▲ 0,  ✓ 1 ans,  👁 1.5k)', 0
-    wszRes4                 du 'How to sort a dictionary by value in Python?  (▲ 12.4k,  ✓ 32 ans)', 0
+    wszRes1                 du 'talib abstract API vs talib  (^ 0,  [OK] 1 ans,  1.1k views)', 0
+    wszRes2                 du 'nodejs talib MACD  (^ 3,  [OK] 3 ans,  6.3k views)', 0
+    wszRes3                 du 'Using Talib in AlgoTrader with Esper  (^ 0,  [OK] 1 ans,  1.5k views)', 0
+    wszRes4                 du 'How to sort a dictionary by value in Python?  (^ 12.4k,  [OK] 32 ans)', 0
 
     ; Question 1 Details
     align 8
     wszQTitle1              du 'talib abstract API vs talib', 0
-    wszQMeta1               du '▲ 0   👁 1,078 views   Apr 12, 2021 11:20   👤 RamA (13 rep)', 0
+    wszQMeta1               du '^ 0   1,078 views   Apr 12, 2021 11:20   RamA (13 rep)', 0
     wszQTags1               du '[python]   [algorithmic-trading]   [ta-lib]   [candlesticks]', 0
     wszQBody1               du 'Why talib.abstract does not cover all functions on talib? examples would be ''CDL3BLACKCROWS'' which is available in talib but not in talib.abstract.', 13, 10, 13, 10, 'How can I add CDL3BLACKCROWS to talib.abstract?', 0
-    wszAnsHead1             du '💡 Answers (1)', 0
-    wszAnsBan1              du '✓ ACCEPTED SOLUTION — Verified and accepted by the question author', 0
-    wszAnsMeta1             du 'Answer #1   ▲ 0   by truf (3,129 rep)   •   Apr 13, 2021 07:01', 0
+    wszAnsHead1             du 'Answers (1)', 0
+    wszAnsBan1              du '[ACCEPTED SOLUTION]  * Verified and accepted by the question author', 0
+    wszAnsMeta1             du 'Answer #1   ^ 0   by truf (3,129 rep) * Apr 13, 2021 07:01', 0
     wszAnsBody1             du 'In ta-lib, candlestick pattern functions like CDL3BLACKCROWS take open, high, low, close series inputs directly.', 13, 10, 13, 10, 'Using ta-lib Function API:', 13, 10, '    from talib import abstract', 13, 10, '    fn = abstract.Function(''CDL3BLACKCROWS'')', 13, 10, '    res = fn(inputs)', 0
 
     ; Question 2 Details
     align 8
     wszQTitle2              du 'nodejs talib MACD', 0
-    wszQMeta2               du '▲ 3   👁 6.3k views   Aug 23, 2015 14:10   👤 Stefano Piovesan', 0
+    wszQMeta2               du '^ 3   6.3k views   Aug 23, 2015 14:10   Stefano Piovesan', 0
     wszQTags2               du '[node.js]   [finance]   [google-finance]   [talib]', 0
     wszQBody2               du 'I am using talib technical analysis library in Node.js to calculate MACD. I used AAPL data to calculate MACD(8, 17, 9) but values differ from Python talib.', 0
-    wszAnsHead2             du '💡 Answers (1)', 0
-    wszAnsBan2              du '✓ ACCEPTED SOLUTION — Verified and accepted by author', 0
-    wszAnsMeta2             du 'Answer #1   ▲ 5   by trader_pro (8,410 rep)   •   Aug 23, 2015', 0
+    wszAnsHead2             du 'Answers (1)', 0
+    wszAnsBan2              du '[ACCEPTED SOLUTION]  * Verified and accepted by author', 0
+    wszAnsMeta2             du 'Answer #1   ^ 5   by trader_pro (8,410 rep) * Aug 23, 2015', 0
     wszAnsBody2             du 'Check whether your input prices are Close prices or Typical prices, and make sure EMA periods match standard 12, 26, 9.', 0
 
     ; Question 3 Details
     align 8
     wszQTitle3              du 'Using Talib in AlgoTrader with Esper', 0
-    wszQMeta3               du '▲ 0   👁 1.5k views   Feb 12, 2014   👤 Nema Tikaja', 0
+    wszQMeta3               du '^ 0   1.5k views   Feb 12, 2014   Nema Tikaja', 0
     wszQTags3               du '[java]   [python]   [eclipse]   [talib]', 0
     wszQBody3               du 'I have installed the open source version of AlgoTrader and I am working on integrating Talib technical indicators with Esper CEP engine.', 0
-    wszAnsHead3             du '💡 Answers (1)', 0
-    wszAnsBan3              du '✓ ACCEPTED SOLUTION', 0
-    wszAnsMeta3             du 'Answer #1   ▲ 2   by AlgoDev (4,120 rep)   •   Feb 13, 2014', 0
+    wszAnsHead3             du 'Answers (1)', 0
+    wszAnsBan3              du '[ACCEPTED SOLUTION]', 0
+    wszAnsMeta3             du 'Answer #1   ^ 2   by AlgoDev (4,120 rep) * Feb 13, 2014', 0
     wszAnsBody3             du 'Talib indicators can be registered as user-defined functions (UDF) in Esper EPL configuration.', 0
 
     ; Question 4 Details
     align 8
     wszQTitle4              du 'How to sort a dictionary by value in Python?', 0
-    wszQMeta4               du '▲ 12,450   👁 3.8M views   Sep 14, 2008   👤 dev_guru', 0
+    wszQMeta4               du '^ 12,450   3.8M views   Sep 14, 2008   dev_guru', 0
     wszQTags4               du '[python]   [dictionary]   [sorting]', 0
     wszQBody4               du 'I have a dictionary of values and I want to sort the keys by their values. How can I do this cleanly in modern Python?', 0
-    wszAnsHead4             du '💡 Answers (2)', 0
-    wszAnsBan4              du '✓ ACCEPTED SOLUTION — Verified and accepted by community', 0
-    wszAnsMeta4             du 'Answer #1   ▲ 15,200   by core_py (84,200 rep)   •   Sep 14, 2008', 0
+    wszAnsHead4             du 'Answers (2)', 0
+    wszAnsBan4              du '[ACCEPTED SOLUTION]  * Verified and accepted by community', 0
+    wszAnsMeta4             du 'Answer #1   ^ 15,200   by core_py (84,200 rep) * Sep 14, 2008', 0
     wszAnsBody4             du 'In Python 3.7+, dictionaries maintain insertion order. Use dict(sorted(d.items(), key=lambda item: item[1])):', 13, 10, 13, 10, '    sorted_dict = dict(sorted(x.items(), key=lambda item: item[1]))', 0
 
     ; System Tray Data structures for Background Apps (Punto Switcher)
     align 8
     _pyfasm_tray_hwnd       dq 0
-    _pyfasm_tray_nid        rb 960 ; NOTIFYICONDATAW
-    _pyfasm_tray_wc         rb 80  ; WNDCLASSEXW
+    _pyfasm_tray_nid        rb 1024 ; NOTIFYICONDATAW (976 bytes on Win64)
+    _pyfasm_tray_wc         rb 80   ; WNDCLASSEXW
     _pyfasm_tray_enabled    dd 1
     _pyfasm_tray_sound      dd 1
     align 8
-    _pyfasm_cursor_pt       rq 2   ; POINT (x, y)
+    _pyfasm_cursor_pt       rq 2    ; POINT (x, y)
     wszTrayTipOn            du 'Punto Switcher (Auto-switch: ON)', 0
     wszTrayTipOff           du 'Punto Switcher (Auto-switch: OFF)', 0
     wszMenuAuto             du 'Auto-switch', 0
@@ -565,6 +572,27 @@ _pyfasm_init_gui:
     call    [CreateSolidBrush]
     mov     [_pyfasm_hbr_input], rax
 
+    mov     ecx, 002480F4h          ; #F48024 (Stack Overflow Orange)
+    call    [CreateSolidBrush]
+    mov     [_pyfasm_hbr_orange], rax
+
+    mov     ecx, 000B67DAh          ; #DA670B (Pressed Orange)
+    call    [CreateSolidBrush]
+    mov     [_pyfasm_hbr_orange_press], rax
+
+    ; Create Modern GDI Pens for button borders
+    xor     ecx, ecx
+    mov     edx, 1
+    mov     r8d, 003C92FBh          ; #FB923C (Orange Border)
+    call    [CreatePen]
+    mov     [_pyfasm_hpen_orange], rax
+
+    xor     ecx, ecx
+    mov     edx, 1
+    mov     r8d, 00554133h          ; #334155 (Dark Slate Border)
+    call    [CreatePen]
+    mov     [_pyfasm_hpen_slate], rax
+
     ; Create Modern Segoe UI Fonts
     mov     rcx, -14                ; nHeight = 14
     xor     edx, edx
@@ -695,15 +723,15 @@ _pyfasm_create_window:
     cmp     qword [_pyfasm_h_listbox], 0
     jne     .skip_build_controls
 
-    ; 1. Logo Badge
+    ; 1. Logo Badge (Modern Orange Header Pill)
     xor     ecx, ecx
-    lea     rdx, [szStaticClassW]
+    lea     rdx, [szButtonClassW]
     lea     r8, [wszLogoText]
-    mov     r9d, 50000000h          ; WS_CHILD | WS_VISIBLE
+    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
     mov     qword [rsp + 32], 25
-    mov     qword [rsp + 40], 20
+    mov     qword [rsp + 40], 18
     mov     qword [rsp + 48], 150
-    mov     qword [rsp + 56], 32
+    mov     qword [rsp + 56], 34
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 901
@@ -714,12 +742,12 @@ _pyfasm_create_window:
     mov     [_pyfasm_h_logo], rax
     mov     rcx, rax
     mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_ui]
+    mov     r8, [_pyfasm_h_font_bold]
     mov     r9d, 1
     call    [SendMessageW]
 
     ; 2. Search Input
-    mov     ecx, 200h               ; WS_EX_CLIENTEDGE
+    xor     ecx, ecx                ; Flat border (no 3D white bevel)
     lea     rdx, [szEditClassW]
     lea     r8, [wszSearchDefText]
     mov     r9d, 50810080h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
@@ -742,11 +770,11 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 3. Clear Button
+    ; 3. Clear Button (Owner-drawn dark button with ✕)
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
     lea     r8, [wszClearBtnText]
-    mov     r9d, 50010000h          ; WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
+    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
     mov     qword [rsp + 32], 875
     mov     qword [rsp + 40], 18
     mov     qword [rsp + 48], 40
@@ -765,11 +793,11 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 4. Search Button
+    ; 4. Search Button (Owner-drawn vibrant Stack Overflow orange button)
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
     lea     r8, [wszSearchBtnText]
-    mov     r9d, 50010000h
+    mov     r9d, 5001000Bh          ; WS_CHILD | WS_VISIBLE | BS_OWNERDRAW
     mov     qword [rsp + 32], 925
     mov     qword [rsp + 40], 18
     mov     qword [rsp + 48], 90
@@ -784,12 +812,12 @@ _pyfasm_create_window:
     mov     [_pyfasm_h_search_btn], rax
     mov     rcx, rax
     mov     rdx, 30h
-    mov     r8, [_pyfasm_h_font_ui]
+    mov     r8, [_pyfasm_h_font_bold]
     mov     r9d, 1
     call    [SendMessageW]
 
     ; 5. Filter Input (Left Column)
-    mov     ecx, 200h
+    xor     ecx, ecx
     lea     rdx, [szEditClassW]
     lea     r8, [wszFilterDefText]
     mov     r9d, 50810080h
@@ -835,7 +863,7 @@ _pyfasm_create_window:
     call    [SendMessageW]
 
     ; 7. ListBox (Left Column)
-    mov     ecx, 200h
+    xor     ecx, ecx
     lea     rdx, [szListBoxClassW]
     xor     r8, r8
     mov     r9d, 50A10141h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_HASSTRINGS
@@ -960,7 +988,7 @@ _pyfasm_create_window:
     call    [SendMessageW]
 
     ; 11. Question Body Multiline Edit
-    mov     ecx, 200h
+    xor     ecx, ecx                ; Flat border (no 3D white bevel)
     lea     rdx, [szEditClassW]
     lea     r8, [wszQBody1]
     mov     r9d, 50810844h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL
@@ -1052,7 +1080,7 @@ _pyfasm_create_window:
     call    [SendMessageW]
 
     ; 15. Answer Body Multiline Edit
-    mov     ecx, 200h
+    xor     ecx, ecx                ; Flat border (no 3D white bevel)
     lea     rdx, [szEditClassW]
     lea     r8, [wszAnsBody1]
     mov     r9d, 50810844h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL
@@ -1565,11 +1593,24 @@ _pyfasm_run_window_loop:
 _pyfasm_wnd_proc:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 48
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 80
     and     rsp, -16
+
+    mov     rbx, r8                 ; rbx = HDC or wParam
+    mov     rsi, r9                 ; rsi = HWND or lParam
 
     cmp     edx, 2                  ; WM_DESTROY
     je      .wnd_destroy
+    cmp     edx, 14h                ; WM_ERASEBKGND (0x0014)
+    je      .wnd_erasebkgnd
+    cmp     edx, 2Bh                ; WM_DRAWITEM (0x002B)
+    je      .wnd_drawitem
     cmp     edx, 111h               ; WM_COMMAND (0x0111)
     je      .wnd_command
     cmp     edx, 138h               ; WM_CTLCOLORSTATIC (0x0138)
@@ -1586,6 +1627,19 @@ _pyfasm_wnd_proc:
     call    [DefWindowProcW]
     jmp     .wnd_proc_ret
 
+.wnd_erasebkgnd:
+    mov     rcx, [_pyfasm_h_wnd]
+    lea     rdx, [_pyfasm_rc_client]
+    call    [GetClientRect]
+
+    mov     rcx, rbx                ; rbx = wParam = HDC
+    lea     rdx, [_pyfasm_rc_client]
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
 .wnd_destroy:
     mov     rcx, [_pyfasm_hbr_bg]
     call    [DeleteObject]
@@ -1593,7 +1647,19 @@ _pyfasm_wnd_proc:
     call    [DeleteObject]
     mov     rcx, [_pyfasm_hbr_input]
     call    [DeleteObject]
+    mov     rcx, [_pyfasm_hbr_orange]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_hbr_orange_press]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_hpen_orange]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_hpen_slate]
+    call    [DeleteObject]
     mov     rcx, [_pyfasm_h_font_ui]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_h_font_bold]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_h_font_mono]
     call    [DeleteObject]
 
     xor     ecx, ecx
@@ -1601,48 +1667,275 @@ _pyfasm_wnd_proc:
     xor     eax, eax
     jmp     .wnd_proc_ret
 
+.wnd_drawitem:
+    ; rsi = DRAWITEMSTRUCT*
+    mov     eax, [rsi + 4]          ; CtlID (+4 on Win64)
+    cmp     eax, 1001               ; Search Button
+    je      .draw_search_btn
+    cmp     eax, 1002               ; Clear Button
+    je      .draw_clear_btn
+    cmp     eax, 901                ; Logo Badge
+    je      .draw_logo_badge
+    call    [DefWindowProcW]
+    jmp     .wnd_proc_ret
+
+.draw_search_btn:
+    ; Clear background behind button to avoid corner artifacts
+    mov     rcx, [rsi + 32]         ; hDC
+    lea     rdx, [rsi + 40]         ; rcItem
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    mov     ecx, [rsi + 16]         ; itemState
+    test    ecx, 1                  ; ODS_SELECTED (pressed)
+    jz      .btn_orange_norm
+    mov     rdx, [_pyfasm_hbr_orange_press]
+    jmp     .do_sel_search_br
+.btn_orange_norm:
+    mov     rdx, [_pyfasm_hbr_orange]
+.do_sel_search_br:
+    mov     rcx, [rsi + 32]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_orange]
+    call    [SelectObject]
+
+    ; Draw rounded button (8px radius)
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    movsxd  r8, dword [rsi + 44]
+    movsxd  r9, dword [rsi + 48]
+    movsxd  rax, dword [rsi + 52]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh          ; white text
+    call    [SetTextColor]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 1                  ; TRANSPARENT
+    call    [SetBkMode]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_bold]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    lea     rdx, [wszSearchBtnText]
+    mov     r8d, -1
+    lea     r9, [rsi + 40]          ; rcItem
+    mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
+    call    [DrawTextW]
+
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
+.draw_clear_btn:
+    mov     rcx, [rsi + 32]         ; hDC
+    lea     rdx, [rsi + 40]         ; rcItem
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_card]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_slate]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    movsxd  r8, dword [rsi + 44]
+    movsxd  r9, dword [rsi + 48]
+    movsxd  rax, dword [rsi + 52]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 6
+    mov     qword [rsp + 48], 6
+    call    [RoundRect]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 00CBD5E1h          ; slate light gray
+    call    [SetTextColor]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 1
+    call    [SetBkMode]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_bold]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    lea     rdx, [wszClearBtnText]
+    mov     r8d, -1
+    lea     r9, [rsi + 40]
+    mov     qword [rsp + 32], 825h
+    call    [DrawTextW]
+
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
+.draw_logo_badge:
+    mov     rcx, [rsi + 32]         ; hDC
+    lea     rdx, [rsi + 40]         ; rcItem
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_orange]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_orange]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    movsxd  r8, dword [rsi + 44]
+    movsxd  r9, dword [rsi + 48]
+    movsxd  rax, dword [rsi + 52]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh
+    call    [SetTextColor]
+
+    mov     rcx, [rsi + 32]
+    mov     edx, 1
+    call    [SetBkMode]
+
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_bold]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    lea     rdx, [wszLogoText]
+    mov     r8d, -1
+    lea     r9, [rsi + 40]
+    mov     qword [rsp + 32], 825h
+    call    [DrawTextW]
+
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
 .wnd_ctlcolorstatic:
-    mov     rcx, r8                 ; HDC
+    cmp     rsi, [_pyfasm_h_body_edit]
+    je      .ctl_dark_card
+    cmp     rsi, [_pyfasm_h_ans_edit]
+    je      .ctl_dark_card
+    cmp     rsi, [_pyfasm_h_search_edit]
+    je      .ctl_dark_input
+    cmp     rsi, [_pyfasm_h_filter_edit]
+    je      .ctl_dark_input
+    cmp     rsi, [_pyfasm_h_ans_banner]
+    je      .ctl_green_banner
+
+    ; Default static labels: transparent, light slate text
+    mov     rcx, rbx                ; HDC
     mov     edx, 00F1F5F9h          ; light text #f1f5f9
     call    [SetTextColor]
 
-    mov     rcx, r8
+    mov     rcx, rbx
     mov     edx, 1                  ; TRANSPARENT
     call    [SetBkMode]
 
     mov     rax, [_pyfasm_hbr_bg]
     jmp     .wnd_proc_ret
 
-.wnd_ctlcoloredit:
-    mov     rcx, r8                 ; HDC
+.ctl_dark_input:
+    mov     rcx, rbx                ; HDC
     mov     edx, 00FFFFFFh          ; white text
     call    [SetTextColor]
 
-    mov     rcx, r8
+    mov     rcx, rbx
     mov     edx, 00201614h          ; input bg #141620
     call    [SetBkColor]
+
+    mov     rcx, rbx
+    mov     edx, 2                  ; OPAQUE
+    call    [SetBkMode]
+
+    mov     rax, [_pyfasm_hbr_input]
+    jmp     .wnd_proc_ret
+
+.ctl_dark_card:
+    mov     rcx, rbx                ; HDC
+    mov     edx, 00F8FAFCh          ; light white #f8fafc
+    call    [SetTextColor]
+
+    mov     rcx, rbx
+    mov     edx, 002E1F1Dh          ; card bg #1d1f2e
+    call    [SetBkColor]
+
+    mov     rcx, rbx
+    mov     edx, 2                  ; OPAQUE
+    call    [SetBkMode]
+
+    mov     rax, [_pyfasm_hbr_card]
+    jmp     .wnd_proc_ret
+
+.ctl_green_banner:
+    mov     rcx, rbx                ; HDC
+    mov     edx, 0050E3A4h          ; green text #a4e350
+    call    [SetTextColor]
+
+    mov     rcx, rbx
+    mov     edx, 002E1F1Dh          ; card bg #1d1f2e
+    call    [SetBkColor]
+
+    mov     rcx, rbx
+    mov     edx, 2                  ; OPAQUE
+    call    [SetBkMode]
+
+    mov     rax, [_pyfasm_hbr_card]
+    jmp     .wnd_proc_ret
+
+.wnd_ctlcoloredit:
+    mov     rcx, rbx                ; HDC
+    mov     edx, 00FFFFFFh          ; white text
+    call    [SetTextColor]
+
+    mov     rcx, rbx
+    mov     edx, 00201614h          ; input bg #141620
+    call    [SetBkColor]
+
+    mov     rcx, rbx
+    mov     edx, 2                  ; OPAQUE
+    call    [SetBkMode]
 
     mov     rax, [_pyfasm_hbr_input]
     jmp     .wnd_proc_ret
 
 .wnd_ctlcolorlistbox:
-    mov     rcx, r8                 ; HDC
+    mov     rcx, rbx                ; HDC
     mov     edx, 00F1F5F9h          ; light text #f1f5f9
     call    [SetTextColor]
 
-    mov     rcx, r8
+    mov     rcx, rbx
     mov     edx, 002E1F1Dh          ; card bg #1d1f2e
     call    [SetBkColor]
+
+    mov     rcx, rbx
+    mov     edx, 2                  ; OPAQUE
+    call    [SetBkMode]
 
     mov     rax, [_pyfasm_hbr_card]
     jmp     .wnd_proc_ret
 
 .wnd_ctlcolorbtn:
-    mov     rcx, r8
+    mov     rcx, rbx
     mov     edx, 00FFFFFFh
     call    [SetTextColor]
 
-    mov     rcx, r8
+    mov     rcx, rbx
     mov     edx, 1
     call    [SetBkMode]
 
@@ -1840,6 +2133,13 @@ _pyfasm_wnd_proc:
     jmp     .wnd_proc_ret
 
 .wnd_proc_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
     mov     rsp, rbp
     pop     rbp
     ret
@@ -1883,11 +2183,11 @@ _pyfasm_init_tray:
     lea     rcx, [_pyfasm_tray_wc]
     call    [RegisterClassExW]
 
-    ; Create Hidden Window (NO WS_VISIBLE!)
+    ; Create Hidden Top-Level Window (WS_POPUP = 80000000h)
     xor     ecx, ecx
     lea     rdx, [_pyfasm_tray_class_w]
     lea     r8, [wszTrayTipOn]
-    xor     r9d, r9d            ; style = 0 (Hidden!)
+    mov     r9d, 80000000h      ; WS_POPUP (required for Shell_NotifyIcon to attach cleanly)
     mov     qword [rsp + 32], 0
     mov     qword [rsp + 40], 0
     mov     qword [rsp + 48], 0
@@ -1913,14 +2213,27 @@ _pyfasm_init_tray:
     mov     r9d, 77h            ; VK_F8
     call    [RegisterHotKey]
 
-    ; Icon
+    ; Load Tray Icon
     xor     ecx, ecx
-    mov     edx, 32512          ; IDI_APPLICATION
-    call    [LoadIconA]
+    lea     rdx, [wszTrayIconFile]
+    mov     r8d, 1              ; IMAGE_ICON
+    mov     r9d, 16             ; cx
+    mov     qword [rsp + 32], 16 ; cy
+    mov     qword [rsp + 40], 10h ; LR_LOADFROMFILE
+    call    [LoadImageW]
+    mov     r12, rax
+    test    r12, r12
+    jnz     .icon_loaded
+
+    ; Fallback to LoadIconW with IDI_INFORMATION (32516 - clear visible icon)
+    xor     ecx, ecx
+    mov     edx, 32516          ; IDI_INFORMATION
+    call    [LoadIconW]
     mov     r12, rax
 
-    ; Init NOTIFYICONDATAW
-    mov     dword [_pyfasm_tray_nid], 960
+.icon_loaded:
+    ; Init NOTIFYICONDATAW (V4 = 976 bytes on Win64)
+    mov     dword [_pyfasm_tray_nid], 976
     mov     rax, [_pyfasm_tray_hwnd]
     mov     qword [_pyfasm_tray_nid + 8], rax
     mov     dword [_pyfasm_tray_nid + 16], 1
@@ -2013,7 +2326,17 @@ _pyfasm_tray_wnd_proc:
     mov     ecx, -1
     call    [MessageBeep]
 .skip_thotkey_beep:
-    mov     ecx, 1              ; HKL_NEXT
+    ; Switch layout in active foreground window
+    call    [GetForegroundWindow]
+    test    rax, rax
+    jz      .skip_post_lang
+    mov     rcx, rax
+    mov     edx, 50h                ; WM_INPUTLANGCHANGEREQUEST
+    xor     r8d, r8d
+    mov     r9, 1                   ; INPUTLANGCHANGE_FORWARD
+    call    [PostMessageW]
+.skip_post_lang:
+    mov     ecx, 1                  ; HKL_NEXT
     xor     edx, edx
     call    [ActivateKeyboardLayout]
     xor     eax, eax
@@ -2251,6 +2574,13 @@ section '.idata' import data readable writeable
            UnregisterHotKey, 'UnregisterHotKey', \\
            LoadCursorA, 'LoadCursorA', \\
            LoadIconA, 'LoadIconA', \\
+           LoadIconW, 'LoadIconW', \\
+           LoadImageW, 'LoadImageW', \\
+           FillRect, 'FillRect', \\
+           DrawTextW, 'DrawTextW', \\
+           GetClientRect, 'GetClientRect', \\
+           GetForegroundWindow, 'GetForegroundWindow', \\
+           PostMessageW, 'PostMessageW', \\
            GetMessageA, 'GetMessageA', \\
            GetMessageW, 'GetMessageW', \\
            TranslateMessage, 'TranslateMessage', \\
@@ -2269,11 +2599,14 @@ section '.idata' import data readable writeable
 
     import gdi32, \\
            CreateSolidBrush, 'CreateSolidBrush', \\
+           CreatePen, 'CreatePen', \\
+           RoundRect, 'RoundRect', \\
            SetTextColor, 'SetTextColor', \\
            SetBkColor, 'SetBkColor', \\
            SetBkMode, 'SetBkMode', \\
            CreateFontW, 'CreateFontW', \\
            DeleteObject, 'DeleteObject', \\
+           SelectObject, 'SelectObject', \\
            GetStockObject, 'GetStockObject'
 
     import shell32, \\
