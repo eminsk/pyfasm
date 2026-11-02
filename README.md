@@ -1,10 +1,10 @@
 # PyFASM64: Universal Python-to-Pure FASM x86_64 Native Compiler
 
-[![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![GitHub Release](https://img.shields.io/github/v/release/eminsk/pyfasm?style=flat&logo=github&logoColor=white&color=blue)](https://github.com/eminsk/pyfasm/releases)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pyfasm64.svg?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pyfasm64/)
-[![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pyfasm64?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
 [![Conda-Forge PR](https://img.shields.io/github/pulls/detail/state/conda-forge/staged-recipes/35444?label=Conda-Forge%20PR&logo=condaforge)](https://github.com/conda-forge/staged-recipes/pull/35444)
 [![Debian Package](https://img.shields.io/github/v/release/eminsk/pyfasm?include_prereleases&label=Debian%20.deb&logo=debian)](https://github.com/eminsk/pyfasm/releases)
 [![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg?style=flat)](https://python.org)
@@ -177,8 +177,8 @@ uv run pyfasm64 bundle ./my_app -o ./my_app/app.macho --target macos
 
 ### Via PyPI (Official Python Package Index)
 
-[![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 
 ```bash
 # Using uv (recommended)
