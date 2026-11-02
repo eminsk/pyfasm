@@ -2,7 +2,7 @@ Source: python3-pyfasm64
 Section: python
 Priority: optional
 Maintainer: eminsk <M_N_N@tut.by>
-Build-Depends: debhelper-compat (= 13), dh-python, pybuild-plugin-pyproject, python3-all, python3-setuptools, python3-wheel
+Build-Depends: debhelper-compat (= 13), dh-python, pybuild-plugin-pyproject, python3-all, python3-hatchling
 Standards-Version: 4.6.2
 Homepage: https://github.com/eminsk/pyfasm
 
