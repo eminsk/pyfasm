@@ -5,6 +5,7 @@ across single files or complete multi-module project libraries.
 """
 from __future__ import annotations
 import ast
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
@@ -194,7 +195,9 @@ class AstAnalyzer:
                     self.get_or_create_float(node.value)
 
         # 2. Extract functions from this module
-        mod_prefix = real_path.stem
+        mod_prefix = re.sub(r'[^a-zA-Z0-9_]', '_', real_path.stem)
+        if mod_prefix and mod_prefix[0].isdigit():
+            mod_prefix = f"_{mod_prefix}" 
         for stmt in tree.body:
             if isinstance(stmt, ast.FunctionDef):
                 fn = self._analyze_function(stmt)

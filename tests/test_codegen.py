@@ -101,3 +101,25 @@ def main() -> int:
     src_file.write_text(source, encoding="utf-8")
     success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
     assert success is True, f"Compilation with external symbol stub failed: {log}"
+
+
+def test_codegen_handles_numeric_prefix_and_invalid_symbols(tmp_path: Path):
+    from pyfasm.codegen_x64 import safe_asm_label
+    assert safe_asm_label("01_hello") == "_01_hello"
+    assert safe_asm_label("123_calc") == "_123_calc"
+    assert safe_asm_label("bad-symbol-name!") == "bad_symbol_name_"
+    assert safe_asm_label("add") == "fn_add"
+
+    source = """
+def helper() -> int:
+    return 777
+
+def main() -> int:
+    print(helper())
+    return 0
+"""
+    src_file = tmp_path / "01_numeric_app.py"
+    src_file.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Compilation of numeric-prefixed file failed: {log}"

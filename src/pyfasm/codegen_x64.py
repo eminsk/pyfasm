@@ -4,6 +4,7 @@ Emits clean, optimized Flat Assembler (FASM) assembly instructions.
 """
 from __future__ import annotations
 import ast
+import re
 from typing import List, Dict, Optional, Tuple, Set
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR
@@ -32,10 +33,17 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
 
 
 def safe_asm_label(name: str) -> str:
-    """Escapes identifiers that conflict with FASM reserved keywords or instructions."""
-    if name.lower() in RESERVED_FASM_KEYWORDS:
-        return f"fn_{name}"
-    return name
+    """Escapes identifiers that conflict with FASM reserved keywords, instructions, or invalid syntax."""
+    if not name:
+        return "sym_anon"
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    if not sanitized:
+        return "sym_anon"
+    if sanitized[0].isdigit():
+        sanitized = f"_{sanitized}"
+    if sanitized.lower() in RESERVED_FASM_KEYWORDS:
+        sanitized = f"fn_{sanitized}"
+    return sanitized
 
 
 def _unwrap_slice(node: ast.AST) -> ast.AST:

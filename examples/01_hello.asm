@@ -35,6 +35,7 @@ _pyfasm_entry_point:
 ; Function: main
 ; ============================================================
 main:
+_01_hello_main:
     push rbp
     mov rbp, rsp
     sub rsp, 48                      ; frame + shadow space
