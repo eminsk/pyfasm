@@ -1,6 +1,6 @@
 context:
   name: pyfasm64
-  version: "0.1.1"
+  version: "0.1.3"
 
 package:
   name: ${{ name }}
@@ -22,8 +22,7 @@ requirements:
   host:
     - python >=3.8
     - pip
-    - setuptools >=68
-    - wheel
+    - hatchling
   run:
     - python >=3.8
 
@@ -33,6 +32,9 @@ tests:
         - pyfasm64
         - pyfasm
       pip_check: true
+  - script:
+      - pyfasm64 --help
+      - pyfasm --help
 
 about:
   homepage: https://github.com/eminsk/pyfasm

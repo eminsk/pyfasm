@@ -43,4 +43,9 @@ Repository = "https://github.com/eminsk/pyfasm"
 Issues = "https://github.com/eminsk/pyfasm/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pyfasm"]
+packages = ["src/pyfasm", "src/pyfasm64"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+]
