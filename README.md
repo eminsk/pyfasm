@@ -1,12 +1,12 @@
 # PyFASM64: Universal Python-to-Pure FASM x86_64 Native Compiler
 
 [![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
+[![GitHub Release](https://img.shields.io/github/v/release/eminsk/pyfasm?style=flat&logo=github&logoColor=white&color=blue)](https://github.com/eminsk/pyfasm/releases)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pyfasm64.svg?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pyfasm64/)
-[![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
-[![Conda-Forge](https://img.shields.io/conda/vn/conda-forge/pyfasm64.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm64)
-[![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/pyfasm64.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm64)
-[![Debian / Ubuntu PPA](https://img.shields.io/badge/Ubuntu%20PPA-eminsk%2Fppa-orange.svg?style=flat)](https://launchpad.net/~eminsk/+archive/ubuntu/ppa)
+[![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
+[![Conda-Forge PR](https://img.shields.io/github/pulls/detail/state/conda-forge/staged-recipes/35444?label=Conda-Forge%20PR&logo=condaforge)](https://github.com/conda-forge/staged-recipes/pull/35444)
+[![Debian Package](https://img.shields.io/github/v/release/eminsk/pyfasm?include_prereleases&label=Debian%20.deb&logo=debian)](https://github.com/eminsk/pyfasm/releases)
 [![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg?style=flat)](https://python.org)
 [![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg?style=flat)](https://peps.python.org/pep-0703/)
 [![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
@@ -217,7 +217,7 @@ sudo apt install python3-pyfasm64
 Alternatively, download the latest `python3-pyfasm64_*.deb` from the [GitHub Releases](https://github.com/eminsk/pyfasm/releases) page:
 
 ```bash
-sudo dpkg -i python3-pyfasm64_0.1.1-1_all.deb
+sudo dpkg -i python3-pyfasm64_*.deb
 ```
 
 ### From Source

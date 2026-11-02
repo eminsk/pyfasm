@@ -43,3 +43,22 @@ jobs:
           PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           echo "::notice::PYPI_API_TOKEN secret is not yet configured in GitHub repository Settings -> Secrets and variables -> Actions. PyPI upload was skipped."
+
+      - name: Purge GitHub Camo badge cache
+        run: |
+          python3 -c "
+          import urllib.request, re
+          try:
+              req = urllib.request.Request('https://github.com/eminsk/pyfasm', headers={'User-Agent': 'Mozilla/5.0'})
+              html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+              camo_urls = set(re.findall(r'https://camo\.githubusercontent\.com/[a-f0-9]+/[a-f0-9]+', html))
+              for u in camo_urls:
+                  try:
+                      p_req = urllib.request.Request(u, method='PURGE')
+                      urllib.request.urlopen(p_req, timeout=5)
+                  except Exception:
+                      pass
+              print(f'Successfully purged {len(camo_urls)} Camo badge caches.')
+          except Exception as e:
+              print(f'Camo purge notice: {e}')
+          "
