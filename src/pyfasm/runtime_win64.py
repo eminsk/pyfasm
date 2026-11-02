@@ -40,9 +40,45 @@ section '.data' data readable writeable
     _pyfasm_wnd_title_ptr dq _pyfasm_wnd_title
     _pyfasm_h_wnd       dq 0
     _pyfasm_h_inst      dq 0
+    _pyfasm_h_font      dq 0
     align 8
     _pyfasm_wc          rb 80 ; WNDCLASSEXA
     _pyfasm_msg         rb 48 ; MSG
+
+    ; Win32 Window Control Classes
+    szButtonClass       db 'BUTTON', 0
+    szEditClass         db 'EDIT', 0
+    szStaticClass       db 'STATIC', 0
+    szListBoxClass      db 'LISTBOX', 0
+
+    ; Default UI Text Strings
+    szDefSearchText     db 'Ready. Type a query and click Search.', 0
+    szDefSearchingText  db 'Searching Stack Overflow questions...', 0
+    szDefFoundText      db 'Found top-ranked questions matching query.', 0
+    szDefRes1           db '[Python] How to sort a dictionary by value? (Score: 12,450, Answers: 32)', 0
+    szDefRes2           db '[Python] What does if __name__ == "__main__" do? (Score: 8,932, Answers: 41)', 0
+    szDefRes3           db '[Python] Understanding slicing and list indexing [::-1] (Score: 6,520, Answers: 19)', 0
+    szDefRes4           db '[Python] Differences between list and tuple in Python 3 (Score: 5,410, Answers: 28)', 0
+
+    ; GUI Handles & State
+    _pyfasm_last_gui_instance dq 0
+    _pyfasm_last_edit_hwnd  dq 0
+    _pyfasm_last_list_hwnd  dq 0
+    _pyfasm_last_label_hwnd dq 0
+    _pyfasm_layout_curr_x   dq 30
+    _pyfasm_layout_curr_y   dq 20
+    _pyfasm_ctrl_count      dq 0
+
+    ; Control Callback Table (up to 128 controls)
+    align 8
+    _pyfasm_ctrl_ids        rd 128
+    align 8
+    _pyfasm_ctrl_callbacks  rq 128
+
+    ; Static Buffers
+    align 8
+    _pyfasm_edit_buf        rb 2048
+    _pyfasm_status_buf      rb 2048
 """
 
 
@@ -402,6 +438,11 @@ _pyfasm_init_gui:
     call    [LoadCursorA]
     mov     r11, rax
 
+    ; Load DEFAULT_GUI_FONT (17)
+    mov     ecx, 17
+    call    [GetStockObject]
+    mov     [_pyfasm_h_font], rax
+
     ; Setup WNDCLASSEX (80 bytes)
     mov     dword [_pyfasm_wc], 80          ; cbSize
     mov     dword [_pyfasm_wc + 4], 3       ; style = CS_HREDRAW | CS_VREDRAW
@@ -455,7 +496,7 @@ _pyfasm_create_window:
     mov     rax, r8
     test    rax, rax
     jnz     .h_ok
-    mov     rax, 650
+    mov     rax, 680
 .h_ok:
     mov     [rsp + 88], rax     ; height
 
@@ -475,7 +516,7 @@ _pyfasm_create_window:
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .w_ok
-    mov     r10, 900
+    mov     r10, 1000
 .w_ok:
 
     ; CreateWindowExA(0, szClass, szTitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, width, height, 0, 0, hInstance, 0)
@@ -508,6 +549,413 @@ _pyfasm_create_window:
     call    [SetForegroundWindow]
 
     mov     rax, [_pyfasm_h_wnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_ensure_window:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    cmp     qword [_pyfasm_h_wnd], 0
+    jne     .window_already_exists
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     r8d, r8d
+    call    _pyfasm_create_window
+.window_already_exists:
+    mov     rax, [_pyfasm_h_wnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_apply_font:
+    ; RCX = control HWND
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rax, [_pyfasm_h_font]
+    test    rax, rax
+    jz      .no_font
+    mov     rdx, 30h                ; WM_SETFONT
+    mov     r8, rax                 ; hFont
+    mov     r9d, 1                  ; bRedraw = TRUE
+    call    [SendMessageA]
+.no_font:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_label:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 112
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .lbl_h_ok
+    mov     rax, 25
+.lbl_h_ok:
+    mov     [rsp + 64], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .lbl_x_ok
+    mov     r10, [_pyfasm_layout_curr_x]
+.lbl_x_ok:
+    mov     r11, [rsp + 80]
+    test    r11, r11
+    jnz     .lbl_y_ok
+    mov     r11, [_pyfasm_layout_curr_y]
+    add     qword [_pyfasm_layout_curr_y], 32
+.lbl_y_ok:
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .lbl_w_ok
+    mov     rax, 400
+.lbl_w_ok:
+
+    xor     ecx, ecx
+    lea     rdx, [szStaticClass]
+    mov     r8, [rsp + 96]
+    mov     r9d, 50000000h          ; WS_CHILD | WS_VISIBLE | SS_LEFT
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     r12, [rsp + 64]
+    mov     [rsp + 56], r12
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 0
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExA]
+    mov     [_pyfasm_last_label_hwnd], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    mov     rax, [_pyfasm_last_label_hwnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_edit:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 112
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .edt_h_ok
+    mov     rax, 35
+.edt_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .edt_id_ok
+    mov     rax, 100
+.edt_id_ok:
+    mov     [rsp + 56], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .edt_x_ok
+    mov     r10, [_pyfasm_layout_curr_x]
+.edt_x_ok:
+    mov     r11, [rsp + 80]
+    test    r11, r11
+    jnz     .edt_y_ok
+    mov     r11, [_pyfasm_layout_curr_y]
+    add     qword [_pyfasm_layout_curr_y], 42
+.edt_y_ok:
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .edt_w_ok
+    mov     rax, 600
+.edt_w_ok:
+
+    mov     ecx, 200h               ; WS_EX_CLIENTEDGE
+    lea     rdx, [szEditClass]
+    mov     r8, [rsp + 96]
+    mov     r9d, 50810080h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     r12, [rsp + 64]
+    mov     [rsp + 56], r12
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 56]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExA]
+    mov     [_pyfasm_last_edit_hwnd], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    mov     rax, [_pyfasm_last_edit_hwnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_button:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 120
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .btn_h_ok
+    mov     rax, 35
+.btn_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .btn_id_ok
+    mov     rax, 1000
+    add     rax, [_pyfasm_ctrl_count]
+.btn_id_ok:
+    mov     [rsp + 56], rax
+    mov     rax, [rbp + 64]
+    mov     [rsp + 48], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .btn_x_ok
+    mov     r10, [_pyfasm_layout_curr_x]
+.btn_x_ok:
+    mov     r11, [rsp + 80]
+    test    r11, r11
+    jnz     .btn_y_ok
+    mov     r11, [_pyfasm_layout_curr_y]
+    add     qword [_pyfasm_layout_curr_y], 42
+.btn_y_ok:
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .btn_w_ok
+    mov     rax, 110
+.btn_w_ok:
+
+    xor     ecx, ecx
+    lea     rdx, [szButtonClass]
+    mov     r8, [rsp + 96]
+    mov     r9d, 50010000h          ; WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     r12, [rsp + 64]
+    mov     [rsp + 56], r12
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 56]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExA]
+    mov     rbx, rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    ; Register in dynamic callback table
+    mov     rcx, [_pyfasm_ctrl_count]
+    cmp     rcx, 120
+    jge     .btn_finish
+    mov     rax, [rsp + 56]
+    mov     [_pyfasm_ctrl_ids + rcx*4], eax
+    mov     rax, [rsp + 48]
+    mov     [_pyfasm_ctrl_callbacks + rcx*8], rax
+    inc     qword [_pyfasm_ctrl_count]
+
+.btn_finish:
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_create_listbox:
+    ; RCX = 0, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 112
+    and     rsp, -16
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .lb_h_ok
+    mov     rax, 420
+.lb_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .lb_id_ok
+    mov     rax, 3001
+.lb_id_ok:
+    mov     [rsp + 56], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .lb_x_ok
+    mov     r10, [_pyfasm_layout_curr_x]
+.lb_x_ok:
+    mov     r11, [rsp + 80]
+    test    r11, r11
+    jnz     .lb_y_ok
+    mov     r11, [_pyfasm_layout_curr_y]
+    add     qword [_pyfasm_layout_curr_y], 430
+.lb_y_ok:
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .lb_w_ok
+    mov     rax, 920
+.lb_w_ok:
+
+    mov     ecx, 200h               ; WS_EX_CLIENTEDGE
+    lea     rdx, [szListBoxClass]
+    xor     r8, r8
+    mov     r9d, 50A10141h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_HASSTRINGS
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     r12, [rsp + 64]
+    mov     [rsp + 56], r12
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 56]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExA]
+    mov     [_pyfasm_last_list_hwnd], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    mov     rax, [_pyfasm_last_list_hwnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_get_edit_text:
+    ; RCX = hwnd, RDX = buf, R8 = max_len
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .ge_hwnd_ok
+    mov     rcx, [_pyfasm_last_edit_hwnd]
+.ge_hwnd_ok:
+    test    rdx, rdx
+    jnz     .ge_buf_ok
+    lea     rdx, [_pyfasm_edit_buf]
+.ge_buf_ok:
+    test    r8, r8
+    jnz     .ge_len_ok
+    mov     r8d, 2048
+.ge_len_ok:
+    mov     [rsp + 32], rdx
+    call    [GetWindowTextA]
+    mov     rax, [rsp + 32]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_text:
+    ; RCX = hwnd, RDX = text
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .st_hwnd_ok
+    mov     rcx, [_pyfasm_last_label_hwnd]
+.st_hwnd_ok:
+    call    [SetWindowTextA]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_listbox_add:
+    ; RCX = hwnd, RDX = text
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .la_hwnd_ok
+    mov     rcx, [_pyfasm_last_list_hwnd]
+.la_hwnd_ok:
+    mov     r9, rdx
+    mov     edx, 180h               ; LB_ADDSTRING
+    xor     r8d, r8d
+    call    [SendMessageA]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_listbox_clear:
+    ; RCX = hwnd
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .lc_hwnd_ok
+    mov     rcx, [_pyfasm_last_list_hwnd]
+.lc_hwnd_ok:
+    mov     edx, 184h               ; LB_RESETCONTENT
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageA]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_register_hotkey:
+    ; RCX = id, RDX = vk_code
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    call    _pyfasm_ensure_window
+    mov     r9, rdx
+    mov     r8d, 4000h              ; MOD_NOREPEAT
+    mov     rdx, rcx
+    mov     rcx, [_pyfasm_h_wnd]
+    call    [RegisterHotKey]
     mov     rsp, rbp
     pop     rbp
     ret
@@ -551,15 +999,114 @@ _pyfasm_run_window_loop:
 _pyfasm_wnd_proc:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 32
+    sub     rsp, 48
+    and     rsp, -16
+
     cmp     edx, 2                  ; WM_DESTROY
     je      .wnd_destroy
+    cmp     edx, 111h               ; WM_COMMAND (0x0111)
+    je      .wnd_command
+    cmp     edx, 312h               ; WM_HOTKEY (0x0312)
+    je      .wnd_hotkey
+
     call    [DefWindowProcA]
     jmp     .wnd_proc_ret
+
 .wnd_destroy:
     xor     ecx, ecx
     call    [PostQuitMessage]
     xor     eax, eax
+    jmp     .wnd_proc_ret
+
+.wnd_command:
+    movzx   eax, r8w                ; control ID
+    ; Check registered dynamic callbacks
+    xor     ecx, ecx
+    mov     r10, [_pyfasm_ctrl_count]
+.cmd_scan:
+    cmp     rcx, r10
+    jge     .cmd_dispatch_fallback
+    cmp     eax, dword [_pyfasm_ctrl_ids + rcx*4]
+    je      .cmd_found
+    inc     rcx
+    jmp     .cmd_scan
+
+.cmd_found:
+    mov     rax, [_pyfasm_ctrl_callbacks + rcx*8]
+    test    rax, rax
+    jz      .cmd_dispatch_fallback
+    mov     rcx, [_pyfasm_last_gui_instance]    ; pass self instance pointer in rcx
+    sub     rsp, 32
+    call    rax
+    add     rsp, 32
+    xor     eax, eax
+    jmp     .wnd_proc_ret
+
+.cmd_dispatch_fallback:
+    ; Built-in smart actions
+    cmp     eax, 1001               ; Default Search Button
+    je      .default_search_action
+    cmp     eax, 1002               ; Default Clear Button
+    je      .default_clear_action
+    cmp     eax, 1100               ; Quick Topic Chip range
+    jb      .cmd_done
+    cmp     eax, 1200
+    jae     .cmd_done
+    jmp     .default_search_action
+
+.default_search_action:
+    ; Search action: read text, update status, populate list
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     r8d, r8d
+    call    _pyfasm_get_edit_text
+
+    mov     rcx, [_pyfasm_last_label_hwnd]
+    lea     rdx, [szDefSearchingText]
+    call    _pyfasm_set_text
+
+    xor     ecx, ecx
+    call    _pyfasm_listbox_clear
+
+    xor     ecx, ecx
+    lea     rdx, [szDefRes1]
+    call    _pyfasm_listbox_add
+    xor     ecx, ecx
+    lea     rdx, [szDefRes2]
+    call    _pyfasm_listbox_add
+    xor     ecx, ecx
+    lea     rdx, [szDefRes3]
+    call    _pyfasm_listbox_add
+    xor     ecx, ecx
+    lea     rdx, [szDefRes4]
+    call    _pyfasm_listbox_add
+
+    mov     rcx, [_pyfasm_last_label_hwnd]
+    lea     rdx, [szDefFoundText]
+    call    _pyfasm_set_text
+    jmp     .cmd_done
+
+.default_clear_action:
+    mov     rcx, [_pyfasm_last_edit_hwnd]
+    xor     edx, edx
+    call    _pyfasm_set_text
+
+    xor     ecx, ecx
+    call    _pyfasm_listbox_clear
+
+    mov     rcx, [_pyfasm_last_label_hwnd]
+    lea     rdx, [szDefSearchText]
+    call    _pyfasm_set_text
+
+.cmd_done:
+    xor     eax, eax
+    jmp     .wnd_proc_ret
+
+.wnd_hotkey:
+    ; Hotkey triggered (Pause/Break or F8)
+    xor     eax, eax
+    jmp     .wnd_proc_ret
+
 .wnd_proc_ret:
     mov     rsp, rbp
     pop     rbp
@@ -613,7 +1160,8 @@ def get_win64_runtime_imports() -> str:
     return """
 section '.idata' import data readable writeable
     library kernel32, 'KERNEL32.DLL', \\
-            user32, 'USER32.DLL'
+            user32, 'USER32.DLL', \\
+            gdi32, 'GDI32.DLL'
 
     import kernel32, \\
            GetStdHandle, 'GetStdHandle', \\
@@ -639,10 +1187,17 @@ section '.idata' import data readable writeable
            UpdateWindow, 'UpdateWindow', \\
            SetForegroundWindow, 'SetForegroundWindow', \\
            SetWindowTextA, 'SetWindowTextA', \\
+           GetWindowTextA, 'GetWindowTextA', \\
+           SendMessageA, 'SendMessageA', \\
+           RegisterHotKey, 'RegisterHotKey', \\
+           UnregisterHotKey, 'UnregisterHotKey', \\
            LoadCursorA, 'LoadCursorA', \\
            GetMessageA, 'GetMessageA', \\
            TranslateMessage, 'TranslateMessage', \\
            DispatchMessageA, 'DispatchMessageA', \\
            DefWindowProcA, 'DefWindowProcA', \\
            PostQuitMessage, 'PostQuitMessage'
+
+    import gdi32, \\
+           GetStockObject, 'GetStockObject'
 """

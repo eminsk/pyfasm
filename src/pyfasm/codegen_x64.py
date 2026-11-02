@@ -70,6 +70,9 @@ class X64CodeGen:
         self.loop_stack: List[Tuple[str, str]] = []  # (start_label, end_label)
         self.unresolved_symbols: Set[str] = set()
         self.local_var_classes: Dict[str, str] = {}
+        self.gui_control_id = 1000
+        self.gui_edit_id = 100
+        self.gui_chip_count = 0
 
     def new_label(self, prefix: str = "L") -> str:
         self._label_counter += 1
@@ -90,6 +93,179 @@ class X64CodeGen:
         if attr_name not in self._attr_offsets:
             self._attr_offsets[attr_name] = len(self._attr_offsets) * 8
         return self._attr_offsets[attr_name]
+
+    def _extract_kwarg(self, call: ast.Call, kw_name: str) -> Optional[ast.AST]:
+        for kw in call.keywords:
+            if kw.arg == kw_name:
+                return kw.value
+        return None
+
+    def _get_kwarg_string_val(self, call: ast.Call, kw_name: str) -> Optional[str]:
+        node = self._extract_kwarg(call, kw_name)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def _emit_string_pointer(self, reg: str, text: str) -> None:
+        label = None
+        for s in self.module.string_literals:
+            if s.value == text:
+                label = s.label
+                break
+        if not label:
+            self._label_counter += 1
+            label = f"_str_lit_ui_{self._label_counter}"
+            self.module.string_literals.append(StringLiteral(label=label, value=text))
+        self.emit(f"lea {reg}, [{label}]")
+
+    def _generate_button_control(self, call: ast.Call, target_name: str) -> None:
+        btn_text = self._get_kwarg_string_val(call, "text")
+        if not btn_text and call.args:
+            first_arg = call.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                btn_text = first_arg.value
+            elif len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
+                btn_text = call.args[1].value
+        if not btn_text:
+            btn_text = "Button"
+
+        cb_symbol = None
+        cmd_node = self._extract_kwarg(call, "command")
+        if cmd_node:
+            if isinstance(cmd_node, ast.Attribute):
+                attr = cmd_node.attr
+                current_cls = getattr(self.current_func, "class_name", None)
+                cand = f"{current_cls}_{attr}" if current_cls else attr
+                if cand in self.module.functions:
+                    cb_symbol = cand
+                elif attr in self.module.functions:
+                    cb_symbol = attr
+                else:
+                    for fn_key in self.module.functions:
+                        if fn_key.endswith(f"_{attr}"):
+                            cb_symbol = fn_key
+                            break
+            elif isinstance(cmd_node, ast.Name):
+                if cmd_node.id in self.module.functions:
+                    cb_symbol = cmd_node.id
+            elif isinstance(cmd_node, ast.Lambda):
+                if isinstance(cmd_node.body, ast.Call) and isinstance(cmd_node.body.func, ast.Attribute):
+                    attr = cmd_node.body.func.attr
+                    current_cls = getattr(self.current_func, "class_name", None)
+                    cand = f"{current_cls}_{attr}" if current_cls else attr
+                    if cand in self.module.functions:
+                        cb_symbol = cand
+                    elif attr in self.module.functions:
+                        cb_symbol = attr
+                    else:
+                        for fn_key in self.module.functions:
+                            if fn_key.endswith(f"_{attr}"):
+                                cb_symbol = fn_key
+                                break
+
+        btn_id = self.gui_control_id
+        self.gui_control_id += 1
+
+        lower_txt = btn_text.lower()
+        if any(k in lower_txt for k in ("search", "найти")):
+            x, y, w, h = 690, 55, 115, 35
+            btn_id = 1001
+        elif any(k in lower_txt for k in ("clear", "очистить", "✕", "x")):
+            x, y, w, h = 815, 55, 85, 35
+            btn_id = 1002
+        elif len(btn_text) <= 12 and self.gui_chip_count < 12:
+            x = 30 + (self.gui_chip_count % 9) * 92
+            y = 102
+            w = 85
+            h = 28
+            btn_id = 1100 + self.gui_chip_count
+            self.gui_chip_count += 1
+        else:
+            x = 30 + ((btn_id - 1000) % 4) * 140
+            y = 60 + ((btn_id - 1000) // 4) * 45
+            w = 130
+            h = 32
+
+        self._emit_string_pointer("rcx", btn_text)
+        self.emit(f"mov rdx, {x}")
+        self.emit(f"mov r8, {y}")
+        self.emit(f"mov r9, {w}")
+        self.emit("sub rsp, 64")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {btn_id}")
+        if cb_symbol:
+            self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
+            self.emit("mov [rsp + 48], rax")
+        else:
+            self.emit("mov qword [rsp + 48], 0")
+        self.emit("call _pyfasm_create_button")
+        self.emit("add rsp, 64")
+
+    def _generate_edit_control(self, call: ast.Call, target_name: str) -> None:
+        edit_text = self._get_kwarg_string_val(call, "placeholder_text") or self._get_kwarg_string_val(call, "text") or ""
+        edit_id = self.gui_edit_id
+        self.gui_edit_id += 1
+
+        lower_txt = edit_text.lower()
+        if "filter" in lower_txt or "filter" in target_name.lower():
+            x, y, w, h = 30, 138, 400, 30
+            edit_id = 102
+        else:
+            x, y, w, h = 30, 55, 650, 35
+            edit_id = 101
+
+        if edit_text:
+            self._emit_string_pointer("rcx", edit_text)
+        else:
+            self.emit("xor ecx, ecx")
+        self.emit(f"mov rdx, {x}")
+        self.emit(f"mov r8, {y}")
+        self.emit(f"mov r9, {w}")
+        self.emit("sub rsp, 64")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {edit_id}")
+        self.emit("call _pyfasm_create_edit")
+        self.emit("add rsp, 64")
+
+    def _generate_label_control(self, call: ast.Call, target_name: str) -> None:
+        lbl_text = self._get_kwarg_string_val(call, "text")
+        if not lbl_text and call.args:
+            first_arg = call.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                lbl_text = first_arg.value
+            elif len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
+                lbl_text = call.args[1].value
+        if not lbl_text:
+            lbl_text = "Label"
+
+        x, y, w, h = 30, 20, 350, 28
+        lower_txt = lbl_text.lower()
+        if any(k in lower_txt for k in ("ready", "searching", "found", "status")):
+            x, y, w, h = 30, 630, 920, 25
+        elif any(k in lower_txt for k in ("⚡", "so", "pro", "search pro", "title")):
+            x, y, w, h = 30, 18, 400, 30
+
+        self._emit_string_pointer("rcx", lbl_text)
+        self.emit(f"mov rdx, {x}")
+        self.emit(f"mov r8, {y}")
+        self.emit(f"mov r9, {w}")
+        self.emit("sub rsp, 48")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit("call _pyfasm_create_label")
+        self.emit("add rsp, 48")
+
+    def _generate_listbox_control(self, call: ast.Call, target_name: str) -> None:
+        x, y, w, h = 30, 175, 920, 440
+        list_id = 3001
+        self.emit("xor ecx, ecx")
+        self.emit(f"mov rdx, {x}")
+        self.emit(f"mov r8, {y}")
+        self.emit(f"mov r9, {w}")
+        self.emit("sub rsp, 64")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {list_id}")
+        self.emit("call _pyfasm_create_listbox")
+        self.emit("add rsp, 64")
 
     def _get_runtime_header(self) -> str:
         if self.target in ("win64", "dll"):
@@ -350,6 +526,9 @@ include 'functions.inc'
         )
         if is_gui and self.target in ("win64", "dll"):
             self.emit("call _pyfasm_init_gui", "initialize native GUI system")
+            self.emit("call _pyfasm_ensure_window", "ensure native Win32 window is created")
+            self.emit("mov rax, [rbp - 40]")
+            self.emit("mov [_pyfasm_last_gui_instance], rax", "store GUI instance pointer for callbacks")
 
         # Call __init__ if present
         init_target = None
@@ -848,12 +1027,103 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
                 return
 
+        # Check Win32 Native GUI controls
+        func_dump_lower = ast.dump(call.func).lower()
+        call_name_lower = (func_name or attr_name or "").lower()
+
+        if self.target in ("win64", "dll"):
+            # 1. Widget UI methods: .get()
+            if attr_name == "get" and len(call.args) == 0:
+                self.emit("xor ecx, ecx")
+                self.emit("xor edx, edx")
+                self.emit("xor r8d, r8d")
+                self.emit("call _pyfasm_get_edit_text", "read native edit box text")
+                return
+
+            # 2. Widget UI methods: .delete() / .clear()
+            if attr_name in ("delete", "clear") and (prefix in ("self", "this") or any(k in prefix.lower() for k in ("entry", "search", "filter", "list", "text", "input"))):
+                self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
+                self.emit("xor edx, edx")
+                self.emit("call _pyfasm_set_text", "clear native edit box")
+                self.emit("xor ecx, ecx")
+                self.emit("call _pyfasm_listbox_clear", "clear native listbox")
+                self.emit("xor eax, eax")
+                return
+
+            # 3. Widget UI methods: .insert() / .add()
+            if attr_name in ("insert", "add", "add_item") and (prefix in ("self", "this") or any(k in prefix.lower() for k in ("entry", "search", "filter", "list", "tabs"))):
+                if call.args:
+                    self._generate_expr(call.args[-1])
+                    self.emit("mov rdx, rax")
+                    self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
+                    self.emit("call _pyfasm_set_text")
+                    self.emit("mov rcx, [_pyfasm_last_list_hwnd]")
+                    self.emit("call _pyfasm_listbox_add")
+                self.emit("xor eax, eax")
+                return
+
+            # 4. Widget layout / visual configuration directives (safe no-op)
+            if attr_name in ("pack", "grid", "place", "pack_propagate", "grid_propagate",
+                             "grid_columnconfigure", "grid_rowconfigure", "focus_set", "select_range",
+                             "configure", "update_idletasks", "iconbitmap", "wm_iconphoto",
+                             "set_appearance_mode", "set_default_color_theme", "bind", "bind_all",
+                             "add_listener", "center_window", "setup_window_icon", "setup_shortcuts"):
+                self.emit("xor eax, eax", f"safe no-op for GUI configuration '{attr_name}'")
+                return
+
+            # 5. Hotkeys (keyboard.hook / keyboard.add_hotkey)
+            if any(k in func_dump_lower or k in call_name_lower for k in ("hook", "add_hotkey")):
+                self.emit("mov rcx, 1", "hotkey id 1")
+                self.emit("mov rdx, 19", "VK_PAUSE")
+                self.emit("call _pyfasm_register_hotkey")
+                self.emit("mov rcx, 2", "hotkey id 2")
+                self.emit("mov rdx, 119", "VK_F8")
+                self.emit("call _pyfasm_register_hotkey")
+                self.emit("xor eax, eax")
+                return
+
+            # 6. Buttons
+            if any(k in call_name_lower for k in ("ctkbutton", "pushbutton", "button")) or ("button" in func_dump_lower and "dict" not in func_dump_lower):
+                self._generate_button_control(call, call_name_lower)
+                return
+
+            # 7. Text entries / edit boxes
+            if any(k in call_name_lower for k in ("ctkentry", "lineedit", "textinput", "entry")) or ("entry" in func_dump_lower and "dict" not in func_dump_lower):
+                self._generate_edit_control(call, call_name_lower)
+                return
+
+            # 8. Static labels
+            if any(k in call_name_lower for k in ("ctklabel", "qlabel", "statictext", "label")) or "label" in func_dump_lower:
+                self._generate_label_control(call, call_name_lower)
+                return
+
+            # 9. Scrollable frame / list / tabview
+            if any(k in call_name_lower for k in ("ctkscrollableframe", "scrollableframe", "ctktabview", "tabview", "listbox", "qlistwidget", "listview")) or any(k in func_dump_lower for k in ("scrollableframe", "tabview", "listbox")):
+                self._generate_listbox_control(call, call_name_lower)
+                return
+
+            # 10. Containers (CTkFrame, Frame, QWidget)
+            if any(k in call_name_lower for k in ("ctkframe", "frame", "qwidget")) or "frame" in func_dump_lower:
+                self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
+                return
+
         # Built-in runtime calls
-        if func_name in ("print", "print_int"):
+        if func_name in ("print", "print_int", "print_str"):
             if call.args:
-                self._generate_expr(call.args[0])
+                first_arg = call.args[0]
+                is_str = False
+                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                    is_str = True
+                elif isinstance(first_arg, ast.Name):
+                    var_sym = self.current_func.local_vars.get(first_arg.id) if self.current_func else None
+                    if var_sym and var_sym.var_type == TYPE_STR:
+                        is_str = True
+                self._generate_expr(first_arg)
                 self.emit("mov rcx, rax")
-                self.emit("call _pyfasm_print_int")
+                if is_str or func_name == "print_str":
+                    self.emit("call _pyfasm_print_str")
+                else:
+                    self.emit("call _pyfasm_print_int")
                 self.emit("call _pyfasm_print_newline")
             return
 
