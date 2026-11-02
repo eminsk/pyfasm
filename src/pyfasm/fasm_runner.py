@@ -134,33 +134,75 @@ class FasmRunner:
         import tarfile
 
         target_dir.mkdir(parents=True, exist_ok=True)
+        # Download modern FASM SDK from official repository: https://github.com/eminsk/fasm-modern-sdk
+        sdk_version = "v1.73.36"
+        base_url = f"https://github.com/eminsk/fasm-modern-sdk/releases/download/{sdk_version}"
+
         if os.name == "nt":
-            url = "https://flatassembler.net/fasmw17332.zip"
-            zip_dest = target_dir / "fasmw.zip"
-            urllib.request.urlretrieve(url, zip_dest)
-            with zipfile.ZipFile(zip_dest, "r") as zf:
-                zf.extractall(target_dir)
+            url = f"{base_url}/fasm-modern-sdk-windows-x64.zip"
+            zip_dest = target_dir / "fasm-modern-sdk-windows.zip"
+            try:
+                urllib.request.urlretrieve(url, zip_dest)
+                with zipfile.ZipFile(zip_dest, "r") as zf:
+                    zf.extractall(target_dir)
+            except Exception:
+                url_fb = "https://flatassembler.net/fasmw17332.zip"
+                urllib.request.urlretrieve(url_fb, zip_dest)
+                with zipfile.ZipFile(zip_dest, "r") as zf:
+                    zf.extractall(target_dir)
+
             for cand in target_dir.rglob("fasm.exe"):
                 return str(cand.resolve())
             for cand in target_dir.rglob("FASM.EXE"):
                 return str(cand.resolve())
+
         elif sys.platform == "darwin":
-            url = "https://raw.githubusercontent.com/STLVNUB/fasm-osx/master/fasm"
-            dest = target_dir / "fasm"
-            req = urllib.request.Request(url, headers={"User-Agent": "pyfasm"})
-            with open(dest, "wb") as f:
-                f.write(urllib.request.urlopen(req).read())
+            url = f"{base_url}/fasm-modern-sdk-macos-x64.tar.gz"
+            tgz_dest = target_dir / "fasm-modern-sdk-macos.tar.gz"
             try:
-                os.chmod(dest, 0o755)
+                urllib.request.urlretrieve(url, tgz_dest)
+                with tarfile.open(tgz_dest, "r:gz") as tf:
+                    tf.extractall(target_dir)
             except Exception:
-                pass
-            return str(dest.resolve())
+                url_fb = "https://raw.githubusercontent.com/STLVNUB/fasm-osx/master/fasm"
+                dest = target_dir / "fasm"
+                req = urllib.request.Request(url_fb, headers={"User-Agent": "pyfasm"})
+                with open(dest, "wb") as f:
+                    f.write(urllib.request.urlopen(req).read())
+                try:
+                    os.chmod(dest, 0o755)
+                except Exception:
+                    pass
+                return str(dest.resolve())
+
+            for cand in target_dir.rglob("fasm.darwin"):
+                if cand.is_file():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
+            for cand in target_dir.rglob("fasm"):
+                if cand.is_file():
+                    try:
+                        os.chmod(cand, 0o755)
+                    except Exception:
+                        pass
+                    return str(cand.resolve())
+
         else:
-            url = "https://flatassembler.net/fasm-1.73.32.tgz"
-            tgz_dest = target_dir / "fasm.tgz"
-            urllib.request.urlretrieve(url, tgz_dest)
-            with tarfile.open(tgz_dest, "r:gz") as tf:
-                tf.extractall(target_dir)
+            url = f"{base_url}/fasm-modern-sdk-linux-x64.tar.gz"
+            tgz_dest = target_dir / "fasm-modern-sdk-linux.tar.gz"
+            try:
+                urllib.request.urlretrieve(url, tgz_dest)
+                with tarfile.open(tgz_dest, "r:gz") as tf:
+                    tf.extractall(target_dir)
+            except Exception:
+                url_fb = "https://flatassembler.net/fasm-1.73.32.tgz"
+                urllib.request.urlretrieve(url_fb, tgz_dest)
+                with tarfile.open(tgz_dest, "r:gz") as tf:
+                    tf.extractall(target_dir)
+
             for cand in target_dir.rglob("fasm.x64"):
                 if cand.is_file():
                     try:
@@ -175,7 +217,8 @@ class FasmRunner:
                     except Exception:
                         pass
                     return str(cand.resolve())
-        raise FileNotFoundError("Could not auto-download FASM")
+
+        raise FileNotFoundError("Could not download FASM Modern SDK from eminsk/fasm-modern-sdk")
 
     def _locate_include(self, explicit_include: Optional[str]) -> str:
         if explicit_include and os.path.exists(explicit_include):
