@@ -61,7 +61,45 @@ class ParsedModule:
     float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
     imports: List[str] = field(default_factory=list)
+    detected_libraries: Set[str] = field(default_factory=set)
     main_func: Optional[FunctionSymbol] = None
+
+    def has_library(self, *names: str) -> bool:
+        """Check if any of the specified library names is installed in project or imported."""
+        targets = {n.lower() for n in names}
+        for lib in self.detected_libraries:
+            l_low = lib.lower()
+            if l_low in targets or any(l_low.startswith(t) or t in l_low for t in targets):
+                return True
+        for imp in self.imports:
+            root = imp.split(".")[0].lower().replace("-", "_")
+            if root in targets or any(root.startswith(t) or t in root for t in targets):
+                return True
+        return False
+
+    @property
+    def is_tray_app(self) -> bool:
+        return self.has_library("pystray", "tray") or any("punto" in s.lower() or "tray" in s.lower() for s in self.classes)
+
+    @property
+    def is_keyboard_hook_app(self) -> bool:
+        return self.has_library("keyboard", "pynput", "hook") or self.is_tray_app
+
+    @property
+    def is_modern_gui(self) -> bool:
+        return self.has_library("customtkinter", "tkinter", "ctk", "flet", "textual", "qt", "pyqt5", "pyqt6", "pyside6") or any("app" in s.lower() or "gui" in s.lower() for s in self.classes)
+
+    @property
+    def is_http_app(self) -> bool:
+        return self.has_library("requests", "urllib", "urllib3", "httpx", "aiohttp", "curl_cffi")
+
+    @property
+    def is_office_app(self) -> bool:
+        return self.has_library("docx", "openpyxl", "xlsxwriter", "fitz", "pymupdf", "pdf", "pypdf")
+
+    @property
+    def is_media_app(self) -> bool:
+        return self.has_library("cv2", "opencv", "ffmpeg", "pyaudio", "sounddevice", "pil", "pillow")
 
 
 class AstAnalyzer:
@@ -93,6 +131,45 @@ class AstAnalyzer:
         self.floats.append(FloatLiteral(label=label, value=val))
         return label
 
+    def _detect_project_libraries(self, module: ParsedModule) -> None:
+        """Inspects project dependencies from pyproject.toml, requirements.txt, uv.lock, and imports."""
+        if not self.project_root or not self.project_root.exists():
+            return
+
+        pyproject = self.project_root / "pyproject.toml"
+        if pyproject.exists():
+            try:
+                text = pyproject.read_text(encoding="utf-8", errors="ignore")
+                for match in re.finditer(r"['\"]([a-zA-Z0-9_-]+)", text):
+                    lib = match.group(1).lower().replace("-", "_")
+                    if lib not in ("true", "false", "wheel", "pyfasm", "pyfasm64", "version", "description", "name"):
+                        module.detected_libraries.add(lib)
+            except Exception:
+                pass
+
+        reqs = self.project_root / "requirements.txt"
+        if reqs.exists():
+            try:
+                for line in reqs.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip().split("#")[0].strip()
+                    if line:
+                        match = re.match(r"^([a-zA-Z0-9_-]+)", line)
+                        if match:
+                            module.detected_libraries.add(match.group(1).lower().replace("-", "_"))
+            except Exception:
+                pass
+
+        uvlock = self.project_root / "uv.lock"
+        if uvlock.exists():
+            try:
+                text = uvlock.read_text(encoding="utf-8", errors="ignore")
+                for match in re.finditer(r"['\"]([a-zA-Z0-9_-]+)", text):
+                    lib = match.group(1).lower().replace("-", "_")
+                    if lib not in ("pyfasm", "pyfasm64"):
+                        module.detected_libraries.add(lib)
+            except Exception:
+                pass
+
     def parse_source(self, source_code: str) -> ParsedModule:
         """Parses a raw Python source code string into a ParsedModule."""
         tree = ast.parse(source_code)
@@ -103,9 +180,11 @@ class AstAnalyzer:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     module.imports.append(alias.name)
+                    module.detected_libraries.add(alias.name.split(".")[0].lower().replace("-", "_"))
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     module.imports.append(node.module)
+                    module.detected_libraries.add(node.module.split(".")[0].lower().replace("-", "_"))
             elif isinstance(node, ast.Constant):
                 if isinstance(node.value, str):
                     self.get_or_create_string(node.value)
@@ -141,6 +220,7 @@ class AstAnalyzer:
         module = ParsedModule()
         self._visited_files.clear()
 
+        self._detect_project_libraries(module)
         # Recursively parse entry script and all internal project dependencies
         self._parse_file_recursive(entry_path, module, is_entry=True)
 

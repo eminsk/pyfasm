@@ -102,8 +102,14 @@ section '.data' data readable writeable
     _pyfasm_hbr_input       dq 0 ; #141620
     _pyfasm_hbr_orange      dq 0 ; #f48024
     _pyfasm_hbr_orange_press dq 0 ; #da670b
+    _pyfasm_hbr_card_sel    dq 0 ; #141b26
+    _pyfasm_hbr_green_pill  dq 0 ; #28a745
+    _pyfasm_hpen_green_pill dq 0 ; #28a745
     _pyfasm_hpen_orange     dq 0
     _pyfasm_hpen_slate      dq 0
+    wszPillText             du '+0   1 ans', 0
+    align 8
+    _pyfasm_card_text_buf   rw 512
     align 8
     _pyfasm_rc_client       rd 4
     _pyfasm_h_font_ui       dq 0
@@ -582,7 +588,7 @@ _pyfasm_init_gui:
 
     ; Create Modern GDI Pens for button borders
     xor     ecx, ecx
-    mov     edx, 1
+    mov     edx, 2                  ; 2px vibrant orange outline
     mov     r8d, 003C92FBh          ; #FB923C (Orange Border)
     call    [CreatePen]
     mov     [_pyfasm_hpen_orange], rax
@@ -592,6 +598,20 @@ _pyfasm_init_gui:
     mov     r8d, 00554133h          ; #334155 (Dark Slate Border)
     call    [CreatePen]
     mov     [_pyfasm_hpen_slate], rax
+
+    mov     ecx, 00261B14h          ; elevated dark slate card background #141b26
+    call    [CreateSolidBrush]
+    mov     [_pyfasm_hbr_card_sel], rax
+
+    mov     ecx, 0045A728h          ; green pill background #28a745
+    call    [CreateSolidBrush]
+    mov     [_pyfasm_hbr_green_pill], rax
+
+    xor     ecx, ecx
+    mov     edx, 1
+    mov     r8d, 0045A728h
+    call    [CreatePen]
+    mov     [_pyfasm_hpen_green_pill], rax
 
     ; Create Modern Segoe UI Fonts
     mov     rcx, -14                ; nHeight = 14
@@ -862,11 +882,11 @@ _pyfasm_create_window:
     mov     r9d, 1
     call    [SendMessageW]
 
-    ; 7. ListBox (Left Column)
+    ; 7. ListBox (Left Column) - Owner-Drawn Question Cards
     xor     ecx, ecx
     lea     rdx, [szListBoxClassW]
     xor     r8, r8
-    mov     r9d, 50A10141h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_HASSTRINGS
+    mov     r9d, 50200151h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT
     mov     qword [rsp + 32], 25
     mov     qword [rsp + 40], 136
     mov     qword [rsp + 48], 460
@@ -884,6 +904,13 @@ _pyfasm_create_window:
     mov     rdx, 30h
     mov     r8, [_pyfasm_h_font_ui]
     mov     r9d, 1
+    call    [SendMessageW]
+
+    ; Configure 78px card height
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 1A0h               ; LB_SETITEMHEIGHT
+    xor     r8d, r8d
+    mov     r9d, 78
     call    [SendMessageW]
 
     ; Populate Initial ListBox Items
@@ -1488,7 +1515,7 @@ _pyfasm_get_edit_text:
     ret
 
 _pyfasm_set_text:
-    ; RCX = hwnd, RDX = text
+    ; RCX = hwnd, RDX = text (ANSI string from Python code)
     push    rbp
     mov     rbp, rsp
     sub     rsp, 32
@@ -1497,13 +1524,13 @@ _pyfasm_set_text:
     jnz     .st_hwnd_ok
     mov     rcx, [_pyfasm_last_label_hwnd]
 .st_hwnd_ok:
-    call    [SetWindowTextW]
+    call    [SetWindowTextA]
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_listbox_add:
-    ; RCX = hwnd, RDX = text
+    ; RCX = hwnd, RDX = text (ANSI string from Python code)
     push    rbp
     mov     rbp, rsp
     sub     rsp, 48
@@ -1515,7 +1542,7 @@ _pyfasm_listbox_add:
     mov     r9, rdx
     mov     edx, 180h               ; LB_ADDSTRING
     xor     r8d, r8d
-    call    [SendMessageW]
+    call    [SendMessageA]
     mov     rsp, rbp
     pop     rbp
     ret
@@ -1609,6 +1636,8 @@ _pyfasm_wnd_proc:
     je      .wnd_destroy
     cmp     edx, 14h                ; WM_ERASEBKGND (0x0014)
     je      .wnd_erasebkgnd
+    cmp     edx, 2Ch                ; WM_MEASUREITEM (0x002C)
+    je      .wnd_measureitem
     cmp     edx, 2Bh                ; WM_DRAWITEM (0x002B)
     je      .wnd_drawitem
     cmp     edx, 111h               ; WM_COMMAND (0x0111)
@@ -1655,6 +1684,12 @@ _pyfasm_wnd_proc:
     call    [DeleteObject]
     mov     rcx, [_pyfasm_hpen_slate]
     call    [DeleteObject]
+    mov     rcx, [_pyfasm_hbr_card_sel]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_hbr_green_pill]
+    call    [DeleteObject]
+    mov     rcx, [_pyfasm_hpen_green_pill]
+    call    [DeleteObject]
     mov     rcx, [_pyfasm_h_font_ui]
     call    [DeleteObject]
     mov     rcx, [_pyfasm_h_font_bold]
@@ -1676,7 +1711,169 @@ _pyfasm_wnd_proc:
     je      .draw_clear_btn
     cmp     eax, 901                ; Logo Badge
     je      .draw_logo_badge
+    cmp     eax, 3001               ; ListBox Owner-Drawn Question Cards
+    je      .draw_question_card
     call    [DefWindowProcW]
+    jmp     .wnd_proc_ret
+
+.wnd_measureitem:
+    ; rsi = MEASUREITEMSTRUCT*
+    mov     dword [rsi + 16], 78    ; itemHeight = 78px
+    mov     eax, 1
+    jmp     .wnd_proc_ret
+
+.draw_question_card:
+    mov     eax, [rsi + 8]          ; itemID
+    cmp     eax, -1
+    je      .card_draw_ret
+
+    ; 1. Clear card background
+    mov     rcx, [rsi + 32]         ; hDC
+    lea     rdx, [rsi + 40]         ; rcItem
+    mov     r8, [_pyfasm_hbr_bg]
+    call    [FillRect]
+
+    ; 2. Determine selection state
+    mov     ecx, [rsi + 16]         ; itemState
+    test    ecx, 1                  ; ODS_SELECTED
+    jz      .card_normal
+
+.card_selected:
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_card_sel]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_orange]
+    call    [SelectObject]
+    jmp     .draw_card_rect
+
+.card_normal:
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_card]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_slate]
+    call    [SelectObject]
+
+.draw_card_rect:
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    add     rdx, 4                  ; cardLeft
+    movsxd  r8, dword [rsi + 44]
+    add     r8, 2                   ; cardTop
+    movsxd  r9, dword [rsi + 48]
+    sub     r9, 6                   ; cardRight
+    movsxd  rax, dword [rsi + 52]
+    sub     rax, 3                  ; cardBottom
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8     ; 8px radius
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    ; 3. Draw Green Score Pill [left+12, top+8, left+72, top+26]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hbr_green_pill]
+    call    [SelectObject]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_hpen_green_pill]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    movsxd  rdx, dword [rsi + 40]
+    add     rdx, 12
+    movsxd  r8, dword [rsi + 44]
+    add     r8, 8
+    movsxd  r9, dword [rsi + 40]
+    add     r9, 72
+    movsxd  rax, dword [rsi + 44]
+    add     rax, 26
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 4
+    mov     qword [rsp + 48], 4
+    call    [RoundRect]
+
+    ; Pill text in white
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh
+    call    [SetTextColor]
+    mov     rcx, [rsi + 32]
+    mov     edx, 1                  ; TRANSPARENT
+    call    [SetBkMode]
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_ui]
+    call    [SelectObject]
+
+    mov     rcx, [rsi + 32]
+    lea     rdx, [wszPillText]
+    mov     r8d, -1
+    mov     eax, dword [rsi + 40]
+    add     eax, 12
+    mov     dword [_pyfasm_rc_client], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 8
+    mov     dword [_pyfasm_rc_client + 4], eax
+    mov     eax, dword [rsi + 40]
+    add     eax, 72
+    mov     dword [_pyfasm_rc_client + 8], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 26
+    mov     dword [_pyfasm_rc_client + 12], eax
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
+
+    ; 4. Card Title Text
+    mov     rcx, [rsi + 32]
+    mov     rdx, [_pyfasm_h_font_bold]
+    call    [SelectObject]
+
+    mov     ecx, [rsi + 16]
+    test    ecx, 1
+    jz      .title_normal
+    mov     rcx, [rsi + 32]
+    mov     edx, 00FFFFFFh          ; bright white
+    call    [SetTextColor]
+    jmp     .draw_title_str
+.title_normal:
+    mov     rcx, [rsi + 32]
+    mov     edx, 00E2E8F0h          ; slate white
+    call    [SetTextColor]
+
+.draw_title_str:
+    mov     rcx, [rsi + 32]
+    mov     edx, 1
+    call    [SetBkMode]
+
+    ; Title rect: left+12, top+32, right-14, bottom-4
+    mov     eax, dword [rsi + 40]
+    add     eax, 12
+    mov     dword [_pyfasm_rc_client], eax
+    mov     eax, dword [rsi + 44]
+    add     eax, 32
+    mov     dword [_pyfasm_rc_client + 4], eax
+    mov     eax, dword [rsi + 48]
+    sub     eax, 14
+    mov     dword [_pyfasm_rc_client + 8], eax
+    mov     eax, dword [rsi + 52]
+    sub     eax, 4
+    mov     dword [_pyfasm_rc_client + 12], eax
+
+    ; Retrieve text for this listbox item
+    mov     rcx, [_pyfasm_h_listbox]
+    mov     edx, 189h               ; LB_GETTEXT
+    movsxd  r8, dword [rsi + 8]     ; itemID
+    lea     r9, [_pyfasm_card_text_buf]
+    call    [SendMessageW]
+
+    mov     rcx, [rsi + 32]
+    lea     rdx, [_pyfasm_card_text_buf]
+    mov     r8d, -1
+    lea     r9, [_pyfasm_rc_client]
+    mov     qword [rsp + 32], 8010h ; DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS
+    call    [DrawTextW]
+
+.card_draw_ret:
+    mov     eax, 1
     jmp     .wnd_proc_ret
 
 .draw_search_btn:
@@ -2326,15 +2523,42 @@ _pyfasm_tray_wnd_proc:
     mov     ecx, -1
     call    [MessageBeep]
 .skip_thotkey_beep:
-    ; Switch layout in active foreground window
     call    [GetForegroundWindow]
     test    rax, rax
     jz      .skip_post_lang
-    mov     rcx, rax
+    mov     rbx, rax
+
+    mov     rcx, rbx
     mov     edx, 50h                ; WM_INPUTLANGCHANGEREQUEST
     xor     r8d, r8d
-    mov     r9, 1                   ; INPUTLANGCHANGE_FORWARD
+    mov     r9, 2                   ; INPUTLANGCHANGE_FORWARD
     call    [PostMessageW]
+
+    call    [GetCurrentThreadId]
+    mov     r12d, eax
+    mov     rcx, rbx
+    xor     edx, edx
+    call    [GetWindowThreadProcessId]
+    mov     r13d, eax
+    test    r13d, r13d
+    jz      .skip_post_lang
+    cmp     r12d, r13d
+    je      .skip_post_lang
+
+    mov     ecx, r12d
+    mov     edx, r13d
+    mov     r8d, 1
+    call    [AttachThreadInput]
+
+    mov     ecx, 1                  ; HKL_NEXT
+    xor     edx, edx
+    call    [ActivateKeyboardLayout]
+
+    mov     ecx, r12d
+    mov     edx, r13d
+    xor     r8d, r8d
+    call    [AttachThreadInput]
+
 .skip_post_lang:
     mov     ecx, 1                  ; HKL_NEXT
     xor     edx, edx
@@ -2552,6 +2776,7 @@ section '.idata' import data readable writeable
            WaitForSingleObject, 'WaitForSingleObject', \\
            CloseHandle, 'CloseHandle', \\
            GetModuleHandleA, 'GetModuleHandleA', \\
+           GetCurrentThreadId, 'GetCurrentThreadId', \\
            ExitProcess, 'ExitProcess'
 
     import user32, \\
@@ -2572,6 +2797,8 @@ section '.idata' import data readable writeable
            SendMessageW, 'SendMessageW', \\
            RegisterHotKey, 'RegisterHotKey', \\
            UnregisterHotKey, 'UnregisterHotKey', \\
+           AttachThreadInput, 'AttachThreadInput', \\
+           GetWindowThreadProcessId, 'GetWindowThreadProcessId', \\
            LoadCursorA, 'LoadCursorA', \\
            LoadIconA, 'LoadIconA', \\
            LoadIconW, 'LoadIconW', \\

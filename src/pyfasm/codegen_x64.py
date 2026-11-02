@@ -1035,17 +1035,33 @@ include 'functions.inc'
         call_name_lower = (func_name or attr_name or "").lower()
 
         if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
+            # Detect if this call is on an icon/tray object
+            is_icon_call = (
+                prefix in ("icon", "self.icon", "tray", "self.tray")
+                or "icon" in func_dump_lower
+                or "tray" in func_dump_lower
+                or (isinstance(call.func, ast.Attribute) and getattr(call.func.value, "attr", None) == "icon")
+            )
+
             # Check if any user-defined class method matches (e.g. PuntoSwitcher_run)
             matching_method = None
             module_classes = getattr(self.module, "classes", {})
             module_functions = getattr(self.module, "functions", {})
-            for cls_name in module_classes:
-                candidate = f"{cls_name}_{attr_name}"
-                if candidate in module_functions:
-                    matching_method = candidate
-                    break
+            
+            if not is_icon_call:
+                for cls_name in module_classes:
+                    candidate = f"{cls_name}_{attr_name}"
+                    if candidate in module_functions:
+                        # Prevent recursive self-invocation
+                        if self.current_func and (
+                            self.current_func.name == candidate
+                            or self.current_func.name.endswith(f"_{attr_name}")
+                        ):
+                            continue
+                        matching_method = candidate
+                        break
 
-            if matching_method and prefix not in ("icon",):
+            if matching_method and not is_icon_call:
                 var = self.current_func.local_vars.get(prefix) if self.current_func and hasattr(self.current_func, "local_vars") else None
                 if var:
                     self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load instance '{prefix}'")
@@ -1057,11 +1073,12 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
 
             # Run the native GUI window or tray loop
-            module_imports = getattr(self.module, "imports", [])
-            is_tray = any(
-                any(k in s.lower() for k in ("tray", "punto", "pystray"))
-                for s in module_classes
-            ) or any("pystray" in imp.lower() for imp in module_imports) or prefix == "icon"
+            is_tray = (
+                is_icon_call
+                or getattr(self.module, "is_tray_app", False)
+                or any(k in s.lower() for k in ("tray", "punto", "pystray") for s in module_classes)
+                or any("pystray" in imp.lower() for imp in getattr(self.module, "imports", []))
+            )
             if is_tray and not any(k in func_dump_lower for k in ("ctk", "tk", "window")):
                 self.emit("sub rsp, 32", "shadow space for background tray event loop")
                 self.emit("call _pyfasm_run_tray_loop")

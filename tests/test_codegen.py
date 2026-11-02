@@ -345,3 +345,84 @@ def main():
     assert success is True, f"Tray compilation failed: {log}"
 
 
+
+
+def test_library_detection_and_adaptation(tmp_path: Path):
+    from pyfasm.ast_parser import AstAnalyzer
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('''
+[project]
+name = "demo"
+dependencies = [
+    "customtkinter>=5.2.0",
+    "requests",
+    "pystray"
+]
+''', encoding="utf-8")
+
+    src = tmp_path / "app.py"
+    src.write_text('''
+import pystray
+import customtkinter as ctk
+
+class App:
+    pass
+''', encoding="utf-8")
+
+    analyzer = AstAnalyzer(project_root=tmp_path)
+    module = analyzer.parse_file(src, project_root=tmp_path)
+
+    assert module.has_library("customtkinter") is True
+    assert module.has_library("requests") is True
+    assert module.has_library("pystray") is True
+    assert module.is_modern_gui is True
+    assert module.is_tray_app is True
+    assert module.is_http_app is True
+
+
+def test_tray_app_self_icon_run_no_recursion(tmp_path: Path):
+    source = '''
+import pystray
+
+class PuntoSwitcher:
+    def __init__(self):
+        self.icon = None
+
+    def run(self):
+        self.icon.run()
+
+def main():
+    app = PuntoSwitcher()
+    app.run()
+'''
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+
+    # In PuntoSwitcher_run, self.icon.run() MUST NOT call PuntoSwitcher_run recursively!
+    func_body = asm.split("PuntoSwitcher_run:")[1].split(".epilog_PuntoSwitcher_run:")[0]
+    assert "call PuntoSwitcher_run" not in func_body, "Infinite recursion detected in PuntoSwitcher_run!"
+    assert "call _pyfasm_run_tray_loop" in func_body, "Tray loop should be called directly on self.icon.run()!"
+
+
+def test_owner_drawn_cards_and_ansi_set_text():
+    compiler = PyFasmCompiler()
+    source = '''
+import customtkinter as ctk
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.entry = ctk.CTkEntry(self)
+        self.entry.delete(0, 10)
+
+def main():
+    app = App()
+    app.mainloop()
+'''
+    asm = compiler.compile_source_to_asm(source, target="win64")
+    # Verify owner-drawn listbox and measureitem
+    assert "50200151h" in asm or "LBS_OWNERDRAWFIXED" in asm
+    assert "WM_MEASUREITEM" in asm or "2Ch" in asm
+    assert "_pyfasm_set_text" in asm
+    assert "SetWindowTextA" in asm
+    assert "SendMessageA" in asm
