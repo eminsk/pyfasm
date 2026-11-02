@@ -9,7 +9,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
-from pyfasm.types import PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR
+from pyfasm.types import (
+    PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
+    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_TUPLE, InstanceType
+)
 
 
 @dataclass
@@ -408,6 +411,90 @@ class AstAnalyzer:
 
         return cls_sym
 
+    def _infer_node_type(self, expr: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> PyFasmType:
+        """Infers the PyFasmType of an AST expression using local type propagation (inspired by Shedskin & Mypyc)."""
+        if expr is None:
+            return TYPE_INT
+
+        if isinstance(expr, ast.Constant):
+            if isinstance(expr.value, bool):
+                return TYPE_BOOL
+            elif isinstance(expr.value, int):
+                return TYPE_INT
+            elif isinstance(expr.value, float):
+                return TYPE_FLOAT
+            elif isinstance(expr.value, str):
+                return TYPE_STR
+            return TYPE_INT
+
+        elif isinstance(expr, ast.Name):
+            if expr.id in local_vars:
+                return local_vars[expr.id].var_type
+            if expr.id in ("True", "False"):
+                return TYPE_BOOL
+            return TYPE_INT
+
+        elif isinstance(expr, ast.List):
+            return TYPE_LIST
+
+        elif isinstance(expr, ast.Dict):
+            return TYPE_DICT
+
+        elif isinstance(expr, ast.Tuple):
+            return TYPE_TUPLE
+
+        elif isinstance(expr, ast.JoinedStr):
+            return TYPE_STR
+
+        elif isinstance(expr, ast.BinOp):
+            if isinstance(expr.op, ast.Div):
+                return TYPE_FLOAT
+            left_t = self._infer_node_type(expr.left, local_vars)
+            right_t = self._infer_node_type(expr.right, local_vars)
+            if left_t.is_float() or right_t.is_float():
+                return TYPE_FLOAT
+            if left_t.is_str() or right_t.is_str():
+                return TYPE_STR
+            if left_t.is_list():
+                return TYPE_LIST
+            return TYPE_INT
+
+        elif isinstance(expr, ast.UnaryOp):
+            if isinstance(expr.op, ast.Not):
+                return TYPE_BOOL
+            return self._infer_node_type(expr.operand, local_vars)
+
+        elif isinstance(expr, (ast.Compare, ast.BoolOp)):
+            return TYPE_BOOL
+
+        elif isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Name):
+                fid = expr.func.id
+                if fid in ("str", "chr", "hex", "bin"):
+                    return TYPE_STR
+                elif fid in ("int", "ord", "len", "hash", "abs", "round"):
+                    return TYPE_INT
+                elif fid in ("float", "pow"):
+                    return TYPE_FLOAT
+                elif fid in ("bool", "isinstance", "issubclass"):
+                    return TYPE_BOOL
+                elif fid in ("list", "range"):
+                    return TYPE_LIST
+                elif fid in ("dict",):
+                    return TYPE_DICT
+                elif fid in ("tuple",):
+                    return TYPE_TUPLE
+            elif isinstance(expr.func, ast.Attribute):
+                attr = expr.func.attr
+                if attr in ("split", "strip", "replace", "lower", "upper", "capitalize", "format"):
+                    return TYPE_STR
+                elif attr in ("keys", "values", "items"):
+                    return TYPE_LIST
+                elif attr in ("count", "find", "index"):
+                    return TYPE_INT
+
+        return TYPE_INT
+
     def _analyze_function(self, node: ast.FunctionDef) -> FunctionSymbol:
         # Determine return type
         ret_type = TYPE_VOID
@@ -442,20 +529,23 @@ class AstAnalyzer:
             local_vars[arg_name] = var_sym
             offset += 8
 
-        # Discover all assigned variables in the function body
+        # Discover all assigned variables in the function body with local type inference
         for sub_node in ast.walk(node):
             if isinstance(sub_node, ast.Assign):
+                inferred_type = self._infer_node_type(sub_node.value, local_vars)
                 for target in sub_node.targets:
                     if isinstance(target, ast.Name):
                         vname = target.id
                         if vname not in local_vars:
                             local_vars[vname] = VariableSymbol(
                                 name=vname,
-                                var_type=TYPE_INT,
+                                var_type=inferred_type,
                                 stack_offset=offset,
                                 is_arg=False
                             )
                             offset += 8
+                        elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and inferred_type != TYPE_INT:
+                            local_vars[vname].var_type = inferred_type
             elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
                 vname = sub_node.target.id
                 vtype = TYPE_INT
@@ -481,6 +571,13 @@ class AstAnalyzer:
                         is_arg=False
                     )
                     offset += 8
+
+        # If return type wasn't explicitly annotated, infer from return statements
+        if ret_type == TYPE_VOID:
+            for sub_node in ast.walk(node):
+                if isinstance(sub_node, ast.Return) and sub_node.value is not None:
+                    ret_type = self._infer_node_type(sub_node.value, local_vars)
+                    break
 
         # 16-byte alignment + shadow space
         aligned_stack = ((offset + 15) // 16) * 16 + 32

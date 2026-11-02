@@ -26,6 +26,15 @@ class PyFasmType:
     def is_ptr(self) -> bool:
         return isinstance(self, PtrType)
 
+    def is_list(self) -> bool:
+        return isinstance(self, ListType)
+
+    def is_dict(self) -> bool:
+        return isinstance(self, DictType)
+
+    def is_tuple(self) -> bool:
+        return isinstance(self, TupleType)
+
     def is_void(self) -> bool:
         return isinstance(self, VoidType)
 
@@ -65,6 +74,34 @@ class PtrType(PyFasmType):
 
 
 @dataclass(frozen=True)
+class ListType(PyFasmType):
+    name: str = "list"
+    element_type: Optional[PyFasmType] = None
+    size_bytes: int = 8  # Pointer to heap list descriptor
+
+
+@dataclass(frozen=True)
+class DictType(PyFasmType):
+    name: str = "dict"
+    key_type: Optional[PyFasmType] = None
+    val_type: Optional[PyFasmType] = None
+    size_bytes: int = 8  # Pointer to heap hash table descriptor
+
+
+@dataclass(frozen=True)
+class TupleType(PyFasmType):
+    name: str = "tuple"
+    size_bytes: int = 8  # Pointer to heap tuple descriptor
+
+
+@dataclass(frozen=True)
+class InstanceType(PyFasmType):
+    name: str = "object"
+    class_name: Optional[str] = None
+    size_bytes: int = 8  # Pointer to heap object instance
+
+
+@dataclass(frozen=True)
 class VoidType(PyFasmType):
     name: str = "void"
     size_bytes: int = 0
@@ -76,6 +113,9 @@ TYPE_FLOAT = FloatType()
 TYPE_BOOL = BoolType()
 TYPE_STR = StrType()
 TYPE_PTR = PtrType()
+TYPE_LIST = ListType()
+TYPE_DICT = DictType()
+TYPE_TUPLE = TupleType()
 TYPE_VOID = VoidType()
 
 
@@ -94,6 +134,12 @@ def resolve_type(type_name: Optional[str]) -> PyFasmType:
         return TYPE_STR
     if norm in ("ptr", "pointer", "array", "buffer"):
         return TYPE_PTR
+    if norm in ("list", "seq", "sequence"):
+        return TYPE_LIST
+    if norm in ("dict", "map", "mapping"):
+        return TYPE_DICT
+    if norm in ("tuple",):
+        return TYPE_TUPLE
     if norm in ("none", "void"):
         return TYPE_VOID
     return TYPE_INT

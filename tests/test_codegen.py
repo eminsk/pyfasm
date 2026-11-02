@@ -426,3 +426,54 @@ def main():
     assert "_pyfasm_set_text" in asm
     assert "SetWindowTextA" in asm
     assert "SendMessageA" in asm
+
+
+def test_ast_type_inference_and_peephole_optimizer():
+    from pyfasm.ast_parser import AstAnalyzer
+    from pyfasm.optimizer import optimize_fasm_code
+    import ast
+
+    source = """
+def calc_something(x: int):
+    greeting = "hello world"
+    ratio = 3.14
+    is_valid = True
+    items = [1, 2, 3]
+    mapping = {"a": 1}
+    total = x + 10
+    return greeting
+"""
+    tree = ast.parse(source)
+    analyzer = AstAnalyzer()
+    module = analyzer.parse_source(source)
+
+    fn = module.functions["calc_something"]
+    # Check local variable inferred types
+    assert fn.local_vars["greeting"].var_type.is_str(), "greeting should be inferred as TYPE_STR"
+    assert fn.local_vars["ratio"].var_type.is_float(), "ratio should be inferred as TYPE_FLOAT"
+    assert fn.local_vars["is_valid"].var_type.is_bool(), "is_valid should be inferred as TYPE_BOOL"
+    assert fn.local_vars["items"].var_type.is_list(), "items should be inferred as TYPE_LIST"
+    assert fn.local_vars["mapping"].var_type.is_dict(), "mapping should be inferred as TYPE_DICT"
+    assert fn.local_vars["total"].var_type.is_int(), "total should be inferred as TYPE_INT"
+    assert fn.return_type.is_str(), "return_type should be inferred as TYPE_STR from return greeting"
+
+    # Test peephole optimization
+    raw_asm = """
+    push rdx
+    pop rax
+    push rbx
+    pop rbx
+    mov rcx, rcx
+    add rsp, 0
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp .L_next
+.L_next:
+    ret
+"""
+    opt = optimize_fasm_code(raw_asm)
+    assert "mov rax, rdx" in opt, "push rdx; pop rax should be collapsed to mov rax, rdx"
+    assert "push rbx" not in opt, "push rbx; pop rbx should be eliminated"
+    assert "mov rcx, rcx" not in opt, "mov rcx, rcx should be eliminated"
+    assert "add rsp, 0" not in opt, "add rsp, 0 should be eliminated"
+    assert "jmp .L_next" not in opt, "jmp immediately preceding .L_next: should be eliminated"

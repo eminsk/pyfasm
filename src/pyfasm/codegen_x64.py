@@ -497,11 +497,12 @@ include 'runtime.inc'
 
 include 'functions.inc'
 """
+        from pyfasm.optimizer import optimize_fasm_code
         return {
             "main.asm": main_asm,
             "constants.inc": constants_inc,
             "runtime.inc": runtime_inc,
-            "functions.inc": functions_inc,
+            "functions.inc": optimize_fasm_code(functions_inc),
             "imports.inc": imports_inc,
         }
 
@@ -512,7 +513,9 @@ include 'functions.inc'
         funcs = self._get_functions_section()
         runtime = self._get_runtime_code()
         imports = self._get_imports_section()
-        return "\n".join([header, data, entry, funcs, runtime, imports])
+        raw = "\n".join([header, data, entry, funcs, runtime, imports])
+        from pyfasm.optimizer import optimize_fasm_code
+        return optimize_fasm_code(raw)
 
     def _generate_constructor_body(self, cls_sym: Any) -> None:
         self.emit("mov ecx, 256", f"allocate 256 bytes for class '{cls_sym.name}' instance")
