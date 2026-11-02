@@ -482,6 +482,15 @@ class X64CodeGen:
                     self.emit("xor eax, eax")
 
         elif isinstance(expr, ast.Name):
+            if expr.id == "True":
+                self.emit("mov rax, 1")
+                return
+            elif expr.id == "False":
+                self.emit("mov rax, 0")
+                return
+            elif expr.id == "None":
+                self.emit("xor eax, eax")
+                return
             var = self.current_func.local_vars.get(expr.id)
             if var:
                 self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
