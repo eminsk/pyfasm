@@ -211,6 +211,7 @@ class FasmRunner:
             res = subprocess.run(
                 cmd,
                 env=env,
+                cwd=str(asm_path.parent),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

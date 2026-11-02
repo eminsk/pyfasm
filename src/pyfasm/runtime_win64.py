@@ -33,6 +33,16 @@ section '.data' data readable writeable
     dot_str         db '.', 0
     flt_1m          dq 1000000.0
     flt_zero        dq 0.0
+
+    ; --- Native Win32 GUI Runtime Data ---
+    _pyfasm_wnd_class   db 'PyFasmWindowClass', 0
+    _pyfasm_wnd_title   db 'PyFasm Native Application', 0
+    _pyfasm_wnd_title_ptr dq _pyfasm_wnd_title
+    _pyfasm_h_wnd       dq 0
+    _pyfasm_h_inst      dq 0
+    align 8
+    _pyfasm_wc          rb 80 ; WNDCLASSEXA
+    _pyfasm_msg         rb 48 ; MSG
 """
 
 
@@ -365,6 +375,210 @@ _pyfasm_atomic_sub:
     lock sub qword [rcx], rdx
     mov     rax, [rcx]
     ret
+
+_pyfasm_alloc:
+    ; RCX = size in bytes
+    jmp     _pyfasm_alloc_memory
+
+_pyfasm_free:
+    ; RCX = pointer
+    jmp     _pyfasm_free_memory
+
+_pyfasm_init_gui:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    cmp     qword [_pyfasm_h_inst], 0
+    jne     .gui_already_init
+
+    xor     ecx, ecx
+    call    [GetModuleHandleA]
+    mov     [_pyfasm_h_inst], rax
+
+    ; Load standard arrow cursor IDC_ARROW (32512)
+    xor     ecx, ecx
+    mov     edx, 32512
+    call    [LoadCursorA]
+    mov     r11, rax
+
+    ; Setup WNDCLASSEX (80 bytes)
+    mov     dword [_pyfasm_wc], 80          ; cbSize
+    mov     dword [_pyfasm_wc + 4], 3       ; style = CS_HREDRAW | CS_VREDRAW
+    lea     rax, [_pyfasm_wnd_proc]
+    mov     qword [_pyfasm_wc + 8], rax     ; lpfnWndProc
+    mov     dword [_pyfasm_wc + 16], 0      ; cbClsExtra
+    mov     dword [_pyfasm_wc + 20], 0      ; cbWndExtra
+    mov     rax, [_pyfasm_h_inst]
+    mov     qword [_pyfasm_wc + 24], rax    ; hInstance
+    mov     qword [_pyfasm_wc + 32], 0      ; hIcon
+    mov     qword [_pyfasm_wc + 40], r11    ; hCursor (IDC_ARROW)
+    mov     qword [_pyfasm_wc + 48], 6      ; hbrBackground = COLOR_WINDOW + 1
+    mov     qword [_pyfasm_wc + 56], 0      ; lpszMenuName
+    lea     rax, [_pyfasm_wnd_class]
+    mov     qword [_pyfasm_wc + 64], rax    ; lpszClassName
+    mov     qword [_pyfasm_wc + 72], 0      ; hIconSm
+
+    lea     rcx, [_pyfasm_wc]
+    call    [RegisterClassExA]
+
+.gui_already_init:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_window_title:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     [_pyfasm_wnd_title_ptr], rcx
+    mov     rdx, rcx
+    mov     rcx, [_pyfasm_h_wnd]
+    test    rcx, rcx
+    jz      .set_title_done
+    call    [SetWindowTextA]
+.set_title_done:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_window:
+    ; RCX = title string (or 0 for default), RDX = width (or 0 for 900), R8 = height (or 0 for 650)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 112
+    and     rsp, -16
+
+    mov     [rsp + 96], rcx     ; title
+    mov     [rsp + 104], rdx    ; width
+    mov     rax, r8
+    test    rax, rax
+    jnz     .h_ok
+    mov     rax, 650
+.h_ok:
+    mov     [rsp + 88], rax     ; height
+
+    call    _pyfasm_init_gui
+
+    ; Determine title
+    mov     r8, [rsp + 96]
+    test    r8, r8
+    jnz     .title_ok
+    mov     r8, [_pyfasm_wnd_title_ptr]
+    test    r8, r8
+    jnz     .title_ok
+    lea     r8, [_pyfasm_wnd_title]
+.title_ok:
+
+    ; Determine width
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .w_ok
+    mov     r10, 900
+.w_ok:
+
+    ; CreateWindowExA(0, szClass, szTitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, width, height, 0, 0, hInstance, 0)
+    xor     ecx, ecx
+    lea     rdx, [_pyfasm_wnd_class]
+    ; r8 is already title
+    mov     r9d, 10CF0000h          ; WS_OVERLAPPEDWINDOW | WS_VISIBLE
+    mov     qword [rsp + 32], 100   ; X
+    mov     qword [rsp + 40], 100   ; Y
+    mov     [rsp + 48], r10         ; nWidth
+    mov     rax, [rsp + 88]
+    mov     [rsp + 56], rax         ; nHeight
+    mov     qword [rsp + 64], 0     ; hWndParent
+    mov     qword [rsp + 72], 0     ; hMenu
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax         ; hInstance
+    mov     qword [rsp + 88], 0     ; lpParam
+    call    [CreateWindowExA]
+    mov     [_pyfasm_h_wnd], rax
+
+    ; ShowWindow, UpdateWindow & SetForegroundWindow
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 5                  ; SW_SHOW
+    call    [ShowWindow]
+
+    mov     rcx, [_pyfasm_h_wnd]
+    call    [UpdateWindow]
+
+    mov     rcx, [_pyfasm_h_wnd]
+    call    [SetForegroundWindow]
+
+    mov     rax, [_pyfasm_h_wnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_run_window_loop:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+
+    cmp     qword [_pyfasm_h_wnd], 0
+    jne     .start_msg_loop
+
+    ; Window was not created yet, create it now!
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     r8d, r8d
+    call    _pyfasm_create_window
+
+.start_msg_loop:
+    lea     rcx, [_pyfasm_msg]
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [GetMessageA]
+    test    eax, eax
+    jle     .msg_loop_done
+
+    lea     rcx, [_pyfasm_msg]
+    call    [TranslateMessage]
+
+    lea     rcx, [_pyfasm_msg]
+    call    [DispatchMessageA]
+    jmp     .start_msg_loop
+
+.msg_loop_done:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_wnd_proc:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    cmp     edx, 2                  ; WM_DESTROY
+    je      .wnd_destroy
+    call    [DefWindowProcA]
+    jmp     .wnd_proc_ret
+.wnd_destroy:
+    xor     ecx, ecx
+    call    [PostQuitMessage]
+    xor     eax, eax
+.wnd_proc_ret:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_message_box:
+    ; RCX = text, RDX = title
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    mov     r8, rdx                 ; title in r8
+    mov     rdx, rcx                ; text in rdx
+    xor     ecx, ecx                ; hWnd = 0
+    xor     r9d, r9d                ; uType = MB_OK (0)
+    call    [MessageBoxA]
+    mov     rsp, rbp
+    pop     rbp
+    ret
 """
 
 
@@ -398,7 +612,8 @@ def get_win64_runtime_imports() -> str:
     """Returns the IData section with Win32 API imports."""
     return """
 section '.idata' import data readable writeable
-    library kernel32, 'KERNEL32.DLL'
+    library kernel32, 'KERNEL32.DLL', \\
+            user32, 'USER32.DLL'
 
     import kernel32, \\
            GetStdHandle, 'GetStdHandle', \\
@@ -412,5 +627,22 @@ section '.idata' import data readable writeable
            CreateThread, 'CreateThread', \\
            WaitForSingleObject, 'WaitForSingleObject', \\
            CloseHandle, 'CloseHandle', \\
+           GetModuleHandleA, 'GetModuleHandleA', \\
            ExitProcess, 'ExitProcess'
+
+    import user32, \\
+           MessageBoxA, 'MessageBoxA', \\
+           MessageBoxW, 'MessageBoxW', \\
+           RegisterClassExA, 'RegisterClassExA', \\
+           CreateWindowExA, 'CreateWindowExA', \\
+           ShowWindow, 'ShowWindow', \\
+           UpdateWindow, 'UpdateWindow', \\
+           SetForegroundWindow, 'SetForegroundWindow', \\
+           SetWindowTextA, 'SetWindowTextA', \\
+           LoadCursorA, 'LoadCursorA', \\
+           GetMessageA, 'GetMessageA', \\
+           TranslateMessage, 'TranslateMessage', \\
+           DispatchMessageA, 'DispatchMessageA', \\
+           DefWindowProcA, 'DefWindowProcA', \\
+           PostQuitMessage, 'PostQuitMessage'
 """

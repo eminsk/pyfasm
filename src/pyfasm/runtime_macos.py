@@ -331,6 +331,40 @@ _pyfasm_sleep_ms:
     pop     rbp
     ret
 
+_pyfasm_alloc:
+    xor     eax, eax
+    ret
+
+_pyfasm_free:
+    xor     eax, eax
+    ret
+
+_pyfasm_init_gui:
+    xor     eax, eax
+    ret
+
+_pyfasm_set_window_title:
+    xor     eax, eax
+    ret
+
+_pyfasm_create_window:
+    xor     eax, eax
+    ret
+
+_pyfasm_run_window_loop:
+    xor     eax, eax
+    ret
+
+_pyfasm_wnd_proc:
+    xor     eax, eax
+    ret
+
+_pyfasm_message_box:
+    mov     rsi, rcx
+    call    _pyfasm_print_str
+    call    _pyfasm_print_newline
+    ret
+
 code_size = $ - code_start
 file_size = $
 """

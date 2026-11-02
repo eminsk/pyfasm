@@ -293,4 +293,50 @@ _pyfasm_sleep_ms:
     mov     rsp, rbp
     pop     rbp
     ret
+
+_pyfasm_alloc:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    mov     rsi, rcx                ; length
+    xor     rdi, rdi                ; addr = NULL
+    mov     rdx, 3                  ; PROT_READ | PROT_WRITE
+    mov     r10, 34                 ; MAP_PRIVATE | MAP_ANONYMOUS
+    mov     r8, -1                  ; fd = -1
+    xor     r9, r9                  ; offset = 0
+    mov     rax, 9                  ; sys_mmap
+    syscall
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_free:
+    xor     eax, eax
+    ret
+
+_pyfasm_init_gui:
+    xor     eax, eax
+    ret
+
+_pyfasm_set_window_title:
+    xor     eax, eax
+    ret
+
+_pyfasm_create_window:
+    xor     eax, eax
+    ret
+
+_pyfasm_run_window_loop:
+    xor     eax, eax
+    ret
+
+_pyfasm_wnd_proc:
+    xor     eax, eax
+    ret
+
+_pyfasm_message_box:
+    mov     rsi, rcx
+    call    _pyfasm_print_str
+    call    _pyfasm_print_newline
+    ret
 """

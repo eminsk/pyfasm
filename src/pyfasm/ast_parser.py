@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
-from pyfasm.types import PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR
+from pyfasm.types import PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR
 
 
 @dataclass
@@ -29,6 +29,16 @@ class FunctionSymbol:
     local_vars: Dict[str, VariableSymbol] = field(default_factory=dict)
     stack_size: int = 0
     ast_node: Optional[ast.FunctionDef] = None
+    class_name: Optional[str] = None
+
+
+@dataclass
+class ClassSymbol:
+    name: str
+    methods: Dict[str, FunctionSymbol] = field(default_factory=dict)
+    fields: List[str] = field(default_factory=list)
+    bases: List[str] = field(default_factory=list)
+    ast_node: Optional[ast.ClassDef] = None
 
 
 @dataclass
@@ -46,6 +56,7 @@ class FloatLiteral:
 @dataclass
 class ParsedModule:
     functions: Dict[str, FunctionSymbol] = field(default_factory=dict)
+    classes: Dict[str, ClassSymbol] = field(default_factory=dict)
     string_literals: List[StringLiteral] = field(default_factory=list)
     float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
@@ -97,13 +108,15 @@ class AstAnalyzer:
         module.string_literals = self.strings
         module.float_literals = self.floats
 
-        # Second pass: extract functions
+        # Second pass: extract functions and classes
         for stmt in tree.body:
             if isinstance(stmt, ast.FunctionDef):
                 fn = self._analyze_function(stmt)
                 module.functions[fn.name] = fn
                 if fn.name == "main":
                     module.main_func = fn
+            elif isinstance(stmt, ast.ClassDef):
+                self._analyze_class(stmt, module, mod_prefix="")
 
         return module
 
@@ -211,6 +224,8 @@ class AstAnalyzer:
 
                 if is_entry and fn.name == "main":
                     module.main_func = fn
+            elif isinstance(stmt, ast.ClassDef):
+                self._analyze_class(stmt, module, mod_prefix=mod_prefix)
 
         # 3. Discover and recursively parse imported project modules
         for stmt in tree.body:
@@ -229,6 +244,76 @@ class AstAnalyzer:
                     dep = self._resolve_local_module(stmt.module, real_path.parent)
                     if dep and dep != real_path:
                         self._parse_file_recursive(dep, module, is_entry=False)
+
+    def _analyze_class(self, node: ast.ClassDef, module: ParsedModule, mod_prefix: str = "") -> ClassSymbol:
+        cls_name = node.name
+        bases = []
+        for b in node.bases:
+            if isinstance(b, ast.Name):
+                bases.append(b.id)
+            elif isinstance(b, ast.Attribute):
+                bases.append(b.attr)
+
+        cls_sym = ClassSymbol(name=cls_name, bases=bases, ast_node=node)
+
+        # Discover field assignments in class methods (especially self.x = ...)
+        fields: List[str] = []
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                for sub in ast.walk(item):
+                    if isinstance(sub, ast.Assign):
+                        for tgt in sub.targets:
+                            if isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name) and tgt.value.id == "self":
+                                if tgt.attr not in fields:
+                                    fields.append(tgt.attr)
+        cls_sym.fields = fields
+
+        # Extract and register methods
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                m_fn = self._analyze_function(item)
+                method_name = f"{cls_name}_{item.name}"
+                m_fn.name = method_name  # Ensure class method has unique namespaced symbol name
+                m_fn.class_name = cls_name
+                cls_sym.methods[item.name] = m_fn
+
+                # Register namespaced method: ClassName_method (e.g. StackOverflowApp_mainloop)
+                if method_name not in module.functions:
+                    module.functions[method_name] = m_fn
+
+                if mod_prefix:
+                    pref_name = f"{mod_prefix}_{cls_name}_{item.name}"
+                    if pref_name not in module.functions:
+                        module.functions[pref_name] = m_fn
+
+        # Register constructor function symbol
+        init_fn = cls_sym.methods.get("__init__")
+        ctor_args: List[VariableSymbol] = []
+        if init_fn and len(init_fn.args) > 1:
+            for idx, a in enumerate(init_fn.args[1:]):
+                ctor_args.append(VariableSymbol(
+                    name=a.name,
+                    var_type=a.var_type,
+                    stack_offset=(idx + 1) * 8,
+                    is_arg=True,
+                    arg_index=idx
+                ))
+
+        ctor_sym = FunctionSymbol(
+            name=cls_name,
+            args=ctor_args,
+            return_type=TYPE_PTR,
+            stack_size=64
+        )
+        module.functions[cls_name] = ctor_sym
+        if mod_prefix:
+            module.functions[f"{mod_prefix}_{cls_name}"] = ctor_sym
+
+        module.classes[cls_name] = cls_sym
+        if mod_prefix:
+            module.classes[f"{mod_prefix}_{cls_name}"] = cls_sym
+
+        return cls_sym
 
     def _analyze_function(self, node: ast.FunctionDef) -> FunctionSymbol:
         # Determine return type

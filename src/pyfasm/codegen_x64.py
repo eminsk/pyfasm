@@ -69,6 +69,7 @@ class X64CodeGen:
         self.current_func: Optional[FunctionSymbol] = None
         self.loop_stack: List[Tuple[str, str]] = []  # (start_label, end_label)
         self.unresolved_symbols: Set[str] = set()
+        self.local_var_classes: Dict[str, str] = {}
 
     def new_label(self, prefix: str = "L") -> str:
         self._label_counter += 1
@@ -83,126 +84,119 @@ class X64CodeGen:
     def emit_raw(self, line: str) -> None:
         self.lines.append(line)
 
-    def generate(self) -> str:
-        self.lines = []
+    def _get_attribute_offset(self, attr_name: str) -> int:
+        if not hasattr(self, "_attr_offsets"):
+            self._attr_offsets = {}
+        if attr_name not in self._attr_offsets:
+            self._attr_offsets[attr_name] = len(self._attr_offsets) * 8
+        return self._attr_offsets[attr_name]
 
-        # 1. Target Header
+    def _get_runtime_header(self) -> str:
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_header
-            self.emit_raw(get_win64_runtime_header(is_dll=(self.target == "dll")))
+            return get_win64_runtime_header(is_dll=(self.target == "dll"))
         elif self.target == "linux":
             from pyfasm.runtime_linux import get_linux_runtime_header
-            self.emit_raw(get_linux_runtime_header())
+            return get_linux_runtime_header()
         elif self.target in ("macos", "apple"):
             from pyfasm.runtime_macos import get_macos_runtime_header
-            self.emit_raw(get_macos_runtime_header())
+            return get_macos_runtime_header()
         else:
             from pyfasm.runtime_myos import get_myos_runtime_header
-            self.emit_raw(get_myos_runtime_header())
+            return get_myos_runtime_header()
 
-        # 2. Data Section (String literals and global data)
-        self._generate_data_section()
-
-        # 3. Text Section (Entry point and user functions)
-        self._generate_text_section()
-
-        # 4. Runtime Routines and Exports
-        if self.target in ("win64", "dll"):
-            from pyfasm.runtime_win64 import get_win64_runtime_code, get_win64_runtime_imports, get_win64_export_section
-            self.emit_raw(get_win64_runtime_code())
-            if self.target == "dll":
-                fn_names = list(self.module.functions.keys())
-                self.emit_raw(get_win64_export_section("pyfasm_module.dll", fn_names))
-            self.emit_raw(get_win64_runtime_imports())
-        elif self.target == "linux":
-            from pyfasm.runtime_linux import get_linux_runtime_code
-            self.emit_raw(get_linux_runtime_code())
-        elif self.target in ("macos", "apple"):
-            from pyfasm.runtime_macos import get_macos_runtime_code
-            self.emit_raw(get_macos_runtime_code())
-        else:
-            from pyfasm.runtime_myos import get_myos_runtime_code
-            self.emit_raw(get_myos_runtime_code())
-
-        return "\n".join(self.lines)
-
-    def _generate_data_section(self) -> None:
+    def _get_data_section(self) -> str:
+        lines = []
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_data
-            self.emit_raw(get_win64_runtime_data())
+            lines.append(get_win64_runtime_data())
         elif self.target == "linux":
             from pyfasm.runtime_linux import get_linux_runtime_data
-            self.emit_raw(get_linux_runtime_data())
+            lines.append(get_linux_runtime_data())
         elif self.target in ("macos", "apple"):
             from pyfasm.runtime_macos import get_macos_runtime_data
-            self.emit_raw(get_macos_runtime_data())
+            lines.append(get_macos_runtime_data())
         else:
             from pyfasm.runtime_myos import get_myos_runtime_data
-            self.emit_raw(get_myos_runtime_data())
+            lines.append(get_myos_runtime_data())
 
         # Emit user string literals
         for slit in self.module.string_literals:
-            # Escape characters for FASM
-            escaped_bytes = []
-            for b in slit.value.encode("utf-8"):
-                escaped_bytes.append(str(b))
+            escaped_bytes = [str(b) for b in slit.value.encode("utf-8")]
             escaped_bytes.append("0")  # null terminator
             bytes_str = ", ".join(escaped_bytes)
-            self.emit_raw(f"    {slit.label} db {bytes_str}")
+            lines.append(f"    {slit.label} db {bytes_str}")
 
         # Emit user float literals
         for flit in self.module.float_literals:
-            self.emit_raw(f"    {flit.label} dq {flit.value}")
+            lines.append(f"    {flit.label} dq {flit.value}")
 
-        self.emit_raw("")
+        return "\n".join(lines)
 
-    def _generate_text_section(self) -> None:
+    def _get_runtime_code(self) -> str:
         if self.target in ("win64", "dll"):
-            self.emit_raw("section '.text' code readable executable")
+            from pyfasm.runtime_win64 import get_win64_runtime_code
+            return get_win64_runtime_code()
         elif self.target == "linux":
-            self.emit_raw("segment readable executable")
+            from pyfasm.runtime_linux import get_linux_runtime_code
+            return get_linux_runtime_code()
         elif self.target in ("macos", "apple"):
-            self.emit_raw("align 16")
+            from pyfasm.runtime_macos import get_macos_runtime_code
+            return get_macos_runtime_code()
         else:
-            self.emit_raw("align 16")
-        self.emit_raw("")
+            from pyfasm.runtime_myos import get_myos_runtime_code
+            return get_myos_runtime_code()
+
+    def _get_entry_point(self) -> str:
+        lines = []
+        if self.target in ("win64", "dll"):
+            lines.append("section '.text' code readable executable")
+        elif self.target == "linux":
+            lines.append("segment readable executable")
+        elif self.target in ("macos", "apple"):
+            lines.append("align 16")
+        else:
+            lines.append("align 16")
+        lines.append("")
 
         if self.target == "dll":
             from pyfasm.runtime_win64 import get_win64_dll_entry
-            self.emit_raw(get_win64_dll_entry())
+            lines.append(get_win64_dll_entry())
         else:
-            # Global Entry Point
-            self.emit_raw("_pyfasm_entry_point:")
-            self.emit("push rbp")
-            self.emit("mov rbp, rsp")
-            self.emit("sub rsp, 32", "shadow/local frame")
-            self.emit("and rsp, -16", "16-byte stack alignment")
-            self.emit("call _pyfasm_init_io", "initialize runtime I/O")
+            lines.append("_pyfasm_entry_point:")
+            lines.append("    push rbp")
+            lines.append("    mov rbp, rsp")
+            lines.append("    sub rsp, 32")
+            lines.append("    and rsp, -16")
+            lines.append("    call _pyfasm_init_io")
 
             if self.module.main_func:
-                self.emit("call main", "execute user main()")
-                self.emit("mov ecx, eax", "exit code in ecx (Windows)")
-                self.emit("mov edi, eax", "exit code in edi (Linux/macOS)")
+                lines.append("    call main")
+                lines.append("    mov ecx, eax")
+                lines.append("    mov edi, eax")
             else:
-                self.emit("xor ecx, ecx", "exit code 0")
-                self.emit("xor edi, edi", "exit code 0")
+                lines.append("    xor ecx, ecx")
+                lines.append("    xor edi, edi")
 
             if self.target == "win64":
-                self.emit("call [ExitProcess]")
+                lines.append("    call [ExitProcess]")
             elif self.target == "linux":
-                self.emit("mov rax, 60", "sys_exit")
-                self.emit("syscall")
+                lines.append("    mov rax, 60")
+                lines.append("    syscall")
             elif self.target in ("macos", "apple"):
-                self.emit("mov rax, 0x2000001", "Darwin sys_exit")
-                self.emit("syscall")
+                lines.append("    mov rax, 0x2000001")
+                lines.append("    syscall")
             else:
-                self.emit("mov rsp, rbp")
-                self.emit("pop rbp")
-                self.emit("ret")
+                lines.append("    mov rsp, rbp")
+                lines.append("    pop rbp")
+                lines.append("    ret")
 
-        self.emit_raw("")
+        return "\n".join(lines)
 
-        # Generate User Functions (group aliases)
+    def _get_functions_section(self) -> str:
+        old_lines = self.lines
+        self.lines = []
+
         fn_to_names: dict[int, list[str]] = {}
         for name, fn in self.module.functions.items():
             fn_id = id(fn)
@@ -217,7 +211,13 @@ class X64CodeGen:
             if fn.name in seen_funcs:
                 continue
             seen_funcs.add(fn.name)
-            self._generate_function(fn, aliases=names)
+            if fn.class_name:
+                filtered_names = [n for n in names if n.startswith(f"{fn.class_name}_") or f"_{fn.class_name}_" in n]
+                if not filtered_names:
+                    filtered_names = [fn.name]
+            else:
+                filtered_names = names
+            self._generate_function(fn, aliases=filtered_names)
 
         # Fallback stubs for unresolved external Python symbols
         if self.unresolved_symbols:
@@ -236,8 +236,143 @@ class X64CodeGen:
                 self.emit("ret")
                 self.emit_raw("")
 
+        funcs_code = "\n".join(self.lines)
+        self.lines = old_lines
+        return funcs_code
+
+    def _get_imports_section(self) -> str:
+        if self.target in ("win64", "dll"):
+            from pyfasm.runtime_win64 import get_win64_runtime_imports, get_win64_export_section
+            lines = []
+            if self.target == "dll":
+                fn_names = list(self.module.functions.keys())
+                lines.append(get_win64_export_section("pyfasm_module.dll", fn_names))
+            lines.append(get_win64_runtime_imports())
+            return "\n".join(lines)
+        return ""
+
+    def generate_modular(self) -> Dict[str, str]:
+        """
+        Generates clean, modular FASM source files:
+          - main.asm: master assembly entry point including modular headers
+          - constants.inc: data section containing all string literals, floats, and static buffers
+          - runtime.inc: native runtime I/O, dynamic memory, and Win32 GUI engine
+          - functions.inc: compiled functions, class constructors, and methods
+          - imports.inc: PE64 import section for Windows API libraries
+        """
+        constants_inc = f"""; ============================================================
+; PyFASM Modular Assembly: Constants & Static Data
+; ============================================================
+{self._get_data_section()}
+"""
+        runtime_inc = f"""; ============================================================
+; PyFASM Modular Assembly: Native Runtime & GUI Engine
+; ============================================================
+{self._get_runtime_code()}
+"""
+        if self.target in ("win64", "dll"):
+            fn_sec = "section '.text' code readable executable"
+        elif self.target == "linux":
+            fn_sec = "segment readable executable"
+        else:
+            fn_sec = "align 16"
+
+        functions_inc = f"""; ============================================================
+; PyFASM Modular Assembly: Compiled Functions & Classes
+; ============================================================
+{fn_sec}
+
+{self._get_functions_section()}
+"""
+        imports_inc = f"""; ============================================================
+; PyFASM Modular Assembly: Import & Library Section
+; ============================================================
+{self._get_imports_section()}
+"""
+        header = self._get_runtime_header()
+        entry = self._get_entry_point()
+
+        if self.target in ("win64", "dll"):
+            main_asm = f"""; ============================================================
+; PyFASM Modular Assembly Master Entrypoint
+; Target: Windows x64 (PE64)
+; ============================================================
+{header}
+
+include 'constants.inc'
+include 'runtime.inc'
+
+{entry}
+
+include 'functions.inc'
+include 'imports.inc'
+"""
+        else:
+            main_asm = f"""; ============================================================
+; PyFASM Modular Assembly Master Entrypoint
+; Target: {self.target.upper()}
+; ============================================================
+{header}
+
+include 'constants.inc'
+include 'runtime.inc'
+
+{entry}
+
+include 'functions.inc'
+"""
+        return {
+            "main.asm": main_asm,
+            "constants.inc": constants_inc,
+            "runtime.inc": runtime_inc,
+            "functions.inc": functions_inc,
+            "imports.inc": imports_inc,
+        }
+
+    def generate(self) -> str:
+        header = self._get_runtime_header()
+        data = self._get_data_section()
+        entry = self._get_entry_point()
+        funcs = self._get_functions_section()
+        runtime = self._get_runtime_code()
+        imports = self._get_imports_section()
+        return "\n".join([header, data, entry, funcs, runtime, imports])
+
+    def _generate_constructor_body(self, cls_sym: Any) -> None:
+        self.emit("mov ecx, 256", f"allocate 256 bytes for class '{cls_sym.name}' instance")
+        self.emit("call _pyfasm_alloc")
+        self.emit("mov [rbp - 40], rax", "save self instance pointer")
+
+        # Check if GUI class or application
+        is_gui = any(
+            any(k in s.lower() for k in ("app", "window", "gui", "ctk", "tk", "punto"))
+            for s in cls_sym.bases + [cls_sym.name]
+        )
+        if is_gui and self.target in ("win64", "dll"):
+            self.emit("call _pyfasm_init_gui", "initialize native GUI system")
+
+        # Call __init__ if present
+        init_target = None
+        if f"{cls_sym.name}___init__" in self.module.functions:
+            init_target = f"{cls_sym.name}___init__"
+        elif "__init__" in cls_sym.methods:
+            init_target = f"{cls_sym.name}___init__"
+
+        if init_target:
+            self.emit("mov rcx, [rbp - 40]", "pass self as first arg")
+            self.emit("mov rdx, [rbp - 8]", "pass arg 1")
+            self.emit("mov r8, [rbp - 16]", "pass arg 2")
+            self.emit("mov r9, [rbp - 24]", "pass arg 3")
+            self.emit(f"call {safe_asm_label(init_target)}")
+
+        self.emit("mov rax, [rbp - 40]", "return instance self pointer")
+
     def _generate_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
         self.current_func = fn
+        self.local_var_classes = {}
+        if fn.class_name:
+            self.local_var_classes["self"] = fn.class_name
+            self.local_var_classes["this"] = fn.class_name
         self.emit_raw("; ============================================================")
         self.emit_raw(f"; Function: {fn.name}")
         self.emit_raw("; ============================================================")
@@ -265,7 +400,9 @@ class X64CodeGen:
                 self.emit(f"mov [rbp - {arg.stack_offset}], rax", f"arg {arg.name}")
 
         # Function Body
-        if fn.ast_node:
+        if fn.name in self.module.classes:
+            self._generate_constructor_body(self.module.classes[fn.name])
+        elif fn.ast_node:
             for stmt in fn.ast_node.body:
                 self._generate_statement(stmt)
 
@@ -288,6 +425,12 @@ class X64CodeGen:
         elif isinstance(stmt, ast.Assign):
             # Target = Expr
             self._generate_expr(stmt.value)  # result in RAX
+            if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
+                func_id = stmt.value.func.id
+                if func_id in self.module.classes:
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            self.local_var_classes[target.id] = func_id
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     var = self.current_func.local_vars.get(target.id)
@@ -303,6 +446,14 @@ class X64CodeGen:
                     self.emit("pop r11", "index")
                     self.emit("pop rax", "value")
                     self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
+                elif isinstance(target, ast.Attribute):
+                    # obj.field = val (e.g. self.x = 10)
+                    self.emit("push rax", "save value to assign")
+                    self._generate_expr(target.value)
+                    self.emit("mov r8, rax", "object pointer")
+                    self.emit("pop rax", "value to store")
+                    offset = self._get_attribute_offset(target.attr)
+                    self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
 
         elif isinstance(stmt, ast.AnnAssign):
             if stmt.value:
@@ -501,6 +652,15 @@ class X64CodeGen:
                 self.unresolved_symbols.add(expr.id)
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
+        elif isinstance(expr, ast.Attribute):
+            if isinstance(expr.value, ast.Name) and expr.value.id in ("win32con", "ctypes", "sys", "re"):
+                self.emit("xor eax, eax")
+            else:
+                self._generate_expr(expr.value)
+                self.emit("mov r8, rax", "object pointer")
+                offset = self._get_attribute_offset(expr.attr)
+                self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
+
         elif isinstance(expr, ast.BinOp):
             self._generate_expr(expr.left)
             self.emit("push rax")
@@ -582,21 +742,111 @@ class X64CodeGen:
             self.emit("sar rax, cl")
 
     def _generate_call(self, call: ast.Call) -> None:
+        # Handle super().method() calls (e.g. super().__init__()) without recursive self-call
+        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
+            if isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "super":
+                return
+
         func_name = ""
+        attr_name = ""
+        prefix = ""
         if isinstance(call.func, ast.Name):
             func_name = call.func.id
         elif isinstance(call.func, ast.Attribute):
             attr_name = call.func.attr
             if isinstance(call.func.value, ast.Name):
                 prefix = call.func.value.id
-                if f"{prefix}_{attr_name}" in self.module.functions:
-                    func_name = f"{prefix}_{attr_name}"
-                elif attr_name in self.module.functions:
-                    func_name = attr_name
+                if prefix in ("self", "this"):
+                    current_cls = getattr(self.current_func, "class_name", None)
+                    if current_cls:
+                        cand = f"{current_cls}_{attr_name}"
+                        if cand in self.module.functions:
+                            func_name = cand
+                        elif current_cls in self.module.classes:
+                            for base in self.module.classes[current_cls].bases:
+                                base_cand = f"{base}_{attr_name}"
+                                if base_cand in self.module.functions:
+                                    func_name = base_cand
+                                    break
+                    if not func_name:
+                        if current_cls and f"{current_cls}_{attr_name}" in self.module.functions:
+                            func_name = f"{current_cls}_{attr_name}"
+                        elif f"self_{attr_name}" in self.module.functions:
+                            func_name = f"self_{attr_name}"
+                        else:
+                            func_name = f"{current_cls}_{attr_name}" if current_cls else f"self_{attr_name}"
                 else:
-                    func_name = f"{prefix}_{attr_name}"
+                    prefix_cls = self.local_var_classes.get(prefix)
+                    if prefix_cls and f"{prefix_cls}_{attr_name}" in self.module.functions:
+                        func_name = f"{prefix_cls}_{attr_name}"
+                    elif f"{prefix}_{attr_name}" in self.module.functions:
+                        func_name = f"{prefix}_{attr_name}"
+                    else:
+                        for cls in self.module.classes.values():
+                            if f"{cls.name}_{attr_name}" in self.module.functions:
+                                func_name = f"{cls.name}_{attr_name}"
+                                break
+                        if not func_name:
+                            func_name = f"{prefix}_{attr_name}"
             else:
                 func_name = attr_name
+
+        # Check Win32 MessageBox call (e.g. ctypes.windll.user32.MessageBoxW / MessageBoxA)
+        func_dump = ast.dump(call.func)
+        if "MessageBox" in func_dump:
+            arg_regs = ["rcx", "rdx", "r8", "r9"]
+            for idx, arg in enumerate(call.args[:4]):
+                self._generate_expr(arg)
+                self.emit(f"mov {arg_regs[idx]}, rax")
+            func_sym = "MessageBoxW" if "MessageBoxW" in func_dump else "MessageBoxA"
+            self.emit("sub rsp, 32", "shadow space for Win32 call")
+            self.emit(f"call [{func_sym}]")
+            self.emit("add rsp, 32")
+            return
+
+        # Native GUI window title setting (e.g. self.title("..."), app.setWindowTitle("..."))
+        if attr_name in ("title", "setWindowTitle"):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("sub rsp, 32", "shadow space for window title update")
+                self.emit("call _pyfasm_set_window_title")
+                self.emit("add rsp, 32")
+            return
+
+        # Safe GUI geometry handling
+        if attr_name in ("geometry", "resize", "setFixedSize", "minsize", "maxsize"):
+            for arg in call.args:
+                self._generate_expr(arg)
+            return
+
+        if func_name in ("create_window", "show_window"):
+            arg_regs = ["rcx", "rdx", "r8"]
+            for idx, arg in enumerate(call.args[:3]):
+                self._generate_expr(arg)
+                self.emit(f"mov {arg_regs[idx]}, rax")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_create_window")
+            self.emit("add rsp, 32")
+            return
+
+        if func_name in ("alert", "message_box"):
+            arg_regs = ["rcx", "rdx"]
+            for idx, arg in enumerate(call.args[:2]):
+                self._generate_expr(arg)
+                self.emit(f"mov {arg_regs[idx]}, rax")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_message_box")
+            self.emit("add rsp, 32")
+            return
+
+        if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
+            # If no custom method defined or app loop call, run the native GUI window loop
+            if func_name not in self.module.functions or prefix in ("app", "self"):
+                self.emit("sub rsp, 32", "shadow space for GUI event loop")
+                self.emit("call _pyfasm_run_window_loop")
+                self.emit("add rsp, 32")
+                return
 
         # Built-in runtime calls
         if func_name in ("print", "print_int"):
@@ -716,15 +966,21 @@ class X64CodeGen:
                 self.emit("call _pyfasm_atomic_sub")
             return
 
-        # User Function Call (x64 ABI)
+        # User Function / Method Call (x64 ABI)
+        args_to_pass = list(call.args)
+        if isinstance(call.func, ast.Attribute) and func_name in self.module.functions:
+            fn_sym = self.module.functions[func_name]
+            if fn_sym.args and fn_sym.args[0].name == "self":
+                args_to_pass = [call.func.value] + list(call.args)
+
         # Evaluate arguments and push them in reverse order
-        for arg in reversed(call.args):
+        for arg in reversed(args_to_pass):
             self._generate_expr(arg)
             self.emit("push rax")
 
         # Pop into register parameters
         arg_regs = ["rcx", "rdx", "r8", "r9"]
-        n_args = len(call.args)
+        n_args = len(args_to_pass)
         for i in range(min(n_args, 4)):
             self.emit(f"pop {arg_regs[i]}")
 

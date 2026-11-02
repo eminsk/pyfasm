@@ -89,11 +89,21 @@ class PyFasmCompiler:
         else:
             out_bin = Path(output_binary).resolve()
 
-        asm_file = out_bin.with_suffix(".asm")
+        # Modular Assembly Generation: Create clean 'asm/' directory in project folder
+        asm_dir = project_dir / "asm"
+        asm_dir.mkdir(parents=True, exist_ok=True)
+
+        modular_files = codegen.generate_modular()
+        for fname, content in modular_files.items():
+            fpath = asm_dir / fname
+            fpath.write_text(content, encoding="ascii", errors="replace")
+
+        main_asm_file = asm_dir / "main.asm"
+
         success, log = self.fasm_runner.assemble(
-            asm_content=asm_code,
+            asm_content=modular_files["main.asm"],
             output_binary=str(out_bin),
-            asm_file_path=str(asm_file) if keep_asm else None,
+            asm_file_path=str(main_asm_file) if keep_asm else None,
             keep_asm=keep_asm
         )
 

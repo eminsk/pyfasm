@@ -144,3 +144,131 @@ def main() -> int:
     assert "call fn_str" in asm
     success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
     assert success is True, f"Compilation failed: {log}"
+
+
+def test_codegen_class_compilation_and_methods(tmp_path: Path):
+    source = """
+class Calculator:
+    def __init__(self, val: int):
+        self.val = val
+
+    def add(self, x: int) -> int:
+        return self.val + x
+
+def main() -> int:
+    calc = Calculator(100)
+    res = calc.add(25)
+    print(res)
+    return 0
+"""
+    src_file = tmp_path / "calc_class.py"
+    src_file.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Class compilation failed: {log}"
+    assert Path(bin_path).exists()
+
+    # Verify execution output
+    import subprocess
+    res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
+    assert res.returncode == 0
+    assert "125" in res.stdout
+
+
+def test_codegen_modular_asm_folder_structure(tmp_path: Path):
+    source = """
+def add(a: int, b: int) -> int:
+    return a + b
+
+def main() -> int:
+    print(add(10, 20))
+    return 0
+"""
+    proj_dir = tmp_path / "my_project"
+    proj_dir.mkdir()
+    src_file = proj_dir / "main.py"
+    src_file.write_text(source, encoding="utf-8")
+
+    compiler = PyFasmCompiler()
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Compilation failed: {log}"
+
+    # Verify that asm folder was cleanly created
+    asm_dir = proj_dir / "asm"
+    assert asm_dir.exists() and asm_dir.is_dir()
+    assert (asm_dir / "main.asm").exists()
+    assert (asm_dir / "constants.inc").exists()
+    assert (asm_dir / "runtime.inc").exists()
+    assert (asm_dir / "functions.inc").exists()
+    assert (asm_dir / "imports.inc").exists()
+
+    # Verify that project root does NOT have loose .asm files
+    root_asm_files = list(proj_dir.glob("*.asm"))
+    assert len(root_asm_files) == 0, f"Found loose .asm files in project root: {root_asm_files}"
+
+
+def test_codegen_gui_window_calls_in_asm(tmp_path: Path):
+    source = """
+class MyWindowApp:
+    def __init__(self):
+        pass
+
+    def mainloop(self):
+        pass
+
+def main() -> int:
+    app = MyWindowApp()
+    alert("Test Message", "Test Title")
+    app.mainloop()
+    return 0
+"""
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+
+    assert "call _pyfasm_init_gui" in asm
+    assert "call _pyfasm_message_box" in asm
+    assert "call _pyfasm_run_window_loop" in asm
+
+    src_file = tmp_path / "gui_app.py"
+    src_file.write_text(source, encoding="utf-8")
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"GUI compilation failed: {log}"
+
+
+def test_codegen_multi_class_method_namespacing_and_window_title(tmp_path: Path):
+    source = """
+class ChildComponent:
+    def __init__(self):
+        self.setup_ui()
+
+    def setup_ui(self):
+        pass
+
+class ParentWindow:
+    def __init__(self):
+        self.title("My Test App")
+        self.setup_ui()
+
+    def setup_ui(self):
+        c = ChildComponent()
+
+def main() -> int:
+    win = ParentWindow()
+    return 0
+"""
+    compiler = PyFasmCompiler()
+    asm = compiler.compile_source_to_asm(source, target="win64")
+
+    # Verify both methods are separately namespaced
+    assert "ChildComponent_setup_ui" in asm
+    assert "ParentWindow_setup_ui" in asm
+    assert "call _pyfasm_set_window_title" in asm
+
+    src_file = tmp_path / "multi_class.py"
+    src_file.write_text(source, encoding="utf-8")
+    success, bin_path, log = compiler.compile_file(str(src_file), target="win64")
+    assert success is True, f"Multi-class compilation failed: {log}"
+
+    import subprocess
+    res = subprocess.run([bin_path], capture_output=True, text=True, timeout=5)
+    assert res.returncode == 0
