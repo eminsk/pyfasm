@@ -15,6 +15,9 @@ class FasmRunner:
     """Manages discovery and invocation of Flat Assembler (FASM)."""
 
     DEFAULT_SEARCH_PATHS = [
+        r"C:\proekts\fasm-modern-sdk\bin\fasm.exe",
+        r"D:\proekts\asm\fasm-modern-sdk\bin\fasm.exe",
+        r"C:\asm\hdd\FASM.EXE",
         r"C:\FASM\FASM.EXE",
         r"C:\asm\FASM.EXE",
         r"C:\Program Files\FASM\fasm.exe",
