@@ -89,6 +89,7 @@ section '.data' data readable writeable
     _pyfasm_last_edit_hwnd  dq 0
     _pyfasm_last_list_hwnd  dq 0
     _pyfasm_last_label_hwnd dq 0
+    _pyfasm_last_btn_hwnd   dq 0
     _pyfasm_layout_curr_x   dq 30
     _pyfasm_layout_curr_y   dq 20
     _pyfasm_ctrl_count      dq 0
@@ -134,6 +135,8 @@ section '.data' data readable writeable
     wszPillText             du '+0   1 ans', 0
     align 8
     _pyfasm_card_text_buf   rw 512
+    align 16
+    _pyfasm_wide_buf        rw 1024
     align 8
     _pyfasm_rc_client       rd 4
     _pyfasm_h_font_ui       dq 0
@@ -1702,17 +1705,50 @@ _pyfasm_init_gui:
     pop     rbp
     ret
 
+_pyfasm_utf8_to_wide:
+    ; RCX = utf8_src, RDX = wide_dst, R8 = max_wide_chars
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 64
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .u2w_null
+
+    mov     [rsp + 40], r8      ; param 6: cchWideChar = max_wide_chars
+    mov     [rsp + 32], rdx     ; param 5: lpWideCharStr = wide_dst
+    mov     r9d, -1             ; param 4: cbMultiByte = -1 (null-terminated)
+    mov     r8, rcx             ; param 3: lpMultiByteStr = utf8_src
+    xor     edx, edx            ; param 2: dwFlags = 0
+    mov     ecx, 65001          ; param 1: CodePage = CP_UTF8
+    call    [MultiByteToWideChar]
+    jmp     .u2w_ret
+
+.u2w_null:
+    test    rdx, rdx
+    jz      .u2w_ret
+    mov     word [rdx], 0
+
+.u2w_ret:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_set_window_title:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 32
+    sub     rsp, 48
     and     rsp, -16
     mov     [_pyfasm_wnd_title_ptr], rcx
-    mov     rdx, rcx
+    test    rcx, rcx
+    jz      .set_title_done
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
     mov     rcx, [_pyfasm_h_wnd]
     test    rcx, rcx
     jz      .set_title_done
-    call    [SetWindowTextA]
+    lea     rdx, [_pyfasm_wide_buf]
+    call    [SetWindowTextW]
 .set_title_done:
     mov     rsp, rbp
     pop     rbp
@@ -2259,6 +2295,11 @@ _pyfasm_create_label:
 
     call    _pyfasm_ensure_window
 
+    mov     rcx, [rsp + 96]
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .lbl_x_ok
@@ -2278,7 +2319,7 @@ _pyfasm_create_label:
 
     xor     ecx, ecx
     lea     rdx, [szStaticClassW]
-    mov     r8, [rsp + 96]
+    lea     r8, [_pyfasm_wide_buf]
     mov     r9d, 50000000h          ; WS_CHILD | WS_VISIBLE | SS_LEFT
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
@@ -2326,6 +2367,32 @@ _pyfasm_create_edit:
 
     call    _pyfasm_ensure_window
 
+    ; Check if search edit already created in split view
+    cmp     qword [rsp + 56], 101       ; Search Entry ID
+    jne     .chk_filter_id
+    cmp     qword [_pyfasm_h_search_edit], 0
+    jz      .do_create_edt
+    mov     rax, [_pyfasm_h_search_edit]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.chk_filter_id:
+    cmp     qword [rsp + 56], 102       ; Filter Entry ID
+    jne     .do_create_edt
+    cmp     qword [_pyfasm_h_filter_edit], 0
+    jz      .do_create_edt
+    mov     rax, [_pyfasm_h_filter_edit]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.do_create_edt:
+    mov     rcx, [rsp + 96]
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .edt_x_ok
@@ -2345,7 +2412,7 @@ _pyfasm_create_edit:
 
     mov     ecx, 200h               ; WS_EX_CLIENTEDGE
     lea     rdx, [szEditClassW]
-    mov     r8, [rsp + 96]
+    lea     r8, [_pyfasm_wide_buf]
     mov     r9d, 50810080h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
@@ -2398,6 +2465,32 @@ _pyfasm_create_button:
 
     call    _pyfasm_ensure_window
 
+    ; Check if Search or Clear button already created
+    cmp     qword [rsp + 56], 1001      ; Search Button ID
+    jne     .chk_clear_id
+    cmp     qword [_pyfasm_h_search_btn], 0
+    jz      .do_create_btn
+    mov     rax, [_pyfasm_h_search_btn]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.chk_clear_id:
+    cmp     qword [rsp + 56], 1002      ; Clear Button ID
+    jne     .do_create_btn
+    cmp     qword [_pyfasm_h_clear_btn], 0
+    jz      .do_create_btn
+    mov     rax, [_pyfasm_h_clear_btn]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.do_create_btn:
+    mov     rcx, [rsp + 96]
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .btn_x_ok
@@ -2417,7 +2510,7 @@ _pyfasm_create_button:
 
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
-    mov     r8, [rsp + 96]
+    lea     r8, [_pyfasm_wide_buf]
     mov     r9d, 50010000h          ; WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
@@ -2432,24 +2525,12 @@ _pyfasm_create_button:
     mov     [rsp + 80], rax
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
-    mov     rbx, rax
+    mov     [_pyfasm_last_btn_hwnd], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    ; Register in dynamic callback table
-    mov     rcx, [_pyfasm_ctrl_count]
-    cmp     rcx, 120
-    jge     .btn_finish
-    mov     rax, [rsp + 56]
-    mov     [_pyfasm_ctrl_ids + rcx*4], eax
-    mov     rax, [rsp + 48]
-    mov     [_pyfasm_ctrl_callbacks + rcx*8], rax
-    inc     qword [_pyfasm_ctrl_count]
-
-.btn_finish:
-    mov     rax, rbx
-    lea     rsp, [rbp - 8]
-    pop     rbx
+    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rsp, rbp
     pop     rbp
     ret
 
@@ -2477,6 +2558,15 @@ _pyfasm_create_listbox:
 
     call    _pyfasm_ensure_window
 
+    ; If main listbox already exists, reuse it to prevent huge gray overlapping rectangle!
+    cmp     qword [_pyfasm_h_listbox], 0
+    jz      .do_create_lb
+    mov     rax, [_pyfasm_h_listbox]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.do_create_lb:
     mov     r10, [rsp + 104]
     test    r10, r10
     jnz     .lb_x_ok
@@ -2546,34 +2636,54 @@ _pyfasm_get_edit_text:
     ret
 
 _pyfasm_set_text:
-    ; RCX = hwnd, RDX = text (ANSI string from Python code)
+    ; RCX = hwnd, RDX = text (UTF-8 string from Python code)
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 32
+    push    rsi
+    sub     rsp, 48
     and     rsp, -16
     test    rcx, rcx
     jnz     .st_hwnd_ok
     mov     rcx, [_pyfasm_last_label_hwnd]
 .st_hwnd_ok:
-    call    [SetWindowTextA]
+    mov     rsi, rcx
+    mov     rcx, rdx
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
+    mov     rcx, rsi
+    lea     rdx, [_pyfasm_wide_buf]
+    call    [SetWindowTextW]
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_listbox_add:
-    ; RCX = hwnd, RDX = text (ANSI string from Python code)
+    ; RCX = hwnd, RDX = text (UTF-8 string from Python code)
     push    rbp
     mov     rbp, rsp
+    push    rsi
     sub     rsp, 48
     and     rsp, -16
     test    rcx, rcx
     jnz     .la_hwnd_ok
     mov     rcx, [_pyfasm_last_list_hwnd]
+    test    rcx, rcx
+    jnz     .la_hwnd_ok
+    mov     rcx, [_pyfasm_h_listbox]
 .la_hwnd_ok:
-    mov     r9, rdx
+    mov     rsi, rcx
+    mov     rcx, rdx
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
+    mov     rcx, rsi
     mov     edx, 180h               ; LB_ADDSTRING
     xor     r8d, r8d
-    call    [SendMessageA]
+    lea     r9, [_pyfasm_wide_buf]
+    call    [SendMessageW]
     mov     rsp, rbp
     pop     rbp
     ret
@@ -3809,6 +3919,8 @@ section '.idata' import data readable writeable
            WaitForSingleObject, 'WaitForSingleObject', \\
            CloseHandle, 'CloseHandle', \\
            GetModuleHandleA, 'GetModuleHandleA', \\
+           MultiByteToWideChar, 'MultiByteToWideChar', \\
+           WideCharToMultiByte, 'WideCharToMultiByte', \\
            GetCurrentThreadId, 'GetCurrentThreadId', \\
            ExitProcess, 'ExitProcess'
 
