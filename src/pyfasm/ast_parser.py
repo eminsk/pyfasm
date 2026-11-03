@@ -34,6 +34,7 @@ class FunctionSymbol:
     ast_node: Optional[ast.FunctionDef] = None
     class_name: Optional[str] = None
     global_names: Set[str] = field(default_factory=set)
+    is_generator: bool = False
 
 
 @dataclass
@@ -164,6 +165,32 @@ class ConstantFolder(ast.NodeTransformer):
         return node
 
 
+class LambdaLifter(ast.NodeTransformer):
+    """Lifts anonymous lambda expressions into module-level FunctionDef nodes."""
+
+    def __init__(self):
+        super().__init__()
+        self.lambdas: List[ast.FunctionDef] = []
+        self.counter: int = 0
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        self.generic_visit(node)
+        self.counter += 1
+        fn_name = f"_pyfasm_lambda_{self.counter}"
+        ret_stmt = ast.Return(value=node.body)
+        fn_def = ast.FunctionDef(
+            name=fn_name,
+            args=node.args,
+            body=[ret_stmt],
+            decorator_list=[],
+            returns=None,
+            lineno=getattr(node, "lineno", 1),
+            col_offset=getattr(node, "col_offset", 0)
+        )
+        self.lambdas.append(fn_def)
+        return ast.Name(id=fn_name, ctx=ast.Load())
+
+
 class AstAnalyzer:
     """Extracts function signatures, local variables, and literals across single files or multi-module projects."""
 
@@ -236,6 +263,10 @@ class AstAnalyzer:
         """Parses a raw Python source code string into a ParsedModule."""
         tree = ast.parse(source_code)
         tree = ConstantFolder().visit(tree)
+        lifter = LambdaLifter()
+        tree = lifter.visit(tree)
+        for lambda_def in lifter.lambdas:
+            tree.body.append(lambda_def)
         module = ParsedModule()
 
         # First pass: find imports, string and float constants across the AST
@@ -361,6 +392,10 @@ class AstAnalyzer:
             source_code = real_path.read_text(encoding="utf-8")
             tree = ast.parse(source_code)
             tree = ConstantFolder().visit(tree)
+            lifter = LambdaLifter()
+            tree = lifter.visit(tree)
+            for lambda_def in lifter.lambdas:
+                tree.body.append(lambda_def)
         except Exception:
             return
 
@@ -628,7 +663,7 @@ class AstAnalyzer:
                     return TYPE_FLOAT
                 elif fid in ("bool", "isinstance", "issubclass"):
                     return TYPE_BOOL
-                elif fid in ("list", "range"):
+                elif fid in ("list", "range", "map", "filter"):
                     return TYPE_LIST
                 elif fid in ("dict",):
                     return TYPE_DICT
@@ -827,6 +862,10 @@ class AstAnalyzer:
                         )
                         offset += 8
     
+        is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node))
+        if is_gen and ret_type == TYPE_VOID:
+            ret_type = TYPE_PTR
+
         # If return type wasn't explicitly annotated, infer from return statements
         if ret_type == TYPE_VOID:
             for sub_node in ast.walk(node):
@@ -844,5 +883,6 @@ class AstAnalyzer:
             local_vars=local_vars,
             stack_size=aligned_stack,
             ast_node=node,
-            global_names=global_names
+            global_names=global_names,
+            is_generator=is_gen
         )

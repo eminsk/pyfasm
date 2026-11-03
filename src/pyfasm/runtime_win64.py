@@ -1769,6 +1769,162 @@ _pyfasm_list_pop:
     xor     eax, eax
     ret
 
+_pyfasm_map:
+    ; RCX = seq_ptr, RDX = func_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .map_empty
+    test    rdx, rdx
+    jz      .map_empty
+    mov     rbx, rcx     ; seq_ptr
+    mov     rsi, rdx     ; func_ptr
+    mov     r12, [rbx]   ; length
+    lea     rcx, [r12 * 8 + 16]
+    call    _pyfasm_alloc
+    mov     rdi, rax     ; new list
+    mov     [rdi], r12   ; new list length
+    xor     r13, r13     ; idx = 0
+.map_loop:
+    cmp     r13, r12
+    jge     .map_done
+    mov     rcx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    rsi
+    add     rsp, 32
+    mov     [rdi + r13 * 8 + 8], rax
+    inc     r13
+    jmp     .map_loop
+.map_done:
+    mov     rax, rdi
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.map_empty:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_filter:
+    ; RCX = seq_ptr, RDX = func_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .filt_empty
+    test    rdx, rdx
+    jz      .filt_empty
+    mov     rbx, rcx     ; seq_ptr
+    mov     rsi, rdx     ; func_ptr
+    mov     r12, [rbx]   ; length
+    lea     rcx, [r12 * 8 + 16]
+    call    _pyfasm_alloc
+    mov     rdi, rax     ; new list
+    xor     r13, r13     ; in_idx = 0
+    xor     r14, r14     ; out_idx = 0
+.filt_loop:
+    cmp     r13, r12
+    jge     .filt_done
+    mov     rcx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    rsi
+    add     rsp, 32
+    test    rax, rax
+    jz      .filt_skip
+    mov     rax, [rbx + r13 * 8 + 8]
+    mov     [rdi + r14 * 8 + 8], rax
+    inc     r14
+.filt_skip:
+    inc     r13
+    jmp     .filt_loop
+.filt_done:
+    mov     [rdi], r14   ; stored filtered length
+    mov     rax, rdi
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.filt_empty:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_gen_next:
+    ; RCX = gen_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .gn_empty
+    mov     rbx, rcx
+    cmp     qword [rbx + 16], 1   ; done?
+    je      .gn_empty
+    mov     rax, [rbx + 8]        ; step function pointer
+    mov     rcx, rbx
+    call    rax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.gn_empty:
+    xor     eax, eax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
@@ -6827,6 +6983,162 @@ _pyfasm_list_pop:
     ret
 .lp_empty:
     xor     eax, eax
+    ret
+
+_pyfasm_map:
+    ; RCX = seq_ptr, RDX = func_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .map_empty
+    test    rdx, rdx
+    jz      .map_empty
+    mov     rbx, rcx     ; seq_ptr
+    mov     rsi, rdx     ; func_ptr
+    mov     r12, [rbx]   ; length
+    lea     rcx, [r12 * 8 + 16]
+    call    _pyfasm_alloc
+    mov     rdi, rax     ; new list
+    mov     [rdi], r12   ; new list length
+    xor     r13, r13     ; idx = 0
+.map_loop:
+    cmp     r13, r12
+    jge     .map_done
+    mov     rcx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    rsi
+    add     rsp, 32
+    mov     [rdi + r13 * 8 + 8], rax
+    inc     r13
+    jmp     .map_loop
+.map_done:
+    mov     rax, rdi
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.map_empty:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_filter:
+    ; RCX = seq_ptr, RDX = func_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .filt_empty
+    test    rdx, rdx
+    jz      .filt_empty
+    mov     rbx, rcx     ; seq_ptr
+    mov     rsi, rdx     ; func_ptr
+    mov     r12, [rbx]   ; length
+    lea     rcx, [r12 * 8 + 16]
+    call    _pyfasm_alloc
+    mov     rdi, rax     ; new list
+    xor     r13, r13     ; in_idx = 0
+    xor     r14, r14     ; out_idx = 0
+.filt_loop:
+    cmp     r13, r12
+    jge     .filt_done
+    mov     rcx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    rsi
+    add     rsp, 32
+    test    rax, rax
+    jz      .filt_skip
+    mov     rax, [rbx + r13 * 8 + 8]
+    mov     [rdi + r14 * 8 + 8], rax
+    inc     r14
+.filt_skip:
+    inc     r13
+    jmp     .filt_loop
+.filt_done:
+    mov     [rdi], r14   ; stored filtered length
+    mov     rax, rdi
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.filt_empty:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_gen_next:
+    ; RCX = gen_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .gn_empty
+    mov     rbx, rcx
+    cmp     qword [rbx + 16], 1   ; done?
+    je      .gn_empty
+    mov     rax, [rbx + 8]        ; step function pointer
+    mov     rcx, rbx
+    call    rax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.gn_empty:
+    xor     eax, eax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_list_append:

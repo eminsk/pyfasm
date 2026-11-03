@@ -662,6 +662,10 @@ include 'functions.inc'
         self.emit("mov rax, [rbp - 40]", "return instance self pointer")
 
     def _generate_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
+        if getattr(fn, "is_generator", False):
+            self._generate_generator_function(fn, aliases)
+            return
+
         self.current_func = fn
         self.local_var_classes = {}
         if fn.class_name:
@@ -710,6 +714,134 @@ include 'functions.inc'
         self.emit("ret")
         self.emit_raw("")
         self.current_func = None
+
+    def _generate_generator_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
+        fn_lbl = safe_asm_label(fn.name)
+        self.emit_raw("; ============================================================")
+        self.emit_raw(f"; Generator Constructor: {fn.name}")
+        self.emit_raw("; ============================================================")
+        if aliases:
+            for alias in aliases:
+                self.emit_raw(f"{safe_asm_label(alias)}:")
+        else:
+            self.emit_raw(f"{fn_lbl}:")
+
+        self.emit("push rbp")
+        self.emit("mov rbp, rsp")
+        self.emit("sub rsp, 48")
+        self.emit("and rsp, -16")
+
+        arg_regs = ["rcx", "rdx", "r8", "r9"]
+        for idx in range(min(len(fn.args), 4)):
+            self.emit(f"mov [rbp - {(idx + 1) * 8}], {arg_regs[idx]}")
+
+        max_offset = max([v.stack_offset for v in fn.local_vars.values()], default=0)
+        state_size = 32 + max(8, max_offset + 16)
+        self.emit(f"mov ecx, {state_size}", "generator state size")
+        self.emit("call _pyfasm_alloc")
+        self.emit("mov r8, rax", "generator object")
+        self.emit("mov qword [r8 + 0], 0", "initial state = 0")
+        self.emit(f"lea rdx, [{fn_lbl}_step]")
+        self.emit("mov [r8 + 8], rdx", "step function pointer")
+        self.emit("mov qword [r8 + 16], 0", "done flag = 0")
+        self.emit("mov qword [r8 + 24], 0", "value = 0")
+
+        for idx, arg in enumerate(fn.args):
+            if idx < 4:
+                self.emit(f"mov rax, [rbp - {(idx + 1) * 8}]")
+                self.emit(f"mov [r8 + {32 + arg.stack_offset}], rax", f"store arg {arg.name}")
+            else:
+                caller_offset = 16 + (idx - 4) * 8
+                self.emit(f"mov rax, [rbp + {caller_offset}]")
+                self.emit(f"mov [r8 + {32 + arg.stack_offset}], rax", f"store stack arg {arg.name}")
+
+        self.emit("mov rax, r8", "return generator object")
+        self.emit("mov rsp, rbp")
+        self.emit("pop rbp")
+        self.emit("ret")
+        self.emit_raw("")
+
+        self.emit_raw("; ============================================================")
+        self.emit_raw(f"; Generator Step Function: {fn.name}_step")
+        self.emit_raw("; ============================================================")
+        self.emit_raw(f"{fn_lbl}_step:")
+        self.current_func = fn
+        self.yield_counter = 0
+
+        self.emit("push rbp")
+        self.emit("mov rbp, rsp")
+        self.emit("push rbx")
+        self.emit("push rsi")
+        self.emit("push rdi")
+        self.emit("push r12")
+        self.emit("push r13")
+        self.emit("push r14")
+        self.emit("push r15")
+        self.emit(f"sub rsp, {fn.stack_size + 32}")
+        self.emit("and rsp, -16")
+        self.emit("mov r15, rcx", "save generator object ptr in R15")
+
+        yield_count = sum(1 for node in ast.walk(fn.ast_node) if isinstance(node, (ast.Yield, ast.YieldFrom)))
+        self.emit("mov rax, [r15]", "read current state")
+        self.emit(f"test rax, rax")
+        self.emit(f"jz .{fn_lbl}_state_0")
+        for k in range(1, yield_count + 1):
+            self.emit(f"cmp rax, {k}")
+            self.emit(f"je .{fn_lbl}_state_{k}")
+        self.emit(f"jmp .{fn_lbl}_done")
+
+        self.emit_raw(f".{fn_lbl}_state_0:")
+        for var in fn.local_vars.values():
+            self.emit(f"mov rax, [r15 + {32 + var.stack_offset}]")
+            self.emit(f"mov [rbp - {var.stack_offset}], rax")
+
+        if fn.ast_node:
+            for stmt in fn.ast_node.body:
+                self._generate_statement(stmt)
+
+        self.emit_raw(f".{fn_lbl}_done:")
+        self.emit("mov qword [r15], -1", "state = closed")
+        self.emit("mov qword [r15 + 16], 1", "done = 1")
+        self.emit("xor eax, eax", "return 0 on exhaust")
+
+        self.emit_raw(f".{fn_lbl}_yield_exit:")
+        self.emit("lea rsp, [rbp - 56]")
+        self.emit("pop r15")
+        self.emit("pop r14")
+        self.emit("pop r13")
+        self.emit("pop r12")
+        self.emit("pop rdi")
+        self.emit("pop rsi")
+        self.emit("pop rbx")
+        self.emit("mov rsp, rbp")
+        self.emit("pop rbp")
+        self.emit("ret")
+        self.emit_raw("")
+        self.current_func = None
+
+    def _generate_yield(self, node: ast.Yield) -> None:
+        self.yield_counter += 1
+        y_id = self.yield_counter
+        fn_lbl = safe_asm_label(self.current_func.name)
+
+        if node.value:
+            self._generate_expr(node.value)
+        else:
+            self.emit("xor eax, eax")
+        self.emit("mov r11, rax", "yielded value")
+
+        for var in self.current_func.local_vars.values():
+            self.emit(f"mov rax, [rbp - {var.stack_offset}]")
+            self.emit(f"mov [r15 + {32 + var.stack_offset}], rax")
+
+        self.emit(f"mov qword [r15], {y_id}", "save next state")
+        self.emit("mov rax, r11", "yielded value in RAX")
+        self.emit(f"jmp .{fn_lbl}_yield_exit")
+
+        self.emit_raw(f".{fn_lbl}_state_{y_id}:")
+        for var in self.current_func.local_vars.values():
+            self.emit(f"mov rax, [r15 + {32 + var.stack_offset}]")
+            self.emit(f"mov [rbp - {var.stack_offset}], rax")
 
     def _generate_statement(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.Return):
@@ -1131,6 +1263,39 @@ include 'functions.inc'
 
         self.emit("test rax, rax", "check null container")
         self.emit(f"jz {lbl_null}")
+
+        is_gen_iter = False
+        if isinstance(stmt.iter, ast.Call) and isinstance(stmt.iter.func, ast.Name):
+            fn_sym = self.module.functions.get(stmt.iter.func.id)
+            if fn_sym and getattr(fn_sym, "is_generator", False):
+                is_gen_iter = True
+        elif isinstance(stmt.iter, ast.Name) and self.current_func:
+            var_sym = self.current_func.local_vars.get(stmt.iter.id)
+            if var_sym and getattr(var_sym, "is_generator", False):
+                is_gen_iter = True
+
+        if is_gen_iter:
+            self.emit("push rax", "save gen_ptr")
+            self.loop_stack.append((lbl_step, lbl_end))
+            self.emit_raw(f"{lbl_start}:")
+            self.emit("mov rcx, [rsp]", "gen_ptr")
+            self.emit("call _pyfasm_gen_next")
+            self.emit("mov rbx, [rsp]", "gen_ptr")
+            self.emit("cmp qword [rbx + 16], 1", "check done flag")
+            self.emit(f"je {lbl_end}")
+            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+
+            for s in stmt.body:
+                self._generate_statement(s)
+
+            self.emit_raw(f"{lbl_step}:")
+            self.emit(f"jmp {lbl_start}")
+
+            self.emit_raw(f"{lbl_end}:")
+            self.emit("add rsp, 8", "cleanup gen_ptr")
+            self.loop_stack.pop()
+            self.emit_raw(f"{lbl_null}:")
+            return
 
         is_hash_table = False
         if isinstance(stmt.iter, ast.Name) and self.current_func:
@@ -1684,6 +1849,9 @@ include 'functions.inc'
 
         elif isinstance(expr, ast.SetComp):
             self._generate_set_comprehension(expr)
+
+        elif isinstance(expr, (ast.Yield, ast.YieldFrom)):
+            self._generate_yield(expr)
 
         elif isinstance(expr, ast.Call):
             self._generate_call(expr)
@@ -2741,6 +2909,12 @@ include 'functions.inc'
                 self.emit("call _pyfasm_print_char")
             return
 
+        if func_name == "next" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "gen_ptr")
+            self.emit("call _pyfasm_gen_next")
+            return
+
         if func_name in ("len", "str_len"):
             if call.args:
                 arg0 = call.args[0]
@@ -2815,6 +2989,24 @@ include 'functions.inc'
                 self.emit("call _pyfasm_free_memory")
             return
 
+        if func_name == "map" and len(call.args) >= 2:
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "func_ptr")
+            self._generate_expr(call.args[1])
+            self.emit("mov rcx, rax", "seq_ptr")
+            self.emit("pop rdx", "func_ptr")
+            self.emit("call _pyfasm_map")
+            return
+
+        if func_name == "filter" and len(call.args) >= 2:
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "func_ptr")
+            self._generate_expr(call.args[1])
+            self.emit("mov rcx, rax", "seq_ptr")
+            self.emit("pop rdx", "func_ptr")
+            self.emit("call _pyfasm_filter")
+            return
+
         if func_name == "spawn_thread":
             # spawn_thread(target_fn, param)
             if len(call.args) >= 2:
@@ -2864,6 +3056,25 @@ include 'functions.inc'
                 args_to_pass = [call.func.value] + list(call.args)
 
         # Evaluate arguments and push them in reverse order
+        is_indirect = False
+        indirect_local_var = None
+        is_indirect_global = False
+
+        if isinstance(call.func, ast.Name):
+            if self.current_func and call.func.id in self.current_func.local_vars:
+                is_indirect = True
+                indirect_local_var = self.current_func.local_vars[call.func.id]
+            elif (self.current_func and hasattr(self.current_func, "global_names") and call.func.id in self.current_func.global_names) or (call.func.id in self.module.global_vars):
+                is_indirect = True
+                is_indirect_global = True
+        elif func_name not in self.module.functions:
+            is_indirect = True
+
+        needs_stack_callee = is_indirect and (indirect_local_var is None) and (not is_indirect_global)
+        if needs_stack_callee:
+            self._generate_expr(call.func)
+            self.emit("push rax", "save indirect function pointer")
+
         for arg in reversed(args_to_pass):
             self._generate_expr(arg)
             self.emit("push rax")
@@ -2874,15 +3085,30 @@ include 'functions.inc'
         for i in range(min(n_args, 4)):
             self.emit(f"pop {arg_regs[i]}")
 
-        if func_name not in self.module.functions:
-            self.unresolved_symbols.add(func_name)
+        if is_indirect:
+            if indirect_local_var:
+                self.emit(f"mov r10, [rbp - {indirect_local_var.stack_offset}]", f"indirect callee {indirect_local_var.name}")
+            elif is_indirect_global:
+                self.emit(f"mov r10, [_pyfasm_global_{call.func.id}]", f"indirect global callee {call.func.id}")
+            else:
+                if n_args <= 4:
+                    self.emit("pop r10", "restore indirect callee from stack")
+                else:
+                    self.emit(f"mov r10, [rsp + {(n_args - 4) * 8}]", "read indirect callee above extra stack args")
+            callee_target = "r10"
+        else:
+            if func_name not in self.module.functions:
+                self.unresolved_symbols.add(func_name)
+            callee_target = safe_asm_label(func_name)
 
         # Allocate 32 bytes shadow space
         self.emit("sub rsp, 32", "shadow space for callee")
-        self.emit(f"call {safe_asm_label(func_name)}")
+        self.emit(f"call {callee_target}")
         self.emit("add rsp, 32", "restore shadow space")
 
         # If more than 4 arguments, cleanup extra stack args
-        if n_args > 4:
+        if needs_stack_callee and n_args > 4:
+            self.emit(f"add rsp, {(n_args - 4) * 8 + 8}", "cleanup extra stack args & callee ptr")
+        elif n_args > 4:
             extra_bytes = (n_args - 4) * 8
             self.emit(f"add rsp, {extra_bytes}", "cleanup stack args")
