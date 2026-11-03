@@ -446,6 +446,197 @@ _pyfasm_print_float:
     pop     rbp
     ret
 
+
+_pyfasm_file_open:
+    ; RCX = filename string, RDX = mode string (e.g. "w", "r", "a", or 0)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    mov     rsi, rcx
+    mov     rdi, rdx
+
+    mov     ebx, 'r'
+    test    rdi, rdi
+    jz      .fo_mode_ready
+    movzx   ebx, byte [rdi]
+.fo_mode_ready:
+
+    cmp     ebx, 'w'
+    je      .fo_mode_write
+    cmp     ebx, 'a'
+    je      .fo_mode_append
+
+    ; Mode 'r'
+    mov     rcx, rsi
+    mov     edx, 80000000h          ; GENERIC_READ
+    mov     r8d, 1                  ; FILE_SHARE_READ
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 3      ; OPEN_EXISTING
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    jmp     .fo_open_done
+
+.fo_mode_write:
+    mov     rcx, rsi
+    mov     edx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 2      ; CREATE_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    jmp     .fo_open_done
+
+.fo_mode_append:
+    mov     rcx, rsi
+    mov     edx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 4      ; OPEN_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    cmp     rax, -1
+    je      .fo_open_done
+    mov     rbx, rax
+    mov     rcx, rax
+    xor     edx, edx
+    xor     r8d, r8d
+    mov     r9d, 2                  ; FILE_END
+    call    [SetFilePointer]
+    mov     rax, rbx
+
+.fo_open_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_write_data:
+    ; RCX = file handle, RDX = content string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 64
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .err_f_write
+    cmp     rcx, -1
+    je      .err_f_write
+
+    mov     rbx, rcx
+    mov     rsi, rdx
+
+    mov     rcx, rsi
+    test    rcx, rcx
+    jz      .zero_len_write
+    call    _pyfasm_str_len
+    mov     r8, rax
+    jmp     .do_f_write
+.zero_len_write:
+    xor     r8d, r8d
+.do_f_write:
+    mov     rcx, rbx
+    mov     rdx, rsi
+    lea     r9, [rsp + 40]
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    jmp     .f_write_done
+
+.err_f_write:
+    xor     eax, eax
+.f_write_done:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_read_all:
+    ; RCX = file handle
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .empty_f_read
+    cmp     rcx, -1
+    je      .empty_f_read
+
+    mov     rbx, rcx
+
+    mov     rcx, rbx
+    xor     edx, edx
+    call    [GetFileSize]
+    cmp     eax, -1
+    je      .empty_f_read
+    test    eax, eax
+    jz      .empty_f_read
+
+    mov     esi, eax
+
+    lea     ecx, [rsi + 1]
+    call    _pyfasm_alloc
+    test    rax, rax
+    jz      .empty_f_read
+    mov     rdi, rax
+
+    mov     rcx, rbx
+    mov     rdx, rdi
+    mov     r8d, esi
+    lea     r9, [rsp + 40]
+    mov     qword [rsp + 32], 0
+    call    [ReadFile]
+
+    mov     eax, [rsp + 40]
+    mov     byte [rdi + rax], 0
+    mov     rax, rdi
+    jmp     .f_read_done
+
+.empty_f_read:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+.f_read_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_close:
+    ; RCX = file handle
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .fc_close_done
+    cmp     rcx, -1
+    je      .fc_close_done
+
+    call    [CloseHandle]
+.fc_close_done:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_file_write:
     ; RCX = filename, RDX = content string
     push    rbp
@@ -5134,6 +5325,8 @@ section '.idata' import data readable writeable
            WriteFile, 'WriteFile', \\
            ReadFile, 'ReadFile', \\
            CreateFileA, 'CreateFileA', \\
+           GetFileSize, 'GetFileSize', \\
+           SetFilePointer, 'SetFilePointer', \\
            GetTickCount64, 'GetTickCount64', \\
            Sleep, 'Sleep', \\
            VirtualAlloc, 'VirtualAlloc', \\
@@ -5394,6 +5587,197 @@ _pyfasm_print_float:
     mov     rcx, rax
     call    _pyfasm_print_int
 
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+
+_pyfasm_file_open:
+    ; RCX = filename string, RDX = mode string (e.g. "w", "r", "a", or 0)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    mov     rsi, rcx
+    mov     rdi, rdx
+
+    mov     ebx, 'r'
+    test    rdi, rdi
+    jz      .fo_mode_ready
+    movzx   ebx, byte [rdi]
+.fo_mode_ready:
+
+    cmp     ebx, 'w'
+    je      .fo_mode_write
+    cmp     ebx, 'a'
+    je      .fo_mode_append
+
+    ; Mode 'r'
+    mov     rcx, rsi
+    mov     edx, 80000000h          ; GENERIC_READ
+    mov     r8d, 1                  ; FILE_SHARE_READ
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 3      ; OPEN_EXISTING
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    jmp     .fo_open_done
+
+.fo_mode_write:
+    mov     rcx, rsi
+    mov     edx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 2      ; CREATE_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    jmp     .fo_open_done
+
+.fo_mode_append:
+    mov     rcx, rsi
+    mov     edx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword [rsp + 32], 4      ; OPEN_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0
+    call    [CreateFileA]
+    cmp     rax, -1
+    je      .fo_open_done
+    mov     rbx, rax
+    mov     rcx, rax
+    xor     edx, edx
+    xor     r8d, r8d
+    mov     r9d, 2                  ; FILE_END
+    call    [SetFilePointer]
+    mov     rax, rbx
+
+.fo_open_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_write_data:
+    ; RCX = file handle, RDX = content string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 64
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .err_f_write
+    cmp     rcx, -1
+    je      .err_f_write
+
+    mov     rbx, rcx
+    mov     rsi, rdx
+
+    mov     rcx, rsi
+    test    rcx, rcx
+    jz      .zero_len_write
+    call    _pyfasm_str_len
+    mov     r8, rax
+    jmp     .do_f_write
+.zero_len_write:
+    xor     r8d, r8d
+.do_f_write:
+    mov     rcx, rbx
+    mov     rdx, rsi
+    lea     r9, [rsp + 40]
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    jmp     .f_write_done
+
+.err_f_write:
+    xor     eax, eax
+.f_write_done:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_read_all:
+    ; RCX = file handle
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .empty_f_read
+    cmp     rcx, -1
+    je      .empty_f_read
+
+    mov     rbx, rcx
+
+    mov     rcx, rbx
+    xor     edx, edx
+    call    [GetFileSize]
+    cmp     eax, -1
+    je      .empty_f_read
+    test    eax, eax
+    jz      .empty_f_read
+
+    mov     esi, eax
+
+    lea     ecx, [rsi + 1]
+    call    _pyfasm_alloc
+    test    rax, rax
+    jz      .empty_f_read
+    mov     rdi, rax
+
+    mov     rcx, rbx
+    mov     rdx, rdi
+    mov     r8d, esi
+    lea     r9, [rsp + 40]
+    mov     qword [rsp + 32], 0
+    call    [ReadFile]
+
+    mov     eax, [rsp + 40]
+    mov     byte [rdi + rax], 0
+    mov     rax, rdi
+    jmp     .f_read_done
+
+.empty_f_read:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+.f_read_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_file_close:
+    ; RCX = file handle
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .fc_close_done
+    cmp     rcx, -1
+    je      .fc_close_done
+
+    call    [CloseHandle]
+.fc_close_done:
     mov     rsp, rbp
     pop     rbp
     ret
@@ -6790,6 +7174,8 @@ section '.idata' import data readable writeable
            WriteFile, 'WriteFile', \
            ReadFile, 'ReadFile', \
            CreateFileA, 'CreateFileA', \
+           GetFileSize, 'GetFileSize', \
+           SetFilePointer, 'SetFilePointer', \
            GetTickCount64, 'GetTickCount64', \
            Sleep, 'Sleep', \
            VirtualAlloc, 'VirtualAlloc', \
@@ -6814,6 +7200,8 @@ section '.idata' import data readable writeable
            WriteFile, 'WriteFile', \
            ReadFile, 'ReadFile', \
            CreateFileA, 'CreateFileA', \
+           GetFileSize, 'GetFileSize', \
+           SetFilePointer, 'SetFilePointer', \
            GetTickCount64, 'GetTickCount64', \
            Sleep, 'Sleep', \
            VirtualAlloc, 'VirtualAlloc', \

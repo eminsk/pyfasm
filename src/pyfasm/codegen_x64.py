@@ -70,6 +70,7 @@ class X64CodeGen:
         self._label_counter = 0
         self.current_func: Optional[FunctionSymbol] = None
         self.loop_stack: List[Tuple[str, str]] = []  # (start_label, end_label)
+        self.try_stack: List[str] = []
         self.unresolved_symbols: Set[str] = set()
         self.local_var_classes: Dict[str, str] = {}
         self.gui_control_id = 1000
@@ -901,6 +902,85 @@ include 'functions.inc'
         elif isinstance(stmt, ast.Pass):
             pass
 
+        elif isinstance(stmt, ast.With):
+            for item in stmt.items:
+                self._generate_expr(item.context_expr)
+                opt_var = item.optional_vars if isinstance(item.optional_vars, ast.Name) else None
+                handle_offset = None
+                if opt_var and self.current_func:
+                    var = self.current_func.local_vars.get(opt_var.id)
+                    if var:
+                        handle_offset = var.stack_offset
+                        self.emit(f"mov [rbp - {handle_offset}], rax", f"assign {var.name}")
+
+                if handle_offset is None:
+                    self.emit("push rax", "save anonymous with handle")
+
+                for s in stmt.body:
+                    self._generate_statement(s)
+
+                if handle_offset is not None:
+                    self.emit(f"mov rcx, [rbp - {handle_offset}]", "handle to close")
+                else:
+                    self.emit("pop rcx", "restore anonymous with handle")
+
+                lbl_skip_close = self.new_label("skip_close")
+                self.emit("test rcx, rcx")
+                self.emit(f"jz {lbl_skip_close}")
+                self.emit("cmp rcx, -1")
+                self.emit(f"je {lbl_skip_close}")
+                self.emit("call _pyfasm_file_close")
+                self.emit_raw(f"{lbl_skip_close}:")
+
+        elif isinstance(stmt, ast.Try):
+            lbl_except = self.new_label("except")
+            lbl_orelse = self.new_label("try_orelse")
+            lbl_finally = self.new_label("try_finally")
+            lbl_end = self.new_label("try_end")
+
+            self.try_stack.append(lbl_except)
+            for s in stmt.body:
+                self._generate_statement(s)
+            self.try_stack.pop()
+
+            if stmt.orelse:
+                self.emit(f"jmp {lbl_orelse}")
+            else:
+                self.emit(f"jmp {lbl_finally}")
+
+            self.emit_raw(f"{lbl_except}:")
+            for handler in stmt.handlers:
+                if handler.name and self.current_func:
+                    var = self.current_func.local_vars.get(handler.name)
+                    if var:
+                        self.emit(f"mov [rbp - {var.stack_offset}], rax", f"store exc in {handler.name}")
+                for s in handler.body:
+                    self._generate_statement(s)
+            self.emit(f"jmp {lbl_finally}")
+
+            if stmt.orelse:
+                self.emit_raw(f"{lbl_orelse}:")
+                for s in stmt.orelse:
+                    self._generate_statement(s)
+                self.emit(f"jmp {lbl_finally}")
+
+            self.emit_raw(f"{lbl_finally}:")
+            if stmt.finalbody:
+                for s in stmt.finalbody:
+                    self._generate_statement(s)
+            self.emit_raw(f"{lbl_end}:")
+
+        elif isinstance(stmt, ast.Raise):
+            if stmt.exc:
+                self._generate_expr(stmt.exc)
+            else:
+                self.emit("mov rax, 1", "default error code")
+            if self.try_stack:
+                self.emit(f"jmp {self.try_stack[-1]}", "jump to active except handler")
+            else:
+                self.emit("mov ecx, eax")
+                self.emit("call [ExitProcess]")
+
     def _generate_for_container(self, stmt: ast.For) -> None:
         target_var = self.current_func.local_vars.get(stmt.target.id)
         if not target_var:
@@ -1018,6 +1098,12 @@ include 'functions.inc'
         if isinstance(expr, ast.Name):
             if self.current_func and hasattr(self.current_func, "local_vars") and expr.id in self.current_func.local_vars:
                 return self.current_func.local_vars[expr.id].var_type
+        if isinstance(expr, (ast.List, ast.ListComp)):
+            return TYPE_LIST
+        if isinstance(expr, ast.Dict):
+            return TYPE_DICT
+        if isinstance(expr, ast.Tuple):
+            return TYPE_TUPLE
         if isinstance(expr, ast.Subscript):
             if isinstance(expr.slice, ast.Slice):
                 val_type = self._infer_expr_type(expr.value)
@@ -1377,8 +1463,123 @@ include 'functions.inc'
                 self.emit(f"mov [r8 + {(idx + 1) * 8}], rax", f"store list[{idx}]")
             self.emit("mov rax, r8", "return list pointer")
 
+        elif isinstance(expr, ast.ListComp):
+            self._generate_list_comprehension(expr)
+
         elif isinstance(expr, ast.Call):
             self._generate_call(expr)
+
+    def _generate_list_comprehension(self, node: ast.ListComp) -> None:
+        self.emit("mov ecx, 8192", "allocate list buffer for comprehension")
+        self.emit("call _pyfasm_alloc")
+        self.emit("mov qword [rax], 0", "initial list len = 0")
+        self.emit("push rax", "save list_ptr on stack")
+
+        for gen in node.generators:
+            target_var = self.current_func.local_vars.get(gen.target.id) if isinstance(gen.target, ast.Name) and self.current_func else None
+            if isinstance(gen.iter, ast.Call) and isinstance(gen.iter.func, ast.Name) and gen.iter.func.id == "range":
+                args = gen.iter.args
+                start_expr = None
+                stop_expr = None
+                step_val = 1
+                if len(args) == 1:
+                    stop_expr = args[0]
+                elif len(args) >= 2:
+                    start_expr = args[0]
+                    stop_expr = args[1]
+                    if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
+                        step_val = args[2].value
+
+                if start_expr:
+                    self._generate_expr(start_expr)
+                else:
+                    self.emit("xor eax, eax")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"init comp {target_var.name}")
+
+                lbl_start = self.new_label("comp_range_start")
+                lbl_step = self.new_label("comp_range_step")
+                lbl_end = self.new_label("comp_range_end")
+
+                self.emit_raw(f"{lbl_start}:")
+                if target_var:
+                    self.emit(f"mov rax, [rbp - {target_var.stack_offset}]")
+                self.emit("push rax")
+                self._generate_expr(stop_expr)
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                if step_val > 0:
+                    self.emit(f"jge {lbl_end}")
+                else:
+                    self.emit(f"jle {lbl_end}")
+
+                lbl_skip = self.new_label("comp_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.elt)
+                self.emit("mov rdx, rax", "element")
+                self.emit("mov rcx, [rsp]", "list_ptr on stack")
+                self.emit("call _pyfasm_list_append")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                if target_var:
+                    if step_val == 1:
+                        self.emit(f"inc qword [rbp - {target_var.stack_offset}]")
+                    else:
+                        self.emit(f"add qword [rbp - {target_var.stack_offset}], {step_val}")
+                self.emit(f"jmp {lbl_start}")
+                self.emit_raw(f"{lbl_end}:")
+
+            else:
+                self._generate_expr(gen.iter)
+                lbl_null = self.new_label("comp_c_null")
+                lbl_start = self.new_label("comp_c_start")
+                lbl_step = self.new_label("comp_c_step")
+                lbl_end = self.new_label("comp_c_end")
+
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_null}")
+
+                self.emit("push rax", "container ptr")
+                self.emit("push 0", "idx = 0")
+
+                self.emit_raw(f"{lbl_start}:")
+                self.emit("mov rcx, [rsp]", "idx")
+                self.emit("mov rbx, [rsp + 8]", "container ptr")
+                self.emit("mov rdx, [rbx]", "container len")
+                self.emit("cmp rcx, rdx")
+                self.emit(f"jge {lbl_end}")
+
+                self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[idx]")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+
+                lbl_skip = self.new_label("comp_c_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.elt)
+                self.emit("mov rdx, rax", "element")
+                self.emit("mov rcx, [rsp + 16]", "list_ptr on stack")
+                self.emit("call _pyfasm_list_append")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                self.emit("inc qword [rsp]")
+                self.emit(f"jmp {lbl_start}")
+
+                self.emit_raw(f"{lbl_end}:")
+                self.emit("add rsp, 16", "cleanup container & idx")
+                self.emit_raw(f"{lbl_null}:")
+
+        self.emit("pop rax", "return list_ptr in RAX")
 
     def _generate_binop_instr(self, op: ast.operator) -> None:
         if isinstance(op, ast.Add):
@@ -1388,9 +1589,29 @@ include 'functions.inc'
         elif isinstance(op, ast.Mult):
             self.emit("imul rax, r11")
         elif isinstance(op, ast.FloorDiv) or isinstance(op, ast.Div):
+            lbl_div_ok = self.new_label("div_ok")
+            self.emit("test r11, r11")
+            self.emit(f"jnz {lbl_div_ok}")
+            if self.try_stack:
+                self.emit("mov rax, 1", "ZeroDivisionError")
+                self.emit(f"jmp {self.try_stack[-1]}")
+            else:
+                self.emit("xor eax, eax")
+                self.emit(f"jmp {lbl_div_ok}")
+            self.emit_raw(f"{lbl_div_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
         elif isinstance(op, ast.Mod):
+            lbl_mod_ok = self.new_label("mod_ok")
+            self.emit("test r11, r11")
+            self.emit(f"jnz {lbl_mod_ok}")
+            if self.try_stack:
+                self.emit("mov rax, 1", "ZeroDivisionError")
+                self.emit(f"jmp {self.try_stack[-1]}")
+            else:
+                self.emit("xor eax, eax")
+                self.emit(f"jmp {lbl_mod_ok}")
+            self.emit_raw(f"{lbl_mod_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
             self.emit("mov rax, rdx")
@@ -1556,6 +1777,28 @@ include 'functions.inc'
                 self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
                 self.emit("call _pyfasm_list_append")
                 return
+
+        # File methods: f.write(content), f.read(), f.close()
+        if attr_name == "write" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "save content")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "file handle")
+            self.emit("pop rdx", "content string")
+            self.emit("call _pyfasm_file_write_data")
+            return
+
+        if attr_name == "read" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "file handle")
+            self.emit("call _pyfasm_file_read_all")
+            return
+
+        if attr_name == "close" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "file handle")
+            self.emit("call _pyfasm_file_close")
+            return
 
         # int(val) conversion / cast
         if func_name == "int" and call.args:
@@ -1872,6 +2115,33 @@ include 'functions.inc'
                 return
 
         # Built-in runtime calls
+        if func_name == "open" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "save filename")
+            if len(call.args) > 1:
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax", "mode")
+            else:
+                self.emit("xor edx, edx", "mode = default 'r'")
+            self.emit("pop rcx", "filename")
+            self.emit("call _pyfasm_file_open")
+            return
+
+        if func_name == "file_read" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("xor edx, edx", "mode = 'r'")
+            self.emit("call _pyfasm_file_open")
+            self.emit("push rax", "save handle")
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_file_read_all")
+            self.emit("push rax", "save read string")
+            self.emit("mov rcx, [rsp + 8]", "handle")
+            self.emit("call _pyfasm_file_close")
+            self.emit("pop rax", "read string")
+            self.emit("add rsp, 8", "cleanup handle slot")
+            return
+
         if func_name == "print":
             if not call.args:
                 self.emit("call _pyfasm_print_newline")

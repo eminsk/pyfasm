@@ -568,7 +568,7 @@ class AstAnalyzer:
                 return TYPE_BOOL
             return TYPE_INT
 
-        elif isinstance(expr, ast.List):
+        elif isinstance(expr, (ast.List, ast.ListComp)):
             return TYPE_LIST
 
         elif isinstance(expr, ast.Dict):
@@ -602,9 +602,9 @@ class AstAnalyzer:
         elif isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fid = expr.func.id
-                if fid in ("str", "chr", "hex", "bin"):
+                if fid in ("str", "chr", "hex", "bin", "file_read"):
                     return TYPE_STR
-                elif fid in ("int", "ord", "len", "hash", "abs", "round"):
+                elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open"):
                     return TYPE_INT
                 elif fid in ("float", "pow"):
                     return TYPE_FLOAT
@@ -618,7 +618,7 @@ class AstAnalyzer:
                     return TYPE_TUPLE
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("split", "strip", "replace", "lower", "upper", "capitalize", "format"):
+                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format"):
                     return TYPE_STR
                 elif attr in ("keys", "values", "items"):
                     return TYPE_LIST
@@ -711,6 +711,40 @@ class AstAnalyzer:
                         offset += 8
                 elif isinstance(sub_node, ast.For) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
+                    if vname not in local_vars:
+                        local_vars[vname] = VariableSymbol(
+                            name=vname,
+                            var_type=TYPE_INT,
+                            stack_offset=offset,
+                            is_arg=False
+                        )
+                        offset += 8
+                elif isinstance(sub_node, ast.With):
+                    for item in sub_node.items:
+                        if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                            vname = item.optional_vars.id
+                            if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=TYPE_INT,
+                                    stack_offset=offset,
+                                    is_arg=False
+                                )
+                                offset += 8
+                elif isinstance(sub_node, ast.ListComp):
+                    for gen in sub_node.generators:
+                        if isinstance(gen.target, ast.Name):
+                            vname = gen.target.id
+                            if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=TYPE_INT,
+                                    stack_offset=offset,
+                                    is_arg=False
+                                )
+                                offset += 8
+                elif isinstance(sub_node, ast.ExceptHandler) and sub_node.name:
+                    vname = sub_node.name
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
