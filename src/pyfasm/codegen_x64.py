@@ -179,6 +179,20 @@ class X64CodeGen:
             return candidates[0]
         return None
 
+    def resolve_instance_class(self, node: Optional[ast.AST]) -> Optional[str]:
+        if node is None or isinstance(node, ast.Constant):
+            return None
+        if isinstance(node, ast.Name):
+            if node.id in ("self", "this"):
+                return getattr(self.current_func, "class_name", None)
+            return self.local_var_classes.get(node.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in self.module.classes:
+                return node.func.id
+        if isinstance(node, ast.BinOp):
+            return self.resolve_instance_class(node.left)
+        return None
+
     def _desugar_str_format(self, fmt_str: str, args: List[ast.expr]) -> List[ast.AST]:
         parts: List[ast.AST] = []
         last_end = 0
@@ -252,6 +266,51 @@ class X64CodeGen:
         if last_end < n:
             parts.append(ast.Constant(value=fmt_str[last_end:]))
         return parts
+
+    def _prepare_call_args(self, call: ast.Call, target_fn: FunctionSymbol, is_method_call: bool, self_expr: Optional[ast.AST] = None) -> List[ast.AST]:
+        expected_args = target_fn.args
+        if is_method_call and expected_args and expected_args[0].name == "self":
+            formal_args = expected_args[1:]
+            self_node = self_expr
+        else:
+            formal_args = expected_args
+            self_node = None
+
+        final_args: List[Optional[ast.AST]] = [None] * len(formal_args)
+
+        # 1. Positional arguments
+        for i, a in enumerate(call.args):
+            if i < len(final_args):
+                final_args[i] = a
+
+        # 2. Keyword arguments
+        if getattr(call, "keywords", None):
+            for kw in call.keywords:
+                if kw.arg:
+                    for idx, f_arg in enumerate(formal_args):
+                        if f_arg.name == kw.arg:
+                            final_args[idx] = kw.value
+                            break
+
+        # 3. Fill in default values
+        defaults = getattr(target_fn, "defaults", [])
+        if defaults:
+            num_defaults = len(defaults)
+            num_no_defaults = len(formal_args) - num_defaults
+            for idx in range(len(final_args)):
+                if final_args[idx] is None:
+                    d_idx = idx - num_no_defaults
+                    if 0 <= d_idx < num_defaults:
+                        final_args[idx] = defaults[d_idx]
+
+        # 4. Filter and prepend self if applicable
+        resolved = [a for a in final_args if a is not None]
+        if len(call.args) > len(formal_args):
+            resolved.extend(call.args[len(formal_args):])
+
+        if self_node is not None:
+            resolved = [self_node] + resolved
+        return resolved
 
     def _extract_kwarg(self, call: ast.Call, kw_name: str) -> Optional[ast.AST]:
         for kw in call.keywords:
@@ -1096,12 +1155,20 @@ include 'functions.inc'
                     return
 
             self._generate_expr(stmt.value)  # result in RAX
+            assigned_cls = None
             if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
                 func_id = stmt.value.func.id
                 if func_id in self.module.classes:
-                    for target in stmt.targets:
-                        if isinstance(target, ast.Name):
-                            self.local_var_classes[target.id] = func_id
+                    assigned_cls = func_id
+            elif isinstance(stmt.value, ast.Name):
+                assigned_cls = self.local_var_classes.get(stmt.value.id)
+            elif isinstance(stmt.value, ast.BinOp):
+                assigned_cls = self.resolve_instance_class(stmt.value.left)
+
+            if assigned_cls:
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        self.local_var_classes[target.id] = assigned_cls
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     var = self.current_func.local_vars.get(target.id) if self.current_func else None
@@ -1111,6 +1178,22 @@ include 'functions.inc'
                         self.emit(f"mov [_pyfasm_global_{target.id}], rax", f"store global {target.id}")
                 elif isinstance(target, ast.Subscript):
                     slice_unwrapped = _unwrap_slice(target.slice)
+                    # Check custom __setitem__
+                    cls_name = self.resolve_instance_class(target.value)
+                    setitem_m = self.resolve_class_method(cls_name, "__setitem__") if cls_name else None
+                    if setitem_m:
+                        self.emit("push rax", "save value to assign")
+                        self._generate_expr(slice_unwrapped)
+                        self.emit("push rax", "save key")
+                        self._generate_expr(target.value)
+                        self.emit("mov rcx, rax", "pass self")
+                        self.emit("pop rdx", "pass key")
+                        self.emit("pop r8", "pass val")
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit(f"call {safe_asm_label(setitem_m)}")
+                        self.emit("add rsp, 32")
+                        continue
+
                     is_dict_target = False
                     if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                         is_dict_target = True
@@ -1819,6 +1902,37 @@ include 'functions.inc'
                 self.emit_raw(f"{lbl_done}:")
 
         elif isinstance(expr, ast.BinOp):
+            # Check user-defined operator overloading dunder methods (__add__, __sub__, etc.)
+            binop_dunders = {
+                ast.Add: "__add__",
+                ast.Sub: "__sub__",
+                ast.Mult: "__mul__",
+                ast.FloorDiv: "__floordiv__",
+                ast.Div: "__truediv__",
+                ast.Mod: "__mod__",
+                ast.Pow: "__pow__",
+                ast.BitAnd: "__and__",
+                ast.BitOr: "__or__",
+                ast.BitXor: "__xor__",
+                ast.LShift: "__lshift__",
+                ast.RShift: "__rshift__",
+            }
+            op_cls = type(expr.op)
+            if op_cls in binop_dunders and not (isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str)):
+                dunder_name = binop_dunders[op_cls]
+                cls_name = self.resolve_instance_class(expr.left)
+                op_m = self.resolve_class_method(cls_name, dunder_name) if cls_name else None
+                if op_m:
+                    self._generate_expr(expr.right)
+                    self.emit("push rax", "save other")
+                    self._generate_expr(expr.left)
+                    self.emit("mov rcx, rax", "pass self")
+                    self.emit("pop rdx", "pass other")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(op_m)}")
+                    self.emit("add rsp, 32")
+                    return
+
             if isinstance(expr.op, ast.Mod):
                 if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
                     fmt_args: List[ast.expr] = []
@@ -1910,6 +2024,24 @@ include 'functions.inc'
         elif isinstance(expr, ast.Compare):
             op = expr.ops[0]
             if isinstance(op, (ast.In, ast.NotIn)):
+                # Check user class __contains__
+                cont_cls = self.resolve_instance_class(expr.comparators[0])
+                cont_m = self.resolve_class_method(cont_cls, "__contains__") if cont_cls else None
+                if cont_m:
+                    self._generate_expr(expr.left)
+                    self.emit("push rax", "save item")
+                    self._generate_expr(expr.comparators[0])
+                    self.emit("mov rcx, rax", "pass container (self)")
+                    self.emit("pop rdx", "pass item")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(cont_m)}")
+                    self.emit("add rsp, 32")
+                    if isinstance(op, ast.NotIn):
+                        self.emit("test rax, rax")
+                        self.emit("setz al")
+                        self.emit("movzx rax, al")
+                    return
+
                 self._generate_expr(expr.comparators[0])
                 self.emit("push rax")
                 self._generate_expr(expr.left)
@@ -1955,6 +2087,40 @@ include 'functions.inc'
                 self.emit("setne al")
                 self.emit("movzx rax, al")
             else:
+                # Check user class comparison dunders (__eq__, __ne__, __lt__, etc.)
+                comp_dunders = {
+                    ast.Eq: "__eq__",
+                    ast.NotEq: "__ne__",
+                    ast.Lt: "__lt__",
+                    ast.LtE: "__le__",
+                    ast.Gt: "__gt__",
+                    ast.GtE: "__ge__"
+                }
+                op_cls = type(op)
+                if op_cls in comp_dunders:
+                    dunder = comp_dunders[op_cls]
+                    cls_name = self.resolve_instance_class(expr.left)
+                    comp_m = self.resolve_class_method(cls_name, dunder) if cls_name else None
+                    invert_res = False
+                    if not comp_m and op_cls is ast.NotEq and cls_name:
+                        comp_m = self.resolve_class_method(cls_name, "__eq__")
+                        if comp_m:
+                            invert_res = True
+                    if comp_m:
+                        self._generate_expr(expr.comparators[0])
+                        self.emit("push rax", "save other")
+                        self._generate_expr(expr.left)
+                        self.emit("mov rcx, rax", "pass self")
+                        self.emit("pop rdx", "pass other")
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit(f"call {safe_asm_label(comp_m)}")
+                        self.emit("add rsp, 32")
+                        if invert_res:
+                            self.emit("test rax, rax")
+                            self.emit("setz al")
+                            self.emit("movzx rax, al")
+                        return
+
                 self._generate_expr(expr.left)
                 self.emit("push rax")
                 self._generate_expr(expr.comparators[0])
@@ -2020,6 +2186,20 @@ include 'functions.inc'
                 return
 
             slice_unwrapped = _unwrap_slice(expr.slice)
+            # Check custom __getitem__
+            cls_name = self.resolve_instance_class(expr.value)
+            getitem_m = self.resolve_class_method(cls_name, "__getitem__") if cls_name else None
+            if getitem_m:
+                self._generate_expr(slice_unwrapped)
+                self.emit("push rax", "save key")
+                self._generate_expr(expr.value)
+                self.emit("mov rcx, rax", "pass self")
+                self.emit("pop rdx", "pass key")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {safe_asm_label(getitem_m)}")
+                self.emit("add rsp, 32")
+                return
+
             is_dict_val = False
             if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                 is_dict_val = True
@@ -2859,8 +3039,19 @@ include 'functions.inc'
             return
 
         # str(val) conversion
-        if func_name == "str" and call.args:
-            self._generate_expr(call.args[0])
+        if func_name in ("str", "repr") and call.args:
+            arg0 = call.args[0]
+            cls_name = self.resolve_instance_class(arg0)
+            str_m = (self.resolve_class_method(cls_name, "__str__") or self.resolve_class_method(cls_name, "__repr__")) if cls_name else None
+            if str_m:
+                self._generate_expr(arg0)
+                self.emit("mov rcx, rax", "pass self to __str__")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {safe_asm_label(str_m)}")
+                self.emit("add rsp, 32")
+                return
+
+            self._generate_expr(arg0)
             self.emit("mov rcx, rax")
             self.unresolved_symbols.add("str")
             self.emit("call fn_str")
@@ -3182,17 +3373,29 @@ include 'functions.inc'
                 if idx > 0:
                     self.emit("mov rcx, 32", "space ASCII separator")
                     self.emit("call _pyfasm_print_char")
-                arg_type = self._infer_expr_type(arg)
-                self._generate_expr(arg)
-                if arg_type.is_str():
+                # Check custom __str__ or __repr__
+                cls_name = self.resolve_instance_class(arg)
+                str_m = (self.resolve_class_method(cls_name, "__str__") or self.resolve_class_method(cls_name, "__repr__")) if cls_name else None
+                if str_m:
+                    self._generate_expr(arg)
+                    self.emit("mov rcx, rax", "pass self to __str__")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(str_m)}")
+                    self.emit("add rsp, 32")
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_print_str")
-                elif arg_type.is_float():
-                    self.emit("movq xmm0, rax")
-                    self.emit("call _pyfasm_print_float")
                 else:
-                    self.emit("mov rcx, rax")
-                    self.emit("call _pyfasm_print_int")
+                    arg_type = self._infer_expr_type(arg)
+                    self._generate_expr(arg)
+                    if arg_type.is_str():
+                        self.emit("mov rcx, rax")
+                        self.emit("call _pyfasm_print_str")
+                    elif arg_type.is_float():
+                        self.emit("movq xmm0, rax")
+                        self.emit("call _pyfasm_print_float")
+                    else:
+                        self.emit("mov rcx, rax")
+                        self.emit("call _pyfasm_print_int")
             self.emit("call _pyfasm_print_newline")
             return
 
@@ -3484,6 +3687,17 @@ include 'functions.inc'
         if func_name in ("len", "str_len"):
             if call.args:
                 arg0 = call.args[0]
+                # Check custom __len__
+                cls_name = self.resolve_instance_class(arg0)
+                len_m = self.resolve_class_method(cls_name, "__len__") if cls_name else None
+                if len_m:
+                    self._generate_expr(arg0)
+                    self.emit("mov rcx, rax", "pass self to __len__")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(len_m)}")
+                    self.emit("add rsp, 32")
+                    return
+
                 is_list_or_tuple = False
                 is_dict_arg = False
                 arg0_type = self._infer_expr_type(arg0)
@@ -3615,13 +3829,18 @@ include 'functions.inc'
             return
 
         # User Function / Method Call (x64 ABI)
-        args_to_pass = list(call.args)
-        if is_super_call:
-            args_to_pass = [ast.Name(id="self", ctx=ast.Load())] + list(call.args)
-        elif isinstance(call.func, ast.Attribute) and func_name in self.module.functions:
+        if func_name in self.module.functions:
             fn_sym = self.module.functions[func_name]
-            if fn_sym.args and fn_sym.args[0].name == "self":
-                args_to_pass = [call.func.value] + list(call.args)
+            if is_super_call:
+                args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=ast.Name(id="self", ctx=ast.Load()))
+            elif isinstance(call.func, ast.Attribute) and fn_sym.args and fn_sym.args[0].name == "self":
+                args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=call.func.value)
+            else:
+                args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=False)
+        else:
+            args_to_pass = list(call.args)
+            if is_super_call:
+                args_to_pass = [ast.Name(id="self", ctx=ast.Load())] + list(call.args)
 
         # Evaluate arguments and push them in reverse order
         is_indirect = False

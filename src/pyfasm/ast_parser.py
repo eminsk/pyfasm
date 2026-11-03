@@ -36,6 +36,7 @@ class FunctionSymbol:
     class_name: Optional[str] = None
     global_names: Set[str] = field(default_factory=set)
     is_generator: bool = False
+    defaults: List[ast.expr] = field(default_factory=list)
 
 
 @dataclass
@@ -1140,5 +1141,6 @@ class AstAnalyzer:
             stack_size=aligned_stack,
             ast_node=node,
             global_names=global_names,
-            is_generator=is_gen
+            is_generator=is_gen,
+            defaults=list(node.args.defaults)
         )
