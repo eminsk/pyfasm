@@ -66,6 +66,8 @@ class ParsedModule:
     imports: List[str] = field(default_factory=list)
     detected_libraries: Set[str] = field(default_factory=set)
     main_func: Optional[FunctionSymbol] = None
+    calls_main_in_top_level: bool = False
+    ui_spec: Optional[Any] = None
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
@@ -90,7 +92,7 @@ class ParsedModule:
 
     @property
     def is_modern_gui(self) -> bool:
-        return self.has_library("customtkinter", "tkinter", "ctk", "flet", "textual", "qt", "pyqt5", "pyqt6", "pyside6") or any("app" in s.lower() or "gui" in s.lower() for s in self.classes)
+        return self.has_library("customtkinter", "tkinter", "ctk", "flet", "textual", "qt", "pyqt5", "pyqt6", "pyside6") or any("app" in s.lower() or "gui" in s.lower() or "window" in s.lower() for s in self.classes)
 
     @property
     def is_http_app(self) -> bool:
@@ -254,15 +256,8 @@ class AstAnalyzer:
         module.string_literals = self.strings
         module.float_literals = self.floats
 
-        # Second pass: extract functions and classes
-        for stmt in tree.body:
-            if isinstance(stmt, ast.FunctionDef):
-                fn = self._analyze_function(stmt)
-                module.functions[fn.name] = fn
-                if fn.name == "main":
-                    module.main_func = fn
-            elif isinstance(stmt, ast.ClassDef):
-                self._analyze_class(stmt, module, mod_prefix="")
+        # Second pass: extract functions, classes, and top-level statements
+        self._extract_top_level_and_functions(tree, module, is_entry=True, mod_prefix="")
 
         return module
 
@@ -284,6 +279,27 @@ class AstAnalyzer:
         # Recursively parse entry script and all internal project dependencies
         self._parse_file_recursive(entry_path, module, is_entry=True)
 
+        # Fallback entry point resolution if main was imported or namespaced
+        if module.main_func is None:
+            if "main" in module.functions:
+                module.main_func = module.functions["main"]
+            else:
+                for fn_name, fn_obj in module.functions.items():
+                    if fn_name.endswith("_main"):
+                        module.main_func = fn_obj
+                        break
+
+        try:
+            from pyfasm.ui_analyzer import analyze_ui_structure
+            module.ui_spec = analyze_ui_structure(tree)
+        except Exception:
+            pass
+        try:
+            from pyfasm.ui_analyzer import analyze_ui_structure
+            entry_tree = ast.parse(entry_path.read_text(encoding="utf-8"))
+            module.ui_spec = analyze_ui_structure(entry_tree)
+        except Exception:
+            pass
         module.string_literals = self.strings
         module.float_literals = self.floats
         return module
@@ -365,39 +381,99 @@ class AstAnalyzer:
         mod_prefix = re.sub(r'[^a-zA-Z0-9_]', '_', real_path.stem)
         if mod_prefix and mod_prefix[0].isdigit():
             mod_prefix = f"_{mod_prefix}" 
-        for stmt in tree.body:
-            if isinstance(stmt, ast.FunctionDef):
-                fn = self._analyze_function(stmt)
-                # Primary name
-                if fn.name not in module.functions:
-                    module.functions[fn.name] = fn
-                # Namespaced alias (e.g., utils_add, math_calc)
-                alias_name = f"{mod_prefix}_{fn.name}"
-                if alias_name not in module.functions:
-                    module.functions[alias_name] = fn
+        self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
 
-                if is_entry and fn.name == "main":
-                    module.main_func = fn
-            elif isinstance(stmt, ast.ClassDef):
-                self._analyze_class(stmt, module, mod_prefix=mod_prefix)
-
-        # 3. Discover and recursively parse imported project modules
-        for stmt in tree.body:
-            if isinstance(stmt, ast.Import):
-                for alias in stmt.names:
+        # 3. Discover and recursively parse imported project modules across entire AST
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
                     # Never import self or pyfasm
                     if alias.name == "pyfasm" or alias.name.startswith("pyfasm."):
                         continue
                     dep = self._resolve_local_module(alias.name, real_path.parent)
                     if dep and dep != real_path:
                         self._parse_file_recursive(dep, module, is_entry=False)
-            elif isinstance(stmt, ast.ImportFrom):
-                if stmt.module:
-                    if stmt.module == "pyfasm" or stmt.module.startswith("pyfasm."):
+            elif isinstance(node, ast.ImportFrom):
+                mod_name = node.module or ""
+                if not mod_name and node.names:
+                    for alias in node.names:
+                        dep = self._resolve_local_module(alias.name, real_path.parent)
+                        if dep and dep != real_path:
+                            self._parse_file_recursive(dep, module, is_entry=False)
+                elif mod_name:
+                    if mod_name == "pyfasm" or mod_name.startswith("pyfasm."):
                         continue
-                    dep = self._resolve_local_module(stmt.module, real_path.parent)
+                    dep = self._resolve_local_module(mod_name, real_path.parent)
                     if dep and dep != real_path:
                         self._parse_file_recursive(dep, module, is_entry=False)
+
+    def _extract_top_level_and_functions(
+        self,
+        tree: ast.AST,
+        module: ParsedModule,
+        is_entry: bool = True,
+        mod_prefix: str = ""
+    ) -> None:
+        top_level_stmts = []
+        for stmt in tree.body:
+            if isinstance(stmt, ast.FunctionDef):
+                fn = self._analyze_function(stmt)
+                if fn.name not in module.functions:
+                    module.functions[fn.name] = fn
+                if mod_prefix:
+                    alias_name = f"{mod_prefix}_{fn.name}"
+                    if alias_name not in module.functions:
+                        module.functions[alias_name] = fn
+                if is_entry and fn.name == "main":
+                    module.main_func = fn
+            elif isinstance(stmt, ast.ClassDef):
+                self._analyze_class(stmt, module, mod_prefix=mod_prefix)
+            elif is_entry:
+                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                    continue
+                if isinstance(stmt, ast.If):
+                    is_main_guard = False
+                    if isinstance(stmt.test, ast.Compare):
+                        if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
+                           any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
+                            is_main_guard = True
+                    if is_main_guard:
+                        top_level_stmts.extend(stmt.body)
+                        continue
+                top_level_stmts.append(stmt)
+
+        if is_entry and top_level_stmts:
+            calls_main = any(
+                isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main"
+                for s in top_level_stmts
+            )
+            if "main" not in module.functions:
+                entry_fn_def = ast.FunctionDef(
+                    name="main",
+                    args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                    body=top_level_stmts,
+                    decorator_list=[],
+                    returns=None,
+                    lineno=1,
+                    col_offset=0
+                )
+                fn_sym = self._analyze_function(entry_fn_def)
+                module.functions["main"] = fn_sym
+                module.main_func = fn_sym
+            else:
+                entry_fn_def = ast.FunctionDef(
+                    name="_pyfasm_top_level_init",
+                    args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                    body=top_level_stmts,
+                    decorator_list=[],
+                    returns=None,
+                    lineno=1,
+                    col_offset=0
+                )
+                fn_sym = self._analyze_function(entry_fn_def)
+                module.functions["_pyfasm_top_level_init"] = fn_sym
+                if calls_main:
+                    module.calls_main_in_top_level = True
 
     def _analyze_class(self, node: ast.ClassDef, module: ParsedModule, mod_prefix: str = "") -> ClassSymbol:
         cls_name = node.name
@@ -505,8 +581,6 @@ class AstAnalyzer:
             return TYPE_STR
 
         elif isinstance(expr, ast.BinOp):
-            if isinstance(expr.op, ast.Div):
-                return TYPE_FLOAT
             left_t = self._infer_node_type(expr.left, local_vars)
             right_t = self._infer_node_type(expr.right, local_vars)
             if left_t.is_float() or right_t.is_float():
@@ -551,6 +625,21 @@ class AstAnalyzer:
                 elif attr in ("count", "find", "index"):
                     return TYPE_INT
 
+        elif isinstance(expr, ast.Subscript):
+            container_type = self._infer_node_type(expr.value, local_vars)
+            if isinstance(expr.slice, ast.Slice):
+                if container_type.is_str():
+                    return TYPE_STR
+                if container_type.is_list():
+                    return TYPE_LIST
+                if container_type.is_tuple():
+                    return TYPE_TUPLE
+                return container_type
+            else:
+                if container_type.is_str():
+                    return TYPE_STR
+                return TYPE_INT
+
         return TYPE_INT
 
     def _analyze_function(self, node: ast.FunctionDef) -> FunctionSymbol:
@@ -587,49 +676,50 @@ class AstAnalyzer:
             local_vars[arg_name] = var_sym
             offset += 8
 
-        # Discover all assigned variables in the function body with local type inference
-        for sub_node in ast.walk(node):
-            if isinstance(sub_node, ast.Assign):
-                inferred_type = self._infer_node_type(sub_node.value, local_vars)
-                for target in sub_node.targets:
-                    if isinstance(target, ast.Name):
-                        vname = target.id
-                        if vname not in local_vars:
-                            local_vars[vname] = VariableSymbol(
-                                name=vname,
-                                var_type=inferred_type,
-                                stack_offset=offset,
-                                is_arg=False
-                            )
-                            offset += 8
-                        elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and inferred_type != TYPE_INT:
-                            local_vars[vname].var_type = inferred_type
-            elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
-                vname = sub_node.target.id
-                vtype = TYPE_INT
-                if isinstance(sub_node.annotation, ast.Name):
-                    vtype = resolve_type(sub_node.annotation.id)
-                elif isinstance(sub_node.annotation, ast.Constant) and isinstance(sub_node.annotation.value, str):
-                    vtype = resolve_type(sub_node.annotation.value)
-                if vname not in local_vars:
-                    local_vars[vname] = VariableSymbol(
-                        name=vname,
-                        var_type=vtype,
-                        stack_offset=offset,
-                        is_arg=False
-                    )
-                    offset += 8
-            elif isinstance(sub_node, ast.For) and isinstance(sub_node.target, ast.Name):
-                vname = sub_node.target.id
-                if vname not in local_vars:
-                    local_vars[vname] = VariableSymbol(
-                        name=vname,
-                        var_type=TYPE_INT,
-                        stack_offset=offset,
-                        is_arg=False
-                    )
-                    offset += 8
-
+        # Discover all assigned variables in the function body with local type inference (multi-pass for chained type resolution)
+        for _pass in range(3):
+            for sub_node in ast.walk(node):
+                if isinstance(sub_node, ast.Assign):
+                    inferred_type = self._infer_node_type(sub_node.value, local_vars)
+                    for target in sub_node.targets:
+                        if isinstance(target, ast.Name):
+                            vname = target.id
+                            if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=inferred_type,
+                                    stack_offset=offset,
+                                    is_arg=False
+                                )
+                                offset += 8
+                            elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and inferred_type != TYPE_INT:
+                                local_vars[vname].var_type = inferred_type
+                elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
+                    vname = sub_node.target.id
+                    vtype = TYPE_INT
+                    if isinstance(sub_node.annotation, ast.Name):
+                        vtype = resolve_type(sub_node.annotation.id)
+                    elif isinstance(sub_node.annotation, ast.Constant) and isinstance(sub_node.annotation.value, str):
+                        vtype = resolve_type(sub_node.annotation.value)
+                    if vname not in local_vars:
+                        local_vars[vname] = VariableSymbol(
+                            name=vname,
+                            var_type=vtype,
+                            stack_offset=offset,
+                            is_arg=False
+                        )
+                        offset += 8
+                elif isinstance(sub_node, ast.For) and isinstance(sub_node.target, ast.Name):
+                    vname = sub_node.target.id
+                    if vname not in local_vars:
+                        local_vars[vname] = VariableSymbol(
+                            name=vname,
+                            var_type=TYPE_INT,
+                            stack_offset=offset,
+                            is_arg=False
+                        )
+                        offset += 8
+    
         # If return type wasn't explicitly annotated, infer from return statements
         if ret_type == TYPE_VOID:
             for sub_node in ast.walk(node):

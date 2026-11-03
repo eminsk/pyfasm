@@ -76,6 +76,19 @@ class X64CodeGen:
         self.gui_edit_id = 100
         self.gui_chip_count = 0
 
+    @property
+    def features(self) -> Set[str]:
+        feats = set()
+        if getattr(self.module, "is_modern_gui", False):
+            feats.add("gui")
+        if getattr(self.module, "is_tray_app", False):
+            feats.add("tray")
+        if getattr(self.module, "is_keyboard_hook_app", False):
+            feats.add("hook")
+        if getattr(self.module, "is_http_app", False):
+            feats.add("net")
+        return feats
+
     def new_label(self, prefix: str = "L") -> str:
         self._label_counter += 1
         return f"._{prefix}_{self._label_counter}"
@@ -331,7 +344,7 @@ class X64CodeGen:
         lines = []
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_data
-            lines.append(get_win64_runtime_data())
+            lines.append(get_win64_runtime_data(features=self.features))
         elif self.target == "linux":
             from pyfasm.runtime_linux import get_linux_runtime_data
             lines.append(get_linux_runtime_data())
@@ -358,7 +371,7 @@ class X64CodeGen:
     def _get_runtime_code(self) -> str:
         if self.target in ("win64", "dll"):
             from pyfasm.runtime_win64 import get_win64_runtime_code
-            return get_win64_runtime_code()
+            return get_win64_runtime_code(features=self.features)
         elif self.target == "linux":
             from pyfasm.runtime_linux import get_linux_runtime_code
             return get_linux_runtime_code()
@@ -479,7 +492,7 @@ class X64CodeGen:
             if self.target == "dll":
                 fn_names = list(self.module.functions.keys())
                 lines.append(get_win64_export_section("pyfasm_module.dll", fn_names))
-            lines.append(get_win64_runtime_imports())
+            lines.append(get_win64_runtime_imports(features=self.features))
             return "\n".join(lines)
         return ""
 
@@ -508,6 +521,21 @@ icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
           - functions.inc: compiled functions, class constructors, and methods
           - imports.inc: PE64 import section for Windows API libraries
         """
+        if self.target in ("win64", "dll"):
+            fn_sec = "section '.text' code readable executable"
+        elif self.target == "linux":
+            fn_sec = "segment readable executable"
+        else:
+            fn_sec = "align 16"
+
+        funcs_body = self._get_functions_section()
+        functions_inc = f"""; ============================================================
+; PyFASM Modular Assembly: Compiled Functions & Classes
+; ============================================================
+{fn_sec}
+
+{funcs_body}
+"""
         constants_inc = f"""; ============================================================
 ; PyFASM Modular Assembly: Constants & Static Data
 ; ============================================================
@@ -517,20 +545,6 @@ icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
 ; PyFASM Modular Assembly: Native Runtime & GUI Engine
 ; ============================================================
 {self._get_runtime_code()}
-"""
-        if self.target in ("win64", "dll"):
-            fn_sec = "section '.text' code readable executable"
-        elif self.target == "linux":
-            fn_sec = "segment readable executable"
-        else:
-            fn_sec = "align 16"
-
-        functions_inc = f"""; ============================================================
-; PyFASM Modular Assembly: Compiled Functions & Classes
-; ============================================================
-{fn_sec}
-
-{self._get_functions_section()}
 """
         imports_inc = f"""; ============================================================
 ; PyFASM Modular Assembly: Import & Library Section
@@ -681,6 +695,9 @@ include 'functions.inc'
             for stmt in fn.ast_node.body:
                 self._generate_statement(stmt)
 
+        if fn.name == "main":
+            self.emit("xor eax, eax", "default return 0 for main")
+
         # Epilog
         self.emit_raw(f".epilog_{safe_asm_label(fn.name)}:")
         self.emit("mov rsp, rbp")
@@ -791,6 +808,34 @@ include 'functions.inc'
                         self.emit("pop rax")
                         self._generate_binop_instr(stmt.op)
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
+            elif isinstance(stmt.target, ast.Subscript):
+                slice_unwrapped = _unwrap_slice(stmt.target.slice)
+                is_list_target = False
+                val_t = self._infer_expr_type(stmt.target.value)
+                if val_t.is_list() or val_t.is_tuple():
+                    is_list_target = True
+                elif isinstance(stmt.target.value, ast.Name) and self.current_func:
+                    v = self.current_func.local_vars.get(stmt.target.value.id)
+                    if v and (v.var_type.is_list() or v.var_type.is_tuple()):
+                        is_list_target = True
+
+                self._generate_expr(slice_unwrapped)
+                self.emit("push rax", "save index")
+                self._generate_expr(stmt.target.value)
+                self.emit("push rax", "save array ptr")
+                self._generate_expr(stmt.value)
+                self.emit("mov r11, rax", "delta")
+                self.emit("pop r8", "array ptr")
+                self.emit("pop rdx", "index")
+                if is_list_target:
+                    self.emit("mov rax, [r8 + (rdx + 1) * 8]", "current val")
+                else:
+                    self.emit("mov rax, [r8 + rdx * 8]", "current val")
+                self._generate_binop_instr(stmt.op)
+                if is_list_target:
+                    self.emit("mov [r8 + (rdx + 1) * 8], rax", "store updated list[idx]")
+                else:
+                    self.emit("mov [r8 + rdx * 8], rax", "store updated arr[idx]")
 
         elif isinstance(stmt, ast.Expr):
             self._generate_expr(stmt.value)
@@ -840,8 +885,10 @@ include 'functions.inc'
                     self._generate_for_range(stmt)
                     return
 
-            # Fallback pass
-            pass
+            # for item in container (list, tuple)
+            if isinstance(stmt.target, ast.Name):
+                self._generate_for_container(stmt)
+                return
 
         elif isinstance(stmt, ast.Break):
             if self.loop_stack:
@@ -853,6 +900,46 @@ include 'functions.inc'
 
         elif isinstance(stmt, ast.Pass):
             pass
+
+    def _generate_for_container(self, stmt: ast.For) -> None:
+        target_var = self.current_func.local_vars.get(stmt.target.id)
+        if not target_var:
+            return
+
+        self._generate_expr(stmt.iter)
+        lbl_null = self.new_label("for_null")
+        lbl_start = self.new_label("for_iter_start")
+        lbl_step = self.new_label("for_iter_step")
+        lbl_end = self.new_label("for_iter_end")
+
+        self.emit("test rax, rax", "check null container")
+        self.emit(f"jz {lbl_null}")
+
+        self.emit("push rax", "container ptr")
+        self.emit("push 0", "current index = 0")
+        self.loop_stack.append((lbl_step, lbl_end))
+
+        self.emit_raw(f"{lbl_start}:")
+        self.emit("mov rcx, [rsp]", "current index")
+        self.emit("mov rbx, [rsp + 8]", "container ptr")
+        self.emit("mov rdx, [rbx]", "container length")
+        self.emit("cmp rcx, rdx")
+        self.emit(f"jge {lbl_end}")
+
+        self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[index]")
+        self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+
+        for s in stmt.body:
+            self._generate_statement(s)
+
+        self.emit_raw(f"{lbl_step}:")
+        self.emit("inc qword [rsp]", "index++")
+        self.emit(f"jmp {lbl_start}")
+
+        self.emit_raw(f"{lbl_end}:")
+        self.emit("add rsp, 16", "cleanup container & index from stack")
+        self.loop_stack.pop()
+        self.emit_raw(f"{lbl_null}:")
 
     def _generate_for_range(self, stmt: ast.For) -> None:
         target_var = self.current_func.local_vars.get(stmt.target.id)
@@ -916,6 +1003,35 @@ include 'functions.inc'
         self.emit(f"jmp {l_start}")
         self.emit_raw(f"{l_end}:")
         self.loop_stack.pop()
+
+    def _infer_expr_type(self, expr: Optional[ast.AST]) -> PyFasmType:
+        if expr is None:
+            return TYPE_INT
+        if isinstance(expr, ast.Constant):
+            if isinstance(expr.value, str):
+                return TYPE_STR
+            if isinstance(expr.value, float):
+                return TYPE_FLOAT
+            if isinstance(expr.value, bool):
+                return TYPE_BOOL
+            return TYPE_INT
+        if isinstance(expr, ast.Name):
+            if self.current_func and hasattr(self.current_func, "local_vars") and expr.id in self.current_func.local_vars:
+                return self.current_func.local_vars[expr.id].var_type
+        if isinstance(expr, ast.Subscript):
+            if isinstance(expr.slice, ast.Slice):
+                val_type = self._infer_expr_type(expr.value)
+                if val_type.is_str():
+                    return TYPE_STR
+                return val_type
+        if isinstance(expr, ast.BinOp):
+            lt = self._infer_expr_type(expr.left)
+            rt = self._infer_expr_type(expr.right)
+            if lt.is_str() or rt.is_str():
+                return TYPE_STR
+            if lt.is_float() or rt.is_float():
+                return TYPE_FLOAT
+        return TYPE_INT
 
     def _generate_expr(self, expr: ast.expr) -> None:
         """Evaluates expr, placing 64-bit result in RAX."""
@@ -1112,6 +1228,49 @@ include 'functions.inc'
                 self.emit("movzx rax, al")
 
         elif isinstance(expr, ast.Subscript):
+            if isinstance(expr.slice, ast.Slice):
+                self._generate_expr(expr.value)
+                self.emit("push rax", "container pointer")
+
+                if expr.slice.lower:
+                    self._generate_expr(expr.slice.lower)
+                    self.emit("push rax", "lower")
+                else:
+                    self.emit("push 0", "lower = 0")
+
+                if expr.slice.upper:
+                    self._generate_expr(expr.slice.upper)
+                    self.emit("push rax", "upper")
+                else:
+                    self.emit("mov rax, -999999", "upper = None")
+                    self.emit("push rax")
+
+                if expr.slice.step:
+                    self._generate_expr(expr.slice.step)
+                    self.emit("push rax", "step")
+                else:
+                    self.emit("push 1", "step = 1")
+
+                self.emit("pop r9", "step")
+                self.emit("pop r8", "upper")
+                self.emit("pop rdx", "lower")
+                self.emit("pop rcx", "container")
+
+                is_list_target = False
+                val_t = self._infer_expr_type(expr.value)
+                if val_t.is_list() or val_t.is_tuple():
+                    is_list_target = True
+                elif isinstance(expr.value, ast.Name) and self.current_func:
+                    v = self.current_func.local_vars.get(expr.value.id)
+                    if v and (v.var_type.is_list() or v.var_type.is_tuple()):
+                        is_list_target = True
+
+                if is_list_target:
+                    self.emit("call _pyfasm_list_slice")
+                else:
+                    self.emit("call _pyfasm_str_slice")
+                return
+
             slice_unwrapped = _unwrap_slice(expr.slice)
             is_dict_val = False
             if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
@@ -1136,7 +1295,10 @@ include 'functions.inc'
                 self.emit("mov r11, rax")
                 self.emit("pop rax")
                 is_list_val = False
-                if isinstance(expr.value, ast.Name) and self.current_func:
+                val_t = self._infer_expr_type(expr.value)
+                if val_t.is_list() or val_t.is_tuple():
+                    is_list_val = True
+                elif isinstance(expr.value, ast.Name) and self.current_func:
                     v = self.current_func.local_vars.get(expr.value.id)
                     if v and (v.var_type.is_list() or v.var_type.is_tuple()):
                         is_list_val = True
@@ -1244,6 +1406,26 @@ include 'functions.inc'
         elif isinstance(op, ast.RShift):
             self.emit("mov rcx, r11")
             self.emit("sar rax, cl")
+        elif isinstance(op, ast.Pow):
+            lbl = self.new_label("pow")
+            self.emit("push rbx")
+            self.emit("push rcx")
+            self.emit("mov rbx, rax", "base")
+            self.emit("mov rcx, r11", "exp")
+            self.emit("mov rax, 1", "res = 1")
+            self.emit("test rcx, rcx")
+            self.emit(f"jle .done_{lbl}")
+            self.emit_raw(f".loop_{lbl}:")
+            self.emit("test rcx, 1")
+            self.emit(f"jz .sq_{lbl}")
+            self.emit("imul rax, rbx")
+            self.emit_raw(f".sq_{lbl}:")
+            self.emit("imul rbx, rbx")
+            self.emit("sar rcx, 1")
+            self.emit(f"jnz .loop_{lbl}")
+            self.emit_raw(f".done_{lbl}:")
+            self.emit("pop rcx")
+            self.emit("pop rbx")
 
     def _generate_call(self, call: ast.Call) -> None:
         # Handle super().method() calls (e.g. super().__init__()) without recursive self-call
@@ -1375,6 +1557,32 @@ include 'functions.inc'
                 self.emit("call _pyfasm_list_append")
                 return
 
+        # int(val) conversion / cast
+        if func_name == "int" and call.args:
+            arg_type = self._infer_expr_type(call.args[0])
+            self._generate_expr(call.args[0])
+            if arg_type.is_float():
+                self.emit("movq xmm0, rax")
+                self.emit("cvttsd2si rax, xmm0", "float to int cast")
+            return
+
+        # float(val) conversion / cast
+        if func_name == "float" and call.args:
+            arg_type = self._infer_expr_type(call.args[0])
+            self._generate_expr(call.args[0])
+            if not arg_type.is_float():
+                self.emit("cvtsi2sd xmm0, rax")
+                self.emit("movq rax, xmm0", "int to float cast")
+            return
+
+        # bool(val) conversion
+        if func_name == "bool" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("test rax, rax")
+            self.emit("setnz al")
+            self.emit("movzx rax, al", "to boolean 0 or 1")
+            return
+
         # str(val) conversion
         if func_name == "str" and call.args:
             self._generate_expr(call.args[0])
@@ -1430,6 +1638,48 @@ include 'functions.inc'
             self.emit("cmp rax, r11")
             self.emit("cmovl rax, r11", "max(a, b)")
             return
+
+        if func_name in ("sqrt", "math_sqrt") or (attr_name == "sqrt" and prefix in ("math", "")):
+            if call.args:
+                arg_type = self._infer_expr_type(call.args[0])
+                self._generate_expr(call.args[0])
+                if arg_type.is_float():
+                    self.emit("movq xmm0, rax")
+                    self.emit("sqrtsd xmm0, xmm0")
+                    self.emit("movq rax, xmm0", "return float sqrt")
+                else:
+                    self.emit("cvtsi2sd xmm0, rax")
+                    self.emit("sqrtsd xmm0, xmm0")
+                    self.emit("cvttsd2si rax, xmm0", "return integer sqrt")
+                return
+
+        if func_name in ("pow", "math_pow") or (attr_name == "pow" and prefix in ("math", "")):
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[0])
+                self.emit("push rax")
+                self._generate_expr(call.args[1])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                lbl = self.new_label("pow")
+                self.emit("push rbx")
+                self.emit("push rcx")
+                self.emit("mov rbx, rax", "base")
+                self.emit("mov rcx, r11", "exp")
+                self.emit("mov rax, 1", "res = 1")
+                self.emit("test rcx, rcx")
+                self.emit(f"jle .done_{lbl}")
+                self.emit_raw(f".loop_{lbl}:")
+                self.emit("test rcx, 1")
+                self.emit(f"jz .sq_{lbl}")
+                self.emit("imul rax, rbx")
+                self.emit_raw(f".sq_{lbl}:")
+                self.emit("imul rbx, rbx")
+                self.emit("sar rcx, 1")
+                self.emit(f"jnz .loop_{lbl}")
+                self.emit_raw(f".done_{lbl}:")
+                self.emit("pop rcx")
+                self.emit("pop rbx")
+                return
 
         # Check Win32 MessageBox call (e.g. ctypes.windll.user32.MessageBoxW / MessageBoxA)
         func_dump = ast.dump(call.func)
@@ -1622,23 +1872,45 @@ include 'functions.inc'
                 return
 
         # Built-in runtime calls
-        if func_name in ("print", "print_int", "print_str"):
-            if call.args:
-                first_arg = call.args[0]
-                is_str = False
-                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-                    is_str = True
-                elif isinstance(first_arg, ast.Name):
-                    var_sym = self.current_func.local_vars.get(first_arg.id) if self.current_func else None
-                    if var_sym and var_sym.var_type == TYPE_STR:
-                        is_str = True
-                self._generate_expr(first_arg)
-                self.emit("mov rcx, rax")
-                if is_str or func_name == "print_str":
-                    self.emit("call _pyfasm_print_str")
-                else:
-                    self.emit("call _pyfasm_print_int")
+        if func_name == "print":
+            if not call.args:
                 self.emit("call _pyfasm_print_newline")
+                return
+            for idx, arg in enumerate(call.args):
+                if idx > 0:
+                    self.emit("mov rcx, 32", "space ASCII separator")
+                    self.emit("call _pyfasm_print_char")
+                arg_type = self._infer_expr_type(arg)
+                self._generate_expr(arg)
+                if arg_type.is_str():
+                    self.emit("mov rcx, rax")
+                    self.emit("call _pyfasm_print_str")
+                elif arg_type.is_float():
+                    self.emit("movq xmm0, rax")
+                    self.emit("call _pyfasm_print_float")
+                else:
+                    self.emit("mov rcx, rax")
+                    self.emit("call _pyfasm_print_int")
+            self.emit("call _pyfasm_print_newline")
+            return
+
+        if func_name == "print_str":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_print_str")
+                self.emit("call _pyfasm_print_newline")
+            return
+
+        if func_name == "print_int":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("call _pyfasm_print_int")
+            return
+
+        if func_name == "print_newline":
+            self.emit("call _pyfasm_print_newline")
             return
 
         if func_name == "print_float":
@@ -1661,7 +1933,12 @@ include 'functions.inc'
                 arg0 = call.args[0]
                 is_list_or_tuple = False
                 is_dict_arg = False
-                if isinstance(arg0, ast.Name) and self.current_func:
+                arg0_type = self._infer_expr_type(arg0)
+                if arg0_type.is_list() or arg0_type.is_tuple():
+                    is_list_or_tuple = True
+                elif arg0_type.is_dict():
+                    is_dict_arg = True
+                elif isinstance(arg0, ast.Name) and self.current_func:
                     var = self.current_func.local_vars.get(arg0.id)
                     if var:
                         if var.var_type.is_list() or var.var_type.is_tuple():

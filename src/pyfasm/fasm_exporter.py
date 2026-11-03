@@ -59,7 +59,7 @@ class FasmExporter:
 
         # 1. Write the assembly source file
         asm_path = out_dir / f"{app_name}.asm"
-        asm_path.write_text(asm_content, encoding="ascii", errors="replace")
+        asm_path.write_text(asm_content, encoding="utf-8")
 
         # 2. Copy include headers
         tools_dir = cls.get_bundled_tools_dir()

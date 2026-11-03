@@ -107,7 +107,7 @@ class PyFasmCompiler:
         modular_files = codegen.generate_modular()
         for fname, content in modular_files.items():
             fpath = asm_dir / fname
-            fpath.write_text(content, encoding="ascii", errors="replace")
+            fpath.write_text(content, encoding="utf-8")
 
         main_asm_file = asm_dir / "main.asm"
 

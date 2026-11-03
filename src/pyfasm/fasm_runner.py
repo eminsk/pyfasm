@@ -309,7 +309,7 @@ class FasmRunner:
             asm_path = out_bin.with_suffix(".asm")
 
         asm_path.parent.mkdir(parents=True, exist_ok=True)
-        asm_path.write_text(asm_content, encoding="ascii", errors="replace")
+        asm_path.write_text(asm_content, encoding="utf-8")
 
         env = os.environ.copy()
         env["INCLUDE"] = self.include_path

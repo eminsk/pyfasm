@@ -20,7 +20,7 @@ include 'win64a.inc'
 """
 
 
-def get_win64_runtime_data() -> str:
+def _get_win64_full_runtime_data() -> str:
     """Returns runtime data structures (buffers, handles, constants)."""
     return """
 section '.data' data readable writeable
@@ -301,7 +301,7 @@ section '.data' data readable writeable
 """
 
 
-def get_win64_runtime_code() -> str:
+def _get_win64_full_runtime_code() -> str:
     """Returns native assembly routines with strict 16-byte stack alignment."""
     return """
 section '.text' code readable executable
@@ -4842,6 +4842,251 @@ _pyfasm_message_box:
     mov     rsp, rbp
     pop     rbp
     ret
+
+_pyfasm_str_slice:
+    ; RCX = str pointer, RDX = lower, R8 = upper, R9 = step
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .ss_null
+
+    mov     rsi, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    mov     r14, r9
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r15, rax
+
+    test    r14, r14
+    jnz     .check_step
+    mov     r14, 1
+.check_step:
+    cmp     r14, -1
+    jne     .fwd_slice
+
+    mov     rcx, r15
+    inc     rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     r10, rax
+
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .rev_done
+
+    lea     rbx, [rsi + r15 - 1]
+.rev_loop:
+    mov     al, [rbx]
+    mov     [rdi], al
+    inc     rdi
+    dec     rbx
+    dec     rcx
+    jnz     .rev_loop
+.rev_done:
+    mov     byte [rdi], 0
+    mov     rax, r10
+    jmp     .ss_exit
+
+.fwd_slice:
+    cmp     r12, 0
+    jge     .l_pos
+    add     r12, r15
+    cmp     r12, 0
+    jge     .l_pos
+    xor     r12, r12
+.l_pos:
+    cmp     r12, r15
+    jle     .l_clamp
+    mov     r12, r15
+.l_clamp:
+    cmp     r13, -999999
+    jne     .chk_u_neg
+    mov     r13, r15
+    jmp     .u_clamp
+.chk_u_neg:
+    cmp     r13, 0
+    jge     .u_pos
+    add     r13, r15
+    cmp     r13, 0
+    jge     .u_pos
+    xor     r13, r13
+.u_pos:
+    cmp     r13, r15
+    jle     .u_clamp
+    mov     r13, r15
+.u_clamp:
+    mov     rax, r13
+    sub     rax, r12
+    jge     .sl_ok
+    xor     eax, eax
+.sl_ok:
+    mov     rbx, rax
+
+    mov     rcx, rbx
+    inc     rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     r10, rax
+
+    test    rbx, rbx
+    jz      .copy_done
+    lea     rsi, [rsi + r12]
+    mov     rcx, rbx
+    rep     movsb
+.copy_done:
+    mov     byte [rdi], 0
+    mov     rax, r10
+    jmp     .ss_exit
+
+.ss_null:
+    xor     eax, eax
+.ss_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    ret
+
+_pyfasm_list_slice:
+    ; RCX = list pointer, RDX = lower, R8 = upper, R9 = step
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .ls_null
+
+    mov     rsi, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    mov     r14, r9
+
+    mov     r15, [rsi]
+
+    test    r14, r14
+    jnz     .l_check_step
+    mov     r14, 1
+.l_check_step:
+    cmp     r14, -1
+    jne     .l_fwd_slice
+
+    mov     rcx, r15
+    inc     rcx
+    shl     rcx, 3
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     [rdi], r15
+    mov     r10, rax
+
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .l_rev_done
+
+    lea     rbx, [rsi + r15 * 8]
+    lea     rdi, [rdi + 8]
+.l_rev_loop:
+    mov     rax, [rbx]
+    mov     [rdi], rax
+    add     rdi, 8
+    sub     rbx, 8
+    dec     rcx
+    jnz     .l_rev_loop
+.l_rev_done:
+    mov     rax, r10
+    jmp     .ls_exit
+
+.l_fwd_slice:
+    cmp     r12, 0
+    jge     .ll_pos
+    add     r12, r15
+    cmp     r12, 0
+    jge     .ll_pos
+    xor     r12, r12
+.ll_pos:
+    cmp     r12, r15
+    jle     .ll_clamp
+    mov     r12, r15
+.ll_clamp:
+    cmp     r13, -999999
+    jne     .l_chk_u_neg
+    mov     r13, r15
+    jmp     .ll_u_clamp
+.l_chk_u_neg:
+    cmp     r13, 0
+    jge     .ll_u_pos
+    add     r13, r15
+    cmp     r13, 0
+    jge     .ll_u_pos
+    xor     r13, r13
+.ll_u_pos:
+    cmp     r13, r15
+    jle     .ll_u_clamp
+    mov     r13, r15
+.ll_u_clamp:
+    mov     rax, r13
+    sub     rax, r12
+    jge     .l_sl_ok
+    xor     eax, eax
+.l_sl_ok:
+    mov     rbx, rax
+
+    mov     rcx, rbx
+    inc     rcx
+    shl     rcx, 3
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     [rdi], rbx
+    mov     r10, rax
+
+    test    rbx, rbx
+    jz      .l_copy_done
+    lea     rsi, [rsi + r12 * 8 + 8]
+    lea     rdi, [rdi + 8]
+    mov     rcx, rbx
+    rep     movsq
+.l_copy_done:
+    mov     rax, r10
+    jmp     .ls_exit
+
+.ls_null:
+    xor     eax, eax
+.ls_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    ret
+
 """
 
 
@@ -4871,7 +5116,7 @@ section '.edata' export data readable
 """
 
 
-def get_win64_runtime_imports() -> str:
+def _get_win64_full_runtime_imports() -> str:
     """Returns the IData section with Win32 API imports."""
     return """
 section '.idata' import data readable writeable
@@ -4981,3 +5226,1643 @@ section '.idata' import data readable writeable
            InternetReadFile, 'InternetReadFile', \\
            InternetCloseHandle, 'InternetCloseHandle'
 """
+
+
+from typing import Optional, Set
+
+_WIN64_CONSOLE_RUNTIME_DATA = """
+section '.data' data readable writeable
+    hStdOut         dq 0
+    hStdIn          dq 0
+    bytesWritten    dq 0
+    bytesRead       dq 0
+    crlf_str        db 13, 10, 0
+    minus_str       db '-', 0
+    dot_str         db '.', 0
+    flt_1m          dq 1000000.0
+    flt_zero        dq 0.0
+    align 8
+    _pyfasm_int_buf rb 32
+"""
+
+_WIN64_NET_RUNTIME_DATA = """
+    ; WinINet HTTP Client Data
+    _pyfasm_http_agent      db 'PyFASM-Native/1.0', 0
+    align 4
+    _pyfasm_http_read_bytes dd 0
+    align 8
+    _pyfasm_http_buf        rb 65536 ; 64KB HTTP response buffer
+    align 8
+    _pyfasm_strip_buf       rb 65536
+"""
+
+_WIN64_CONSOLE_RUNTIME_CODE = """section '.text' code readable executable
+
+_pyfasm_init_io:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     ecx, -11                ; STD_OUTPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdOut], rax
+    mov     ecx, -10                ; STD_INPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdIn], rax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_str:
+    ; RCX = pointer to null-terminated string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .done_print_str
+
+    ; Calculate length
+    xor     eax, eax
+    mov     rdi, rsi
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rbx, rcx                ; string length in rbx
+    test    rbx, rbx
+    jz      .done_print_str
+
+    ; WriteFile(hStdOut, rsi, rbx, &bytesWritten, NULL)
+    mov     rcx, [hStdOut]
+    mov     rdx, rsi
+    mov     r8, rbx
+    lea     r9, [rsp + 32]
+    mov     qword [rsp + 32], 0
+    sub     rsp, 16                 ; 5th parameter on stack
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+
+.done_print_str:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_print_newline:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    lea     rcx, [crlf_str]
+    call    _pyfasm_print_str
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_char:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    mov     byte [rsp + 40], cl
+    lea     rdx, [rsp + 40]
+    mov     rcx, [hStdOut]
+    mov     r8, 1
+    lea     r9, [rsp + 32]
+    mov     qword [rsp + 32], 0
+    sub     rsp, 16
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_len:
+    ; RCX = pointer to string
+    push    rdi
+    mov     rdi, rcx
+    xor     eax, eax
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rax, rcx
+    pop     rdi
+    ret
+
+_pyfasm_print_float:
+    ; XMM0 = double
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    ucomisd xmm0, [flt_zero]
+    jae     .flt_pos
+    movsd   [rsp + 32], xmm0
+    lea     rcx, [minus_str]
+    call    _pyfasm_print_str
+    movsd   xmm0, [rsp + 32]
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.flt_pos:
+    cvttsd2si rax, xmm0
+    mov     [rsp + 40], rax
+    mov     rcx, rax
+    call    _pyfasm_print_int
+    lea     rcx, [dot_str]
+    call    _pyfasm_print_str
+
+    cvtsi2sd xmm1, [rsp + 40]
+    subsd   xmm0, xmm1
+    mulsd   xmm0, [flt_1m]
+    cvttsd2si rax, xmm0
+    test    rax, rax
+    jns     .frac_ok
+    neg     rax
+.frac_ok:
+    mov     rcx, rax
+    call    _pyfasm_print_int
+
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_file_write:
+    ; RCX = filename, RDX = content string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 64
+    and     rsp, -16
+    mov     rsi, rdx
+    mov     rdx, 40000000h          ; GENERIC_WRITE
+    xor     r8d, r8d                ; share = 0
+    xor     r9d, r9d                ; security = NULL
+    mov     qword [rsp + 32], 2      ; CREATE_ALWAYS
+    mov     qword [rsp + 40], 80h    ; FILE_ATTRIBUTE_NORMAL
+    mov     qword [rsp + 48], 0      ; template = NULL
+    call    [CreateFileA]
+    cmp     rax, -1
+    je      .err_write
+    mov     rbx, rax
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r8, rax
+    mov     rcx, rbx
+    mov     rdx, rsi
+    lea     r9, [bytesWritten]
+    sub     rsp, 16
+    mov     qword [rsp + 32], 0
+    call    [WriteFile]
+    add     rsp, 16
+
+    mov     rcx, rbx
+    call    [CloseHandle]
+    mov     rax, 1
+    jmp     .done_write
+.err_write:
+    xor     eax, eax
+.done_write:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_str_concat:
+    ; RCX = str1, RDX = str2
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rsi, rcx
+    mov     rbx, rdx
+
+    ; Calculate len(str1)
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     [rsp + 32], rax                ; len1
+
+    ; Calculate len(str2)
+    mov     rcx, rbx
+    call    _pyfasm_str_len
+    mov     r8, rax                        ; len2
+
+    ; Allocate len1 + len2 + 1 bytes
+    mov     rax, [rsp + 32]
+    add     rax, r8
+    inc     rax                            ; +1 for null terminator
+    mov     rcx, rax
+    call    _pyfasm_alloc
+    mov     rdi, rax                       ; rdi = new buffer
+    mov     [rsp + 40], rax                ; save return pointer
+
+.copy_s1:
+    mov     al, [rsi]
+    mov     [rdi], al
+    test    al, al
+    jz      .copy_s2_init
+    inc     rsi
+    inc     rdi
+    jmp     .copy_s1
+
+.copy_s2_init:
+.copy_s2:
+    mov     al, [rbx]
+    mov     [rdi], al
+    test    al, al
+    jz      .concat_done
+    inc     rbx
+    inc     rdi
+    jmp     .copy_s2
+
+.concat_done:
+    mov     rax, [rsp + 40]
+    add     rsp, 48
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_cmp:
+    ; RCX = str1, RDX = str2
+    ; Returns RAX = 1 if equal, 0 if not equal
+    test    rcx, rcx
+    jz      .cmp_c_null
+    test    rdx, rdx
+    jz      .cmp_ne
+    cmp     rcx, rdx
+    je      .cmp_eq
+.cmp_loop:
+    mov     al, [rcx]
+    mov     ah, [rdx]
+    cmp     al, ah
+    jne     .cmp_ne
+    test    al, al
+    jz      .cmp_eq
+    inc     rcx
+    inc     rdx
+    jmp     .cmp_loop
+.cmp_c_null:
+    test    rdx, rdx
+    jz      .cmp_eq
+.cmp_ne:
+    xor     eax, eax
+    ret
+.cmp_eq:
+    mov     eax, 1
+    ret
+
+_pyfasm_str_contains:
+    ; RCX = haystack, RDX = needle
+    ; Returns 1 if needle in haystack, 0 otherwise
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+
+    mov     rsi, rcx
+    mov     rbx, rdx
+    test    rbx, rbx
+    jz      .sc_found
+    cmp     byte [rbx], 0
+    jz      .sc_found
+    test    rsi, rsi
+    jz      .sc_not_found
+
+.sc_outer:
+    mov     al, [rsi]
+    test    al, al
+    jz      .sc_not_found
+
+    mov     rdi, rsi
+    mov     rdx, rbx
+.sc_inner:
+    mov     cl, [rdx]
+    test    cl, cl
+    jz      .sc_found
+    cmp     cl, [rdi]
+    jne     .sc_advance
+    inc     rdi
+    inc     rdx
+    jmp     .sc_inner
+
+.sc_advance:
+    inc     rsi
+    jmp     .sc_outer
+
+.sc_found:
+    mov     rax, 1
+    jmp     .sc_ret
+
+.sc_not_found:
+    xor     rax, rax
+
+.sc_ret:
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_lower:
+    ; RCX = string
+    ; Returns RAX = new lowercase string in heap
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 32
+    and     rsp, -16
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .lower_empty
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     rbx, rax
+    inc     rax
+    mov     rcx, rax
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    push    rax
+
+.lower_loop:
+    mov     al, [rsi]
+    test    al, al
+    jz      .lower_done
+    cmp     al, 'A'
+    jb      .lower_store
+    cmp     al, 'Z'
+    ja      .lower_store
+    add     al, 32
+.lower_store:
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    jmp     .lower_loop
+
+.lower_done:
+    mov     byte [rdi], 0
+    pop     rax
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.lower_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_upper:
+    ; RCX = string
+    ; Returns RAX = new uppercase string in heap
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 32
+    and     rsp, -16
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .upper_empty
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     rbx, rax
+    inc     rax
+    mov     rcx, rax
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    push    rax
+
+.upper_loop:
+    mov     al, [rsi]
+    test    al, al
+    jz      .upper_done
+    cmp     al, 'a'
+    jb      .upper_store
+    cmp     al, 'z'
+    ja      .upper_store
+    sub     al, 32
+.upper_store:
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    jmp     .upper_loop
+
+.upper_done:
+    mov     byte [rdi], 0
+    pop     rax
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.upper_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_startswith:
+    ; RCX = str, RDX = prefix
+    ; Returns RAX = 1 if starts with prefix, 0 otherwise
+    test    rdx, rdx
+    jz      .sw_true
+    cmp     byte [rdx], 0
+    jz      .sw_true
+    test    rcx, rcx
+    jz      .sw_false
+.sw_loop:
+    mov     al, [rdx]
+    test    al, al
+    jz      .sw_true
+    cmp     al, [rcx]
+    jne     .sw_false
+    inc     rcx
+    inc     rdx
+    jmp     .sw_loop
+.sw_true:
+    mov     eax, 1
+    ret
+.sw_false:
+    xor     eax, eax
+    ret
+
+_pyfasm_str_endswith:
+    ; RCX = str, RDX = suffix
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 32
+    and     rsp, -16
+
+    mov     rsi, rcx
+    mov     rdi, rdx
+    test    rdi, rdi
+    jz      .ew_true
+    cmp     byte [rdi], 0
+    jz      .ew_true
+    test    rsi, rsi
+    jz      .ew_false
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     rbx, rax
+
+    mov     rcx, rdi
+    call    _pyfasm_str_len
+
+    cmp     rbx, rax
+    jl      .ew_false
+
+    sub     rbx, rax
+    add     rsi, rbx
+
+    mov     rcx, rsi
+    mov     rdx, rdi
+    call    _pyfasm_str_cmp
+    jmp     .ew_ret
+
+.ew_true:
+    mov     eax, 1
+    jmp     .ew_ret
+
+.ew_false:
+    xor     eax, eax
+
+.ew_ret:
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_strip:
+    ; RCX = string
+    ; Returns RAX = trimmed string in heap
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 32
+    and     rsp, -16
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .strip_empty
+
+.strip_leading:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .strip_empty
+    cmp     al, 32
+    ja      .strip_leading_done
+    inc     rsi
+    jmp     .strip_leading
+.strip_leading_done:
+
+    mov     rdi, rsi
+.strip_find_end:
+    cmp     byte [rdi], 0
+    jz      .strip_found_end
+    inc     rdi
+    jmp     .strip_find_end
+.strip_found_end:
+    dec     rdi
+
+.strip_trailing:
+    cmp     rdi, rsi
+    jb      .strip_empty
+    movzx   eax, byte [rdi]
+    cmp     al, 32
+    ja      .strip_trailing_done
+    dec     rdi
+    jmp     .strip_trailing
+.strip_trailing_done:
+
+    mov     rbx, rdi
+    sub     rbx, rsi
+    inc     rbx
+
+    lea     rcx, [rbx + 1]
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    push    rax
+
+    mov     rcx, rbx
+    rep     movsb
+    mov     byte [rdi], 0
+
+    pop     rax
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.strip_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    lea     rsp, [rbp - 24]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_create:
+    ; RCX = initial capacity (0 = default 16)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .cap_ok
+    mov     rcx, 16
+.cap_ok:
+    mov     rbx, rcx
+    lea     rax, [rbx + rbx * 2]
+    shl     rax, 3
+    add     rax, 16
+    mov     rcx, rax
+    call    _pyfasm_alloc
+    mov     [rax], rbx
+    mov     qword [rax + 8], 0
+    lea     rdi, [rax + 16]
+    lea     rcx, [rbx + rbx * 2]
+    shl     rcx, 1
+    push    rax
+    xor     eax, eax
+    rep     stosq
+    pop     rax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_hash:
+    ; RCX = null-terminated string
+    ; Returns RAX = 64-bit FNV-1a hash
+    mov     rax, 0CBF29CE484222325h
+    mov     rdx, 100000001B3h
+    test    rcx, rcx
+    jz      .hash_ret
+.hash_loop:
+    movzx   r8d, byte [rcx]
+    test    r8b, r8b
+    jz      .hash_done
+    xor     rax, r8
+    imul    rax, rdx
+    inc     rcx
+    jmp     .hash_loop
+.hash_done:
+    test    rax, rax
+    jnz     .hash_ret
+    mov     rax, 1
+.hash_ret:
+    ret
+
+_pyfasm_dict_set:
+    ; RCX = dict_ptr, RDX = key_str, R8 = val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dict_set_done
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_str_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+.dict_probe:
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .dict_slot_empty
+
+    cmp     rax, r13
+    jne     .dict_next_slot
+
+    push    rcx
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    pop     rcx
+    test    eax, eax
+    jnz     .dict_update_val
+
+.dict_next_slot:
+    inc     rdi
+    and     rdi, r14
+    jmp     .dict_probe
+
+.dict_slot_empty:
+    mov     [rcx], r13
+    mov     [rcx + 8], rsi
+    mov     [rcx + 16], r12
+    inc     qword [rbx + 8]
+    jmp     .dict_set_done
+
+.dict_update_val:
+    mov     [rcx + 16], r12
+
+.dict_set_done:
+    mov     rax, rbx
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_get:
+    ; RCX = dict_ptr, RDX = key_str, R8 = default_val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dict_get_default
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_str_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]
+    test    r14, r14
+    jz      .dict_get_default
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+    xor     r11, r11
+.dict_get_probe:
+    cmp     r11, [rbx]
+    jge     .dict_get_default
+
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .dict_get_default
+
+    cmp     rax, r13
+    jne     .dict_get_next
+
+    push    rcx
+    push    r11
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    pop     r11
+    pop     rcx
+    test    eax, eax
+    jnz     .dict_get_found
+
+.dict_get_next:
+    inc     rdi
+    and     rdi, r14
+    inc     r11
+    jmp     .dict_get_probe
+
+.dict_get_found:
+    mov     rax, [rcx + 16]
+    jmp     .dict_get_ret
+
+.dict_get_default:
+    mov     rax, r12
+
+.dict_get_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_contains:
+    ; RCX = dict_ptr, RDX = key_str
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     r8, -999999999
+    call    _pyfasm_dict_get
+    cmp     rax, -999999999
+    setne   al
+    movzx   rax, al
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_len:
+    test    rcx, rcx
+    jz      .dict_len_zero
+    mov     rax, [rcx + 8]
+    ret
+.dict_len_zero:
+    xor     eax, eax
+    ret
+
+_pyfasm_list_append:
+    test    rcx, rcx
+    jz      .la_ret
+    mov     rax, [rcx]
+    mov     [rcx + (rax + 1) * 8], rdx
+    inc     qword [rcx]
+.la_ret:
+    mov     rax, rcx
+    ret
+
+_pyfasm_int_to_str:
+    ; RCX = integer
+    ; Returns RAX = pointer to null-terminated string in _pyfasm_int_buf
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rdi
+
+    lea     rdi, [_pyfasm_int_buf + 30]
+    mov     byte [rdi + 1], 0
+    mov     rax, rcx
+
+    test    rax, rax
+    jnz     .its_check_neg
+    mov     byte [rdi], '0'
+    mov     rax, rdi
+    jmp     .its_done
+
+.its_check_neg:
+    xor     ebx, ebx
+    test    rax, rax
+    jns     .its_loop
+    mov     ebx, 1
+    neg     rax
+
+.its_loop:
+    test    rax, rax
+    jz      .its_finish
+    mov     r8, rax
+    mov     rdx, 0CCCCCCCCCCCCCCCDh
+    mul     rdx
+    shr     rdx, 3
+    lea     rcx, [rdx + rdx * 4]
+    shl     rcx, 1
+    sub     r8, rcx
+    add     r8b, '0'
+    mov     [rdi], r8b
+    dec     rdi
+    mov     rax, rdx
+    jmp     .its_loop
+
+.its_finish:
+    test    ebx, ebx
+    jz      .its_pos
+    mov     byte [rdi], '-'
+    dec     rdi
+.its_pos:
+    inc     rdi
+    mov     rax, rdi
+
+.its_done:
+    pop     rdi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_print_int:
+    ; RCX = signed 64-bit integer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
+    and     rsp, -16
+
+    mov     rax, rcx
+    test    rax, rax
+    jns     .positive
+
+    ; Negative number
+    push    rax
+    lea     rcx, [minus_str]
+    call    _pyfasm_print_str
+    pop     rax
+    neg     rax
+
+.positive:
+    lea     rdi, [rbp - 48]         ; end of temporary digit buffer
+    mov     byte [rdi], 0           ; null-terminator
+    mov     rsi, rax
+    mov     r9, 0CCCCCCCCCCCCCCCDh  ; reciprocal multiplier for fast division by 10 (from porth/Lemire)
+
+.digit_loop:
+    mov     rax, rsi
+    mul     r9                      ; rdx = (rsi * r9) >> 64
+    shr     rdx, 3                  ; rdx = quotient
+    lea     rcx, [rdx + rdx * 4]
+    add     rcx, rcx                ; rcx = quotient * 10
+    mov     rax, rsi
+    sub     rax, rcx                ; rax = remainder (0..9)
+    add     al, '0'
+    dec     rdi
+    mov     [rdi], al
+    mov     rsi, rdx                ; update quotient
+    test    rsi, rsi
+    jnz     .digit_loop
+
+    ; Print digits string
+    mov     rcx, rdi
+    call    _pyfasm_print_str
+
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_get_tick_count:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    [GetTickCount64]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_sleep_ms:
+    ; RCX = milliseconds
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    [Sleep]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_alloc_memory:
+    ; RCX = bytes to allocate
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rdx, rcx                ; dwSize = bytes
+    xor     ecx, ecx                ; lpAddress = NULL
+    mov     r8d, 3000h              ; MEM_COMMIT | MEM_RESERVE
+    mov     r9d, 04h                ; PAGE_READWRITE
+    call    [VirtualAlloc]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_free_memory:
+    ; RCX = pointer to memory
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    xor     edx, edx                ; dwSize = 0 (MUST be 0 for MEM_RELEASE)
+    mov     r8d, 8000h              ; MEM_RELEASE
+    call    [VirtualFree]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_spawn_thread:
+    ; RCX = thread function pointer, RDX = parameter
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48                 ; 32 bytes shadow + 16 bytes for 5th and 6th args
+    and     rsp, -16
+    mov     r8, rcx                 ; lpStartAddress = target function
+    mov     r9, rdx                 ; lpParameter = param
+    xor     ecx, ecx                ; lpThreadAttributes = NULL
+    xor     edx, edx                ; dwStackSize = 0
+    mov     qword [rsp + 32], 0     ; dwCreationFlags = 0
+    mov     qword [rsp + 40], 0     ; lpThreadId = NULL
+    call    [CreateThread]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_wait_thread:
+    ; RCX = thread handle
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rdx, -1                 ; INFINITE
+    call    [WaitForSingleObject]
+    mov     rcx, rbx
+    call    [CloseHandle]
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_atomic_add:
+    ; RCX = pointer to qword, RDX = value to add
+    lock add qword [rcx], rdx
+    mov     rax, [rcx]
+    ret
+
+_pyfasm_atomic_sub:
+    ; RCX = pointer to qword, RDX = value to subtract
+    lock sub qword [rcx], rdx
+    mov     rax, [rcx]
+    ret
+
+_pyfasm_alloc:
+    ; RCX = size in bytes
+    jmp     _pyfasm_alloc_memory
+
+_pyfasm_free:
+    ; RCX = pointer
+    jmp     _pyfasm_free_memory
+
+
+
+_pyfasm_str_slice:
+    ; RCX = str pointer, RDX = lower, R8 = upper, R9 = step
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .ss_null
+
+    mov     rsi, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    mov     r14, r9
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r15, rax
+
+    test    r14, r14
+    jnz     .check_step
+    mov     r14, 1
+.check_step:
+    cmp     r14, -1
+    jne     .fwd_slice
+
+    mov     rcx, r15
+    inc     rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     r10, rax
+
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .rev_done
+
+    lea     rbx, [rsi + r15 - 1]
+.rev_loop:
+    mov     al, [rbx]
+    mov     [rdi], al
+    inc     rdi
+    dec     rbx
+    dec     rcx
+    jnz     .rev_loop
+.rev_done:
+    mov     byte [rdi], 0
+    mov     rax, r10
+    jmp     .ss_exit
+
+.fwd_slice:
+    cmp     r12, 0
+    jge     .l_pos
+    add     r12, r15
+    cmp     r12, 0
+    jge     .l_pos
+    xor     r12, r12
+.l_pos:
+    cmp     r12, r15
+    jle     .l_clamp
+    mov     r12, r15
+.l_clamp:
+    cmp     r13, -999999
+    jne     .chk_u_neg
+    mov     r13, r15
+    jmp     .u_clamp
+.chk_u_neg:
+    cmp     r13, 0
+    jge     .u_pos
+    add     r13, r15
+    cmp     r13, 0
+    jge     .u_pos
+    xor     r13, r13
+.u_pos:
+    cmp     r13, r15
+    jle     .u_clamp
+    mov     r13, r15
+.u_clamp:
+    mov     rax, r13
+    sub     rax, r12
+    jge     .sl_ok
+    xor     eax, eax
+.sl_ok:
+    mov     rbx, rax
+
+    mov     rcx, rbx
+    inc     rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     r10, rax
+
+    test    rbx, rbx
+    jz      .copy_done
+    lea     rsi, [rsi + r12]
+    mov     rcx, rbx
+    rep     movsb
+.copy_done:
+    mov     byte [rdi], 0
+    mov     rax, r10
+    jmp     .ss_exit
+
+.ss_null:
+    xor     eax, eax
+.ss_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    ret
+
+_pyfasm_list_slice:
+    ; RCX = list pointer, RDX = lower, R8 = upper, R9 = step
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .ls_null
+
+    mov     rsi, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    mov     r14, r9
+
+    mov     r15, [rsi]
+
+    test    r14, r14
+    jnz     .l_check_step
+    mov     r14, 1
+.l_check_step:
+    cmp     r14, -1
+    jne     .l_fwd_slice
+
+    mov     rcx, r15
+    inc     rcx
+    shl     rcx, 3
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     [rdi], r15
+    mov     r10, rax
+
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .l_rev_done
+
+    lea     rbx, [rsi + r15 * 8]
+    lea     rdi, [rdi + 8]
+.l_rev_loop:
+    mov     rax, [rbx]
+    mov     [rdi], rax
+    add     rdi, 8
+    sub     rbx, 8
+    dec     rcx
+    jnz     .l_rev_loop
+.l_rev_done:
+    mov     rax, r10
+    jmp     .ls_exit
+
+.l_fwd_slice:
+    cmp     r12, 0
+    jge     .ll_pos
+    add     r12, r15
+    cmp     r12, 0
+    jge     .ll_pos
+    xor     r12, r12
+.ll_pos:
+    cmp     r12, r15
+    jle     .ll_clamp
+    mov     r12, r15
+.ll_clamp:
+    cmp     r13, -999999
+    jne     .l_chk_u_neg
+    mov     r13, r15
+    jmp     .ll_u_clamp
+.l_chk_u_neg:
+    cmp     r13, 0
+    jge     .ll_u_pos
+    add     r13, r15
+    cmp     r13, 0
+    jge     .ll_u_pos
+    xor     r13, r13
+.ll_u_pos:
+    cmp     r13, r15
+    jle     .ll_u_clamp
+    mov     r13, r15
+.ll_u_clamp:
+    mov     rax, r13
+    sub     rax, r12
+    jge     .l_sl_ok
+    xor     eax, eax
+.l_sl_ok:
+    mov     rbx, rax
+
+    mov     rcx, rbx
+    inc     rcx
+    shl     rcx, 3
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     [rdi], rbx
+    mov     r10, rax
+
+    test    rbx, rbx
+    jz      .l_copy_done
+    lea     rsi, [rsi + r12 * 8 + 8]
+    lea     rdi, [rdi + 8]
+    mov     rcx, rbx
+    rep     movsq
+.l_copy_done:
+    mov     rax, r10
+    jmp     .ls_exit
+
+.ls_null:
+    xor     eax, eax
+.ls_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    pop     rbp
+    ret
+"""
+
+_WIN64_NET_RUNTIME_CODE = """    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_strip_html:
+    ; RCX = pointer to input HTML string
+    ; Returns RAX = pointer to stripped plain text string (_pyfasm_strip_buf)
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+
+    mov     rsi, rcx
+    lea     rdi, [_pyfasm_strip_buf]
+    test    rsi, rsi
+    jz      .done_empty
+
+    xor     ebx, ebx                       ; ebx = in_tag flag (0 or 1)
+
+.scan_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .finish_scan
+
+    cmp     al, '<'
+    je      .enter_tag
+
+    cmp     al, '>'
+    je      .exit_tag
+
+    test    ebx, ebx
+    jnz     .skip_char                     ; inside <...>, skip byte
+
+    ; Check for HTML entity &...;
+    cmp     al, '&'
+    je      .check_entity
+
+    mov     [rdi], al
+    inc     rdi
+    inc     rsi
+    jmp     .scan_loop
+
+.enter_tag:
+    mov     ebx, 1
+    inc     rsi
+    jmp     .scan_loop
+
+.exit_tag:
+    xor     ebx, ebx
+    inc     rsi
+    jmp     .scan_loop
+
+.skip_char:
+    inc     rsi
+    jmp     .scan_loop
+
+.check_entity:
+    ; Check &quot; -> "
+    cmp     dword [rsi + 1], 'quot'
+    jne     .check_amp
+    cmp     byte [rsi + 5], ';'
+    jne     .check_amp
+    mov     byte [rdi], '"'
+    inc     rdi
+    add     rsi, 6
+    jmp     .scan_loop
+
+.check_amp:
+    cmp     dword [rsi + 1], 'amp;'
+    jne     .check_lt
+    mov     byte [rdi], '&'
+    inc     rdi
+    add     rsi, 5
+    jmp     .scan_loop
+
+.check_lt:
+    cmp     word [rsi + 1], 'lt'
+    jne     .check_gt
+    cmp     byte [rsi + 3], ';'
+    jne     .check_gt
+    mov     byte [rdi], '<'
+    inc     rdi
+    add     rsi, 4
+    jmp     .scan_loop
+
+.check_gt:
+    cmp     word [rsi + 1], 'gt'
+    jne     .check_apos
+    cmp     byte [rsi + 3], ';'
+    jne     .check_apos
+    mov     byte [rdi], '>'
+    inc     rdi
+    add     rsi, 4
+    jmp     .scan_loop
+
+.check_apos:
+    cmp     dword [rsi + 1], '#39;'
+    jne     .entity_default
+    mov     byte [rdi], "'"
+    inc     rdi
+    add     rsi, 5
+    jmp     .scan_loop
+
+.entity_default:
+    mov     [rdi], al
+    inc     rdi
+    inc     rsi
+    jmp     .scan_loop
+
+.finish_scan:
+    mov     byte [rdi], 0
+    lea     rax, [_pyfasm_strip_buf]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.done_empty:
+    mov     byte [_pyfasm_strip_buf], 0
+    lea     rax, [_pyfasm_strip_buf]
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_http_get:
+    ; RCX = pointer to URL string (e.g. "https://api.stackexchange.com/...")
+    ; Returns RAX = pointer to null-terminated response buffer (_pyfasm_http_buf)
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    sub     rsp, 64
+    and     rsp, -16
+
+    mov     rsi, rcx                       ; save URL in rsi
+
+    ; InternetOpenA
+    lea     rcx, [_pyfasm_http_agent]
+    mov     edx, 1                         ; INTERNET_OPEN_TYPE_DIRECT
+    xor     r8, r8                         ; proxy = NULL
+    xor     r9, r9                         ; proxy bypass = NULL
+    mov     qword [rsp + 32], 0            ; flags = 0
+    call    [InternetOpenA]
+    test    rax, rax
+    jz      .http_fail
+    mov     rbx, rax                       ; rbx = hInternet
+
+    ; InternetOpenUrlA
+    mov     rcx, rbx
+    mov     rdx, rsi                       ; lpszUrl
+    xor     r8, r8                         ; headers = NULL
+    xor     r9, r9                         ; headers length = 0
+    mov     rax, 84000100h                 ; INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE
+    mov     [rsp + 32], rax
+    mov     qword [rsp + 40], 0            ; dwContext = 0
+    call    [InternetOpenUrlA]
+    test    rax, rax
+    jz      .http_close_session
+    mov     rsi, rax                       ; rsi = hFile / hUrl
+
+    ; InternetReadFile
+    mov     rcx, rsi
+    lea     rdx, [_pyfasm_http_buf]
+    mov     r8d, 65535                    ; max bytes to read
+    lea     r9, [_pyfasm_http_read_bytes]
+    call    [InternetReadFile]
+
+    ; Null-terminate response
+    mov     eax, [_pyfasm_http_read_bytes]
+    mov     byte [_pyfasm_http_buf + rax], 0
+
+    ; Close hUrl
+    mov     rcx, rsi
+    call    [InternetCloseHandle]
+
+    ; Close hInternet
+    mov     rcx, rbx
+    call    [InternetCloseHandle]
+
+    lea     rax, [_pyfasm_http_buf]
+    add     rsp, 64
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+.http_close_session:
+    mov     rcx, rbx
+    call    [InternetCloseHandle]
+
+.http_fail:
+    mov     byte [_pyfasm_http_buf], 0
+    lea     rax, [_pyfasm_http_buf]
+    add     rsp, 64
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+"""
+
+_WIN64_CONSOLE_RUNTIME_IMPORTS = """
+section '.idata' import data readable writeable
+    library kernel32, 'KERNEL32.DLL'
+
+    import kernel32, \
+           GetStdHandle, 'GetStdHandle', \
+           WriteFile, 'WriteFile', \
+           ReadFile, 'ReadFile', \
+           CreateFileA, 'CreateFileA', \
+           GetTickCount64, 'GetTickCount64', \
+           Sleep, 'Sleep', \
+           VirtualAlloc, 'VirtualAlloc', \
+           VirtualFree, 'VirtualFree', \
+           CreateThread, 'CreateThread', \
+           WaitForSingleObject, 'WaitForSingleObject', \
+           CloseHandle, 'CloseHandle', \
+           GetModuleHandleA, 'GetModuleHandleA', \
+           MultiByteToWideChar, 'MultiByteToWideChar', \
+           WideCharToMultiByte, 'WideCharToMultiByte', \
+           GetCurrentThreadId, 'GetCurrentThreadId', \
+           ExitProcess, 'ExitProcess'
+"""
+
+_WIN64_NET_RUNTIME_IMPORTS = """
+section '.idata' import data readable writeable
+    library kernel32, 'KERNEL32.DLL', \
+            wininet, 'WININET.DLL'
+
+    import kernel32, \
+           GetStdHandle, 'GetStdHandle', \
+           WriteFile, 'WriteFile', \
+           ReadFile, 'ReadFile', \
+           CreateFileA, 'CreateFileA', \
+           GetTickCount64, 'GetTickCount64', \
+           Sleep, 'Sleep', \
+           VirtualAlloc, 'VirtualAlloc', \
+           VirtualFree, 'VirtualFree', \
+           CreateThread, 'CreateThread', \
+           WaitForSingleObject, 'WaitForSingleObject', \
+           CloseHandle, 'CloseHandle', \
+           GetModuleHandleA, 'GetModuleHandleA', \
+           MultiByteToWideChar, 'MultiByteToWideChar', \
+           WideCharToMultiByte, 'WideCharToMultiByte', \
+           GetCurrentThreadId, 'GetCurrentThreadId', \
+           ExitProcess, 'ExitProcess'
+
+    import wininet, \
+           InternetOpenA, 'InternetOpenA', \
+           InternetOpenUrlA, 'InternetOpenUrlA', \
+           InternetReadFile, 'InternetReadFile', \
+           InternetCloseHandle, 'InternetCloseHandle'
+"""
+
+
+def get_win64_runtime_data(features: Optional[Set[str]] = None) -> str:
+    """Returns runtime data structures (buffers, handles, constants)."""
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_net = features is None or "net" in features
+    if not needs_gui:
+        if needs_net:
+            return _WIN64_CONSOLE_RUNTIME_DATA + "\n" + _WIN64_NET_RUNTIME_DATA
+        return _WIN64_CONSOLE_RUNTIME_DATA
+    return _get_win64_full_runtime_data()
+
+
+def get_win64_runtime_code(features: Optional[Set[str]] = None) -> str:
+    """Returns native assembly routines with strict 16-byte stack alignment."""
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_net = features is None or "net" in features
+    if not needs_gui:
+        if needs_net:
+            return _WIN64_CONSOLE_RUNTIME_CODE + "\n" + _WIN64_NET_RUNTIME_CODE
+        return _WIN64_CONSOLE_RUNTIME_CODE
+    return _get_win64_full_runtime_code()
+
+
+def get_win64_runtime_imports(features: Optional[Set[str]] = None) -> str:
+    """Returns the IData section with Win32 API imports."""
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_net = features is None or "net" in features
+    if not needs_gui:
+        if needs_net:
+            return _WIN64_NET_RUNTIME_IMPORTS
+        return _WIN64_CONSOLE_RUNTIME_IMPORTS
+    return _get_win64_full_runtime_imports()
