@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import List, Dict, Optional, Tuple, Set
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral
-from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR
+from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
     # Registers
@@ -367,6 +367,10 @@ class X64CodeGen:
         for flit in self.module.float_literals:
             lines.append(f"    {flit.label} dq {flit.value}")
 
+        # Emit global variables
+        for gname, gval in self.module.global_vars.items():
+            lines.append(f"    _pyfasm_global_{gname} dq {gval}")
+
         return "\n".join(lines)
 
     def _get_runtime_code(self) -> str:
@@ -719,26 +723,101 @@ include 'functions.inc'
             # Target = Expr
             if len(stmt.targets) == 1 and isinstance(stmt.targets[0], (ast.Tuple, ast.List)):
                 target_tup = stmt.targets[0]
-                if isinstance(stmt.value, (ast.Tuple, ast.List)) and len(stmt.value.elts) == len(target_tup.elts):
+                has_starred = any(isinstance(elt, ast.Starred) for elt in target_tup.elts)
+                if not has_starred and isinstance(stmt.value, (ast.Tuple, ast.List)) and len(stmt.value.elts) == len(target_tup.elts):
                     for val_elt in stmt.value.elts:
                         self._generate_expr(val_elt)
                         self.emit("push rax", "save unpacked RHS elt")
                     for tgt_elt in reversed(target_tup.elts):
                         self.emit("pop rax", "restore for target elt")
-                        if isinstance(tgt_elt, ast.Name) and self.current_func:
-                            var = self.current_func.local_vars.get(tgt_elt.id)
+                        if isinstance(tgt_elt, ast.Name):
+                            var = self.current_func.local_vars.get(tgt_elt.id) if self.current_func else None
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                            elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
+                                self.emit(f"mov [_pyfasm_global_{tgt_elt.id}], rax", f"store global {tgt_elt.id}")
+                    return
+                elif has_starred:
+                    star_idx = next(i for i, elt in enumerate(target_tup.elts) if isinstance(elt, ast.Starred))
+                    starred_target = target_tup.elts[star_idx].value
+                    prefix_targets = target_tup.elts[:star_idx]
+                    suffix_targets = target_tup.elts[star_idx + 1:]
+                    n_prefix = len(prefix_targets)
+                    n_suffix = len(suffix_targets)
+
+                    self._generate_expr(stmt.value)
+                    self.emit("mov rbx, rax", "sequence base pointer")
+                    self.emit("push rbx", "save seq ptr")
+
+                    for idx, tgt in enumerate(prefix_targets):
+                        self.emit(f"mov rax, [rbx + {(idx + 1) * 8}]", f"load prefix {idx}")
+                        if isinstance(tgt, ast.Name):
+                            var = self.current_func.local_vars.get(tgt.id) if self.current_func else None
+                            if var:
+                                self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                            elif (self.current_func and hasattr(self.current_func, "global_names") and tgt.id in self.current_func.global_names) or (tgt.id in self.module.global_vars):
+                                self.emit(f"mov [_pyfasm_global_{tgt.id}], rax", f"store global {tgt.id}")
+
+                    for idx, tgt in enumerate(suffix_targets):
+                        offset_from_end = n_suffix - idx
+                        self.emit("mov r10, [rbx]", "seq len")
+                        self.emit(f"sub r10, {offset_from_end}")
+                        self.emit("mov rax, [rbx + r10 * 8 + 8]", f"load suffix {idx}")
+                        if isinstance(tgt, ast.Name):
+                            var = self.current_func.local_vars.get(tgt.id) if self.current_func else None
+                            if var:
+                                self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                            elif (self.current_func and hasattr(self.current_func, "global_names") and tgt.id in self.current_func.global_names) or (tgt.id in self.module.global_vars):
+                                self.emit(f"mov [_pyfasm_global_{tgt.id}], rax", f"store global {tgt.id}")
+
+                    lbl_star_ok = self.new_label("star_len_ok")
+                    lbl_star_done = self.new_label("star_done")
+                    self.emit("mov r10, [rbx]", "seq len")
+                    self.emit(f"sub r10, {n_prefix + n_suffix}", "star slice len")
+                    self.emit("cmp r10, 0")
+                    self.emit(f"jge {lbl_star_ok}")
+                    self.emit("xor r10, r10")
+                    self.emit_raw(f"{lbl_star_ok}:")
+                    self.emit("mov r12, r10", "star slice len")
+                    self.emit("lea rcx, [r12 * 8 + 16]", "bytes to allocate")
+                    self.emit("call _pyfasm_alloc")
+                    self.emit("mov [rax], r12", "store star slice length")
+                    self.emit("push rax", "save star list ptr")
+
+                    self.emit("xor r11, r11", "copy index = 0")
+                    lbl_copy_loop = self.new_label("star_copy_loop")
+                    self.emit_raw(f"{lbl_copy_loop}:")
+                    self.emit("cmp r11, r12")
+                    self.emit(f"jge {lbl_star_done}")
+                    self.emit("mov rbx, [rsp + 8]", "restore seq ptr")
+                    self.emit(f"lea rdx, [r11 + {n_prefix + 1}]")
+                    self.emit("mov rax, [rbx + rdx * 8]", "source element")
+                    self.emit("mov rdi, [rsp]", "star list ptr")
+                    self.emit("mov [rdi + r11 * 8 + 8], rax", "dest element")
+                    self.emit("inc r11")
+                    self.emit(f"jmp {lbl_copy_loop}")
+                    self.emit_raw(f"{lbl_star_done}:")
+                    self.emit("pop rax", "star list ptr")
+                    self.emit("pop rbx", "cleanup seq ptr")
+
+                    if isinstance(starred_target, ast.Name):
+                        var = self.current_func.local_vars.get(starred_target.id) if self.current_func else None
+                        if var:
+                            self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                        elif (self.current_func and hasattr(self.current_func, "global_names") and starred_target.id in self.current_func.global_names) or (starred_target.id in self.module.global_vars):
+                            self.emit(f"mov [_pyfasm_global_{starred_target.id}], rax", f"store global {starred_target.id}")
                     return
                 else:
                     self._generate_expr(stmt.value)
                     self.emit("mov rbx, rax", "base pointer of tuple/list")
                     for idx, tgt_elt in enumerate(target_tup.elts):
                         self.emit(f"mov rax, [rbx + {(idx + 1) * 8}]", f"load element {idx}")
-                        if isinstance(tgt_elt, ast.Name) and self.current_func:
-                            var = self.current_func.local_vars.get(tgt_elt.id)
+                        if isinstance(tgt_elt, ast.Name):
+                            var = self.current_func.local_vars.get(tgt_elt.id) if self.current_func else None
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                            elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
+                                self.emit(f"mov [_pyfasm_global_{tgt_elt.id}], rax", f"store global {tgt_elt.id}")
                     return
 
             self._generate_expr(stmt.value)  # result in RAX
@@ -750,9 +829,11 @@ include 'functions.inc'
                             self.local_var_classes[target.id] = func_id
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
-                    var = self.current_func.local_vars.get(target.id)
+                    var = self.current_func.local_vars.get(target.id) if self.current_func else None
                     if var:
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                    elif (self.current_func and hasattr(self.current_func, "global_names") and target.id in self.current_func.global_names) or (target.id in self.module.global_vars):
+                        self.emit(f"mov [_pyfasm_global_{target.id}], rax", f"store global {target.id}")
                 elif isinstance(target, ast.Subscript):
                     slice_unwrapped = _unwrap_slice(target.slice)
                     is_dict_target = False
@@ -815,7 +896,8 @@ include 'functions.inc'
         elif isinstance(stmt, ast.AugAssign):
             # Target += Expr
             if isinstance(stmt.target, ast.Name):
-                var = self.current_func.local_vars.get(stmt.target.id)
+                var = self.current_func.local_vars.get(stmt.target.id) if self.current_func else None
+                is_global = (self.current_func and hasattr(self.current_func, "global_names") and stmt.target.id in self.current_func.global_names) or (stmt.target.id in self.module.global_vars)
                 if var:
                     if var.var_type.is_str() and isinstance(stmt.op, ast.Add):
                         self.emit(f"mov rcx, [rbp - {var.stack_offset}]", f"load {var.name}")
@@ -833,6 +915,14 @@ include 'functions.inc'
                         self.emit("pop rax")
                         self._generate_binop_instr(stmt.op)
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
+                elif is_global:
+                    self.emit(f"mov rax, [_pyfasm_global_{stmt.target.id}]", f"load global {stmt.target.id}")
+                    self.emit("push rax")
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax")
+                    self.emit("pop rax")
+                    self._generate_binop_instr(stmt.op)
+                    self.emit(f"mov [_pyfasm_global_{stmt.target.id}], rax", f"update global {stmt.target.id}")
             elif isinstance(stmt.target, ast.Subscript):
                 slice_unwrapped = _unwrap_slice(stmt.target.slice)
                 is_list_target = False
@@ -1025,8 +1115,11 @@ include 'functions.inc'
                     if var:
                         self.emit(f"mov qword [rbp - {var.stack_offset}], 0", f"del {var.name}")
 
+        elif isinstance(stmt, ast.Match):
+            self._generate_match(stmt)
+
     def _generate_for_container(self, stmt: ast.For) -> None:
-        target_var = self.current_func.local_vars.get(stmt.target.id)
+        target_var = self.current_func.local_vars.get(stmt.target.id) if self.current_func else None
         if not target_var:
             return
 
@@ -1039,6 +1132,16 @@ include 'functions.inc'
         self.emit("test rax, rax", "check null container")
         self.emit(f"jz {lbl_null}")
 
+        is_hash_table = False
+        if isinstance(stmt.iter, ast.Name) and self.current_func:
+            var_sym = self.current_func.local_vars.get(stmt.iter.id)
+            if var_sym and (var_sym.var_type.is_set() or var_sym.var_type.is_dict()):
+                is_hash_table = True
+        else:
+            iter_t = self._infer_expr_type(stmt.iter)
+            if iter_t.is_set() or iter_t.is_dict():
+                is_hash_table = True
+
         self.emit("push rax", "container ptr")
         self.emit("push 0", "current index = 0")
         self.loop_stack.append((lbl_step, lbl_end))
@@ -1046,12 +1149,24 @@ include 'functions.inc'
         self.emit_raw(f"{lbl_start}:")
         self.emit("mov rcx, [rsp]", "current index")
         self.emit("mov rbx, [rsp + 8]", "container ptr")
-        self.emit("mov rdx, [rbx]", "container length")
+        self.emit("mov rdx, [rbx]", "container capacity / length")
         self.emit("cmp rcx, rdx")
         self.emit(f"jge {lbl_end}")
 
-        self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[index]")
-        self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+        if is_hash_table:
+            self.emit("lea rax, [rcx + rcx * 2]")
+            self.emit("shl rax, 3")
+            self.emit("lea r8, [rbx + 16 + rax]", "slot ptr")
+            self.emit("mov rax, [r8]", "slot hash")
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_step}", "skip empty slot")
+            self.emit("cmp rax, -1")
+            self.emit(f"je {lbl_step}", "skip tombstone slot")
+            self.emit("mov rax, [r8 + 8]", "load key from slot")
+            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+        else:
+            self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[index]")
+            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
 
         for s in stmt.body:
             self._generate_statement(s)
@@ -1152,6 +1267,8 @@ include 'functions.inc'
             return TYPE_BOOL
         if isinstance(expr, (ast.Dict, ast.DictComp)):
             return TYPE_DICT
+        if isinstance(expr, (ast.Set, ast.SetComp)):
+            return TYPE_SET
         if isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
         if isinstance(expr, ast.Subscript):
@@ -1210,9 +1327,11 @@ include 'functions.inc'
             elif expr.id == "None":
                 self.emit("xor eax, eax")
                 return
-            var = self.current_func.local_vars.get(expr.id)
+            var = self.current_func.local_vars.get(expr.id) if self.current_func else None
             if var:
                 self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
+            elif (self.current_func and hasattr(self.current_func, "global_names") and expr.id in self.current_func.global_names) or (expr.id in self.module.global_vars):
+                self.emit(f"mov rax, [_pyfasm_global_{expr.id}]", f"load global {expr.id}")
             elif expr.id in self.module.functions:
                 safe_fn = safe_asm_label(expr.id)
                 self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
@@ -1328,37 +1447,33 @@ include 'functions.inc'
 
         elif isinstance(expr, ast.Compare):
             op = expr.ops[0]
-            if isinstance(op, ast.In):
+            if isinstance(op, (ast.In, ast.NotIn)):
                 self._generate_expr(expr.comparators[0])
                 self.emit("push rax")
                 self._generate_expr(expr.left)
                 self.emit("mov rdx, rax", "needle / item")
                 self.emit("pop rcx", "container")
-                is_dict_target = False
-                if isinstance(expr.comparators[0], ast.Name) and self.current_func:
+                target_kind = "str"
+                comp_type = self._infer_expr_type(expr.comparators[0])
+                if comp_type.is_dict() or comp_type.is_set():
+                    target_kind = "dict"
+                elif comp_type.is_list() or comp_type.is_tuple():
+                    target_kind = "list"
+                elif isinstance(expr.comparators[0], ast.Name) and self.current_func:
                     sym = self.current_func.local_vars.get(expr.comparators[0].id)
-                    if sym and sym.var_type.is_dict():
-                        is_dict_target = True
-                if is_dict_target:
+                    if sym:
+                        if sym.var_type.is_dict() or sym.var_type.is_set():
+                            target_kind = "dict"
+                        elif sym.var_type.is_list() or sym.var_type.is_tuple():
+                            target_kind = "list"
+                if target_kind == "dict":
                     self.emit("call _pyfasm_dict_contains")
+                elif target_kind == "list":
+                    self.emit("call _pyfasm_list_contains")
                 else:
                     self.emit("call _pyfasm_str_contains")
-            elif isinstance(op, ast.NotIn):
-                self._generate_expr(expr.comparators[0])
-                self.emit("push rax")
-                self._generate_expr(expr.left)
-                self.emit("mov rdx, rax")
-                self.emit("pop rcx")
-                is_dict_target = False
-                if isinstance(expr.comparators[0], ast.Name) and self.current_func:
-                    sym = self.current_func.local_vars.get(expr.comparators[0].id)
-                    if sym and sym.var_type.is_dict():
-                        is_dict_target = True
-                if is_dict_target:
-                    self.emit("call _pyfasm_dict_contains")
-                else:
-                    self.emit("call _pyfasm_str_contains")
-                self.emit("xor rax, 1")
+                if isinstance(op, ast.NotIn):
+                    self.emit("xor rax, 1")
             elif isinstance(op, ast.Is):
                 self._generate_expr(expr.left)
                 self.emit("push rax")
@@ -1553,6 +1668,22 @@ include 'functions.inc'
 
         elif isinstance(expr, ast.DictComp):
             self._generate_dict_comprehension(expr)
+
+        elif isinstance(expr, ast.Set):
+            num_elts = len(expr.elts)
+            cap = max(16, num_elts * 2)
+            self.emit(f"mov ecx, {cap}", "allocate set")
+            self.emit("call _pyfasm_set_create")
+            self.emit("push rax", "save set_ptr")
+            for elt in expr.elts:
+                self._generate_expr(elt)
+                self.emit("mov rdx, rax", "item")
+                self.emit("mov rcx, [rsp]", "set_ptr")
+                self.emit("call _pyfasm_set_add")
+            self.emit("pop rax", "return set_ptr")
+
+        elif isinstance(expr, ast.SetComp):
+            self._generate_set_comprehension(expr)
 
         elif isinstance(expr, ast.Call):
             self._generate_call(expr)
@@ -1786,6 +1917,185 @@ include 'functions.inc'
 
         self.emit("pop rax", "return dict_ptr in RAX")
 
+    def _generate_set_comprehension(self, node: ast.SetComp) -> None:
+        self.emit("mov ecx, 32", "initial set capacity")
+        self.emit("call _pyfasm_set_create")
+        self.emit("push rax", "save set_ptr on stack")
+
+        for gen in node.generators:
+            target_var = self.current_func.local_vars.get(gen.target.id) if isinstance(gen.target, ast.Name) and self.current_func else None
+            if isinstance(gen.iter, ast.Call) and isinstance(gen.iter.func, ast.Name) and gen.iter.func.id == "range":
+                args = gen.iter.args
+                start_expr = None
+                stop_expr = None
+                step_val = 1
+                if len(args) == 1:
+                    stop_expr = args[0]
+                elif len(args) >= 2:
+                    start_expr = args[0]
+                    stop_expr = args[1]
+                    if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
+                        step_val = args[2].value
+
+                if start_expr:
+                    self._generate_expr(start_expr)
+                else:
+                    self.emit("xor eax, eax")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"init comp {target_var.name}")
+
+                lbl_start = self.new_label("setcomp_range_start")
+                lbl_step = self.new_label("setcomp_range_step")
+                lbl_end = self.new_label("setcomp_range_end")
+
+                self.emit_raw(f"{lbl_start}:")
+                if target_var:
+                    self.emit(f"mov rax, [rbp - {target_var.stack_offset}]")
+                else:
+                    self.emit("xor eax, eax")
+                self.emit("push rax")
+                if stop_expr:
+                    self._generate_expr(stop_expr)
+                else:
+                    self.emit("xor eax, eax")
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                if step_val > 0:
+                    self.emit(f"jge {lbl_end}")
+                else:
+                    self.emit(f"jle {lbl_end}")
+
+                lbl_skip = self.new_label("setcomp_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.elt)
+                self.emit("mov rdx, rax", "item")
+                self.emit("mov rcx, [rsp]", "set_ptr on stack")
+                self.emit("call _pyfasm_set_add")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                if target_var:
+                    if step_val == 1:
+                        self.emit(f"inc qword [rbp - {target_var.stack_offset}]")
+                    else:
+                        self.emit(f"add qword [rbp - {target_var.stack_offset}], {step_val}")
+                self.emit(f"jmp {lbl_start}")
+                self.emit_raw(f"{lbl_end}:")
+
+            else:
+                self._generate_expr(gen.iter)
+                lbl_null = self.new_label("setcomp_null")
+                lbl_start = self.new_label("setcomp_start")
+                lbl_step = self.new_label("setcomp_step")
+                lbl_end = self.new_label("setcomp_end")
+
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_null}")
+                self.emit("push rax", "container")
+                self.emit("push 0", "idx = 0")
+
+                self.emit_raw(f"{lbl_start}:")
+                self.emit("mov rcx, [rsp]", "idx")
+                self.emit("mov rbx, [rsp + 8]", "container")
+                self.emit("cmp rcx, [rbx]")
+                self.emit(f"jge {lbl_end}")
+
+                self.emit("mov rax, [rbx + rcx * 8 + 8]")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+
+                lbl_skip = self.new_label("setcomp_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.elt)
+                self.emit("mov rdx, rax", "item")
+                self.emit("mov rcx, [rsp + 16]", "set_ptr on stack")
+                self.emit("call _pyfasm_set_add")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                self.emit("inc qword [rsp]")
+                self.emit(f"jmp {lbl_start}")
+
+                self.emit_raw(f"{lbl_end}:")
+                self.emit("add rsp, 16", "cleanup container & idx")
+                self.emit_raw(f"{lbl_null}:")
+
+        self.emit("pop rax", "return set_ptr in RAX")
+
+    def _generate_match(self, stmt: ast.Match) -> None:
+        self._generate_expr(stmt.subject)
+        self.emit("push rax", "save match subject on stack")
+        lbl_match_end = self.new_label("match_end")
+
+        for idx, case in enumerate(stmt.cases):
+            lbl_next_case = self.new_label(f"case_next_{idx}")
+            lbl_case_body = self.new_label(f"case_body_{idx}")
+
+            self._generate_case_pattern_test(case.pattern, lbl_case_body, lbl_next_case)
+
+            self.emit_raw(f"{lbl_case_body}:")
+            if case.guard:
+                self._generate_expr(case.guard)
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_next_case}", "case guard failed")
+
+            for s in case.body:
+                self._generate_statement(s)
+            self.emit(f"jmp {lbl_match_end}")
+
+            self.emit_raw(f"{lbl_next_case}:")
+
+        self.emit_raw(f"{lbl_match_end}:")
+        self.emit("add rsp, 8", "cleanup match subject from stack")
+
+    def _generate_case_pattern_test(self, pattern: ast.pattern, lbl_success: str, lbl_failure: str) -> None:
+        if isinstance(pattern, ast.MatchValue):
+            self._generate_expr(pattern.value)
+            self.emit("mov rdx, rax")
+            self.emit("mov rcx, [rsp]", "subject")
+            self.emit("cmp rcx, rdx")
+            self.emit(f"je {lbl_success}")
+            self.emit("cmp rcx, 65536")
+            self.emit(f"jb {lbl_failure}")
+            self.emit("cmp rdx, 65536")
+            self.emit(f"jb {lbl_failure}")
+            self.emit("call _pyfasm_str_cmp")
+            self.emit("test eax, eax")
+            self.emit(f"jnz {lbl_success}")
+            self.emit(f"jmp {lbl_failure}")
+
+        elif isinstance(pattern, ast.MatchAs):
+            if pattern.name is None or pattern.name == "_":
+                self.emit(f"jmp {lbl_success}")
+            else:
+                self.emit("mov rax, [rsp]", "subject")
+                if self.current_func:
+                    var = self.current_func.local_vars.get(pattern.name)
+                    if var:
+                        self.emit(f"mov [rbp - {var.stack_offset}], rax", f"capture {pattern.name}")
+                    elif hasattr(self.current_func, "global_names") and pattern.name in self.current_func.global_names:
+                        self.emit(f"mov [_pyfasm_global_{pattern.name}], rax", f"capture global {pattern.name}")
+                self.emit(f"jmp {lbl_success}")
+
+        elif isinstance(pattern, ast.MatchOr):
+            for subpat in pattern.patterns:
+                sub_next = self.new_label("or_next")
+                self._generate_case_pattern_test(subpat, lbl_success, sub_next)
+                self.emit_raw(f"{sub_next}:")
+            self.emit(f"jmp {lbl_failure}")
+
+        else:
+            self.emit(f"jmp {lbl_success}")
+
     def _generate_binop_instr(self, op: ast.operator) -> None:
         if isinstance(op, ast.Add):
             self.emit("add rax, r11")
@@ -1981,6 +2291,34 @@ include 'functions.inc'
                 self.emit("mov rdx, rax", "item to append")
                 self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
                 self.emit("call _pyfasm_list_append")
+                return
+
+        # Set add
+        if attr_name == "add" and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var and (var.var_type.is_set() or var.var_type.is_dict()):
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "item to add")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "set_ptr")
+                self.emit("call _pyfasm_set_add")
+                return
+
+        # Set/Dict remove & discard
+        if attr_name in ("remove", "discard") and call.args and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var and (var.var_type.is_set() or var.var_type.is_dict()):
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "item to remove")
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "set_ptr")
+                self.emit("call _pyfasm_set_remove")
+                return
+
+        # List pop
+        if attr_name == "pop" and prefix and self.current_func:
+            var = self.current_func.local_vars.get(prefix)
+            if var and var.var_type.is_list():
+                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
+                self.emit("call _pyfasm_list_pop")
                 return
 
         # File methods: f.write(content), f.read(), f.close()
@@ -2411,14 +2749,14 @@ include 'functions.inc'
                 arg0_type = self._infer_expr_type(arg0)
                 if arg0_type.is_list() or arg0_type.is_tuple():
                     is_list_or_tuple = True
-                elif arg0_type.is_dict():
+                elif arg0_type.is_dict() or arg0_type.is_set():
                     is_dict_arg = True
                 elif isinstance(arg0, ast.Name) and self.current_func:
                     var = self.current_func.local_vars.get(arg0.id)
                     if var:
                         if var.var_type.is_list() or var.var_type.is_tuple():
                             is_list_or_tuple = True
-                        elif var.var_type.is_dict():
+                        elif var.var_type.is_dict() or var.var_type.is_set():
                             is_dict_arg = True
                 self._generate_expr(arg0)
                 if is_list_or_tuple:

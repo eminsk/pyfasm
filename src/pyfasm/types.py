@@ -32,6 +32,9 @@ class PyFasmType:
     def is_dict(self) -> bool:
         return isinstance(self, DictType)
 
+    def is_set(self) -> bool:
+        return isinstance(self, SetType)
+
     def is_tuple(self) -> bool:
         return isinstance(self, TupleType)
 
@@ -89,6 +92,13 @@ class DictType(PyFasmType):
 
 
 @dataclass(frozen=True)
+class SetType(PyFasmType):
+    name: str = "set"
+    element_type: Optional[PyFasmType] = None
+    size_bytes: int = 8  # Pointer to heap hash set descriptor
+
+
+@dataclass(frozen=True)
 class TupleType(PyFasmType):
     name: str = "tuple"
     size_bytes: int = 8  # Pointer to heap tuple descriptor
@@ -115,6 +125,7 @@ TYPE_STR = StrType()
 TYPE_PTR = PtrType()
 TYPE_LIST = ListType()
 TYPE_DICT = DictType()
+TYPE_SET = SetType()
 TYPE_TUPLE = TupleType()
 TYPE_VOID = VoidType()
 
@@ -138,6 +149,8 @@ def resolve_type(type_name: Optional[str]) -> PyFasmType:
         return TYPE_LIST
     if norm in ("dict", "map", "mapping"):
         return TYPE_DICT
+    if norm in ("set", "hashset"):
+        return TYPE_SET
     if norm in ("tuple",):
         return TYPE_TUPLE
     if norm in ("none", "void"):

@@ -1610,6 +1610,165 @@ _pyfasm_dict_len:
     xor     eax, eax
     ret
 
+_pyfasm_dict_remove:
+    ; RCX = dict_ptr, RDX = key
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .rem_done
+    mov     rbx, rcx
+    mov     rsi, rdx
+
+    mov     rcx, rsi
+    call    _pyfasm_str_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+    xor     r11, r11
+.rem_probe:
+    cmp     r11, [rbx]
+    jge     .rem_done
+
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .rem_done
+
+    cmp     rax, r13
+    jne     .rem_next
+
+    push    rcx
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    pop     rcx
+    test    eax, eax
+    jz      .rem_next
+
+    ; Found: mark as tombstone (-1)
+    mov     qword [rcx], -1
+    mov     qword [rcx + 8], 0
+    mov     qword [rcx + 16], 0
+    dec     qword [rbx + 8]
+    mov     eax, 1
+    jmp     .rem_ret
+
+.rem_next:
+    inc     r11
+    inc     rdi
+    and     rdi, r14
+    jmp     .rem_probe
+
+.rem_done:
+    xor     eax, eax
+.rem_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_create:
+    jmp     _pyfasm_dict_create
+
+_pyfasm_set_add:
+    mov     r8, 1
+    jmp     _pyfasm_dict_set
+
+_pyfasm_set_contains:
+    jmp     _pyfasm_dict_contains
+
+_pyfasm_set_remove:
+    jmp     _pyfasm_dict_remove
+
+_pyfasm_set_len:
+    jmp     _pyfasm_dict_len
+
+_pyfasm_list_contains:
+    ; RCX = list_ptr, RDX = item
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .plc_not_found
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     rdi, [rbx]
+    test    rdi, rdi
+    jz      .plc_not_found
+    xor     r12, r12
+.plc_loop:
+    cmp     r12, rdi
+    jge     .plc_not_found
+    mov     rax, [rbx + r12 * 8 + 8]
+    cmp     rax, rsi
+    je      .plc_found
+    cmp     rsi, 65536
+    jb      .plc_next
+    cmp     rax, 65536
+    jb      .plc_next
+    mov     rcx, rax
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    test    eax, eax
+    jnz     .plc_found
+.plc_next:
+    inc     r12
+    jmp     .plc_loop
+.plc_found:
+    mov     eax, 1
+    jmp     .plc_ret
+.plc_not_found:
+    xor     eax, eax
+.plc_ret:
+    lea     rsp, [rbp - 32]
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_list_pop:
+    ; RCX = list_ptr
+    test    rcx, rcx
+    jz      .lp_empty
+    mov     rdx, [rcx]
+    test    rdx, rdx
+    jz      .lp_empty
+    mov     rax, [rcx + rdx * 8]
+    dec     qword [rcx]
+    ret
+.lp_empty:
+    xor     eax, eax
+    ret
+
 _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
@@ -6508,6 +6667,165 @@ _pyfasm_dict_len:
     mov     rax, [rcx + 8]
     ret
 .dict_len_zero:
+    xor     eax, eax
+    ret
+
+_pyfasm_dict_remove:
+    ; RCX = dict_ptr, RDX = key
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .rem_done
+    mov     rbx, rcx
+    mov     rsi, rdx
+
+    mov     rcx, rsi
+    call    _pyfasm_str_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+    xor     r11, r11
+.rem_probe:
+    cmp     r11, [rbx]
+    jge     .rem_done
+
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .rem_done
+
+    cmp     rax, r13
+    jne     .rem_next
+
+    push    rcx
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    pop     rcx
+    test    eax, eax
+    jz      .rem_next
+
+    ; Found: mark as tombstone (-1)
+    mov     qword [rcx], -1
+    mov     qword [rcx + 8], 0
+    mov     qword [rcx + 16], 0
+    dec     qword [rbx + 8]
+    mov     eax, 1
+    jmp     .rem_ret
+
+.rem_next:
+    inc     r11
+    inc     rdi
+    and     rdi, r14
+    jmp     .rem_probe
+
+.rem_done:
+    xor     eax, eax
+.rem_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_create:
+    jmp     _pyfasm_dict_create
+
+_pyfasm_set_add:
+    mov     r8, 1
+    jmp     _pyfasm_dict_set
+
+_pyfasm_set_contains:
+    jmp     _pyfasm_dict_contains
+
+_pyfasm_set_remove:
+    jmp     _pyfasm_dict_remove
+
+_pyfasm_set_len:
+    jmp     _pyfasm_dict_len
+
+_pyfasm_list_contains:
+    ; RCX = list_ptr, RDX = item
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .plc_not_found
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     rdi, [rbx]
+    test    rdi, rdi
+    jz      .plc_not_found
+    xor     r12, r12
+.plc_loop:
+    cmp     r12, rdi
+    jge     .plc_not_found
+    mov     rax, [rbx + r12 * 8 + 8]
+    cmp     rax, rsi
+    je      .plc_found
+    cmp     rsi, 65536
+    jb      .plc_next
+    cmp     rax, 65536
+    jb      .plc_next
+    mov     rcx, rax
+    mov     rdx, rsi
+    call    _pyfasm_str_cmp
+    test    eax, eax
+    jnz     .plc_found
+.plc_next:
+    inc     r12
+    jmp     .plc_loop
+.plc_found:
+    mov     eax, 1
+    jmp     .plc_ret
+.plc_not_found:
+    xor     eax, eax
+.plc_ret:
+    lea     rsp, [rbp - 32]
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_list_pop:
+    ; RCX = list_ptr
+    test    rcx, rcx
+    jz      .lp_empty
+    mov     rdx, [rcx]
+    test    rdx, rdx
+    jz      .lp_empty
+    mov     rax, [rcx + rdx * 8]
+    dec     qword [rcx]
+    ret
+.lp_empty:
     xor     eax, eax
     ret
 

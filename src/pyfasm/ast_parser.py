@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
-    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_TUPLE, InstanceType
+    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, InstanceType
 )
 
 
@@ -33,6 +33,7 @@ class FunctionSymbol:
     stack_size: int = 0
     ast_node: Optional[ast.FunctionDef] = None
     class_name: Optional[str] = None
+    global_names: Set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -414,8 +415,16 @@ class AstAnalyzer:
         is_entry: bool = True,
         mod_prefix: str = ""
     ) -> None:
+        self.current_module = module
         top_level_stmts = []
         for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name):
+                        init_val = 0
+                        if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, int):
+                            init_val = stmt.value.value
+                        module.global_vars[tgt.id] = init_val
             if isinstance(stmt, ast.FunctionDef):
                 fn = self._analyze_function(stmt)
                 if fn.name not in module.functions:
@@ -574,6 +583,9 @@ class AstAnalyzer:
         elif isinstance(expr, (ast.Dict, ast.DictComp)):
             return TYPE_DICT
 
+        elif isinstance(expr, (ast.Set, ast.SetComp)):
+            return TYPE_SET
+
         elif isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
 
@@ -620,6 +632,8 @@ class AstAnalyzer:
                     return TYPE_LIST
                 elif fid in ("dict",):
                     return TYPE_DICT
+                elif fid in ("set",):
+                    return TYPE_SET
                 elif fid in ("tuple",):
                     return TYPE_TUPLE
             elif isinstance(expr.func, ast.Attribute):
@@ -683,6 +697,15 @@ class AstAnalyzer:
             offset += 8
 
         # Discover all assigned variables in the function body with local type inference (multi-pass for chained type resolution)
+        global_names: Set[str] = set()
+        for sub_node in ast.walk(node):
+            if isinstance(sub_node, ast.Global):
+                for gname in sub_node.names:
+                    global_names.add(gname)
+                    if hasattr(self, "current_module") and self.current_module is not None:
+                        if gname not in self.current_module.global_vars:
+                            self.current_module.global_vars[gname] = 0
+
         for _pass in range(3):
             for sub_node in ast.walk(node):
                 if isinstance(sub_node, ast.Assign):
@@ -695,7 +718,11 @@ class AstAnalyzer:
                             for elt in target.elts:
                                 if isinstance(elt, ast.Name):
                                     targets_to_proc.append((elt.id, TYPE_INT))
+                                elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
+                                    targets_to_proc.append((elt.value.id, TYPE_LIST))
                     for vname, t_type in targets_to_proc:
+                        if vname in global_names:
+                            continue
                         if vname not in local_vars:
                             local_vars[vname] = VariableSymbol(
                                 name=vname,
@@ -708,6 +735,8 @@ class AstAnalyzer:
                             local_vars[vname].var_type = t_type
                 elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
+                    if vname in global_names:
+                        continue
                     vtype = TYPE_INT
                     if isinstance(sub_node.annotation, ast.Name):
                         vtype = resolve_type(sub_node.annotation.id)
@@ -723,6 +752,8 @@ class AstAnalyzer:
                         offset += 8
                 elif isinstance(sub_node, ast.For) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
+                    if vname in global_names:
+                        continue
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
@@ -735,6 +766,8 @@ class AstAnalyzer:
                     for item in sub_node.items:
                         if item.optional_vars and isinstance(item.optional_vars, ast.Name):
                             vname = item.optional_vars.id
+                            if vname in global_names:
+                                continue
                             if vname not in local_vars:
                                 local_vars[vname] = VariableSymbol(
                                     name=vname,
@@ -745,6 +778,8 @@ class AstAnalyzer:
                                 offset += 8
                 elif isinstance(sub_node, ast.NamedExpr) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
+                    if vname in global_names:
+                        continue
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
@@ -753,11 +788,25 @@ class AstAnalyzer:
                             is_arg=False
                         )
                         offset += 8
-                elif isinstance(sub_node, (ast.ListComp, ast.DictComp)):
+                elif isinstance(sub_node, (ast.ListComp, ast.DictComp, ast.SetComp)):
                     for gen in sub_node.generators:
                         if isinstance(gen.target, ast.Name):
                             vname = gen.target.id
+                            if vname in global_names:
+                                continue
                             if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=TYPE_INT,
+                                    stack_offset=offset,
+                                    is_arg=False
+                                )
+                                offset += 8
+                elif isinstance(sub_node, ast.Match):
+                    for case in sub_node.cases:
+                        if isinstance(case.pattern, ast.MatchAs) and case.pattern.name:
+                            vname = case.pattern.name
+                            if vname != "_" and vname not in global_names and vname not in local_vars:
                                 local_vars[vname] = VariableSymbol(
                                     name=vname,
                                     var_type=TYPE_INT,
@@ -767,6 +816,8 @@ class AstAnalyzer:
                                 offset += 8
                 elif isinstance(sub_node, ast.ExceptHandler) and sub_node.name:
                     vname = sub_node.name
+                    if vname in global_names:
+                        continue
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
@@ -792,5 +843,6 @@ class AstAnalyzer:
             return_type=ret_type,
             local_vars=local_vars,
             stack_size=aligned_stack,
-            ast_node=node
+            ast_node=node,
+            global_names=global_names
         )
