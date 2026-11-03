@@ -110,6 +110,149 @@ class X64CodeGen:
             self._attr_offsets[attr_name] = len(self._attr_offsets) * 8
         return self._attr_offsets[attr_name]
 
+    def resolve_class_method(self, cls_name: Optional[str], method_name: str, skip_cls: bool = False) -> Optional[str]:
+        if not cls_name:
+            return None
+        visited = set()
+        queue = []
+        if skip_cls:
+            cls_sym = self.module.classes.get(cls_name)
+            if cls_sym:
+                queue.extend(cls_sym.bases)
+        else:
+            queue.append(cls_name)
+
+        while queue:
+            curr = queue.pop(0)
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cand = f"{curr}_{method_name}"
+            if cand in self.module.functions:
+                return cand
+            cls_sym = self.module.classes.get(curr)
+            if cls_sym:
+                for base in cls_sym.bases:
+                    if base not in visited:
+                        queue.append(base)
+        return None
+
+    def resolve_property(self, cls_name: Optional[str], prop_name: str) -> Optional[Any]:
+        if not cls_name:
+            return None
+        visited = set()
+        queue = [cls_name]
+        while queue:
+            curr = queue.pop(0)
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cls_sym = self.module.classes.get(curr)
+            if cls_sym:
+                if hasattr(cls_sym, "properties") and prop_name in cls_sym.properties:
+                    return cls_sym.properties[prop_name]
+                for base in cls_sym.bases:
+                    if base not in visited:
+                        queue.append(base)
+        return None
+
+    def resolve_property_for_expr(self, expr_node: ast.AST, prop_name: str) -> Optional[Any]:
+        cls_name = None
+        if isinstance(expr_node, ast.Name):
+            if expr_node.id in ("self", "this"):
+                cls_name = getattr(self.current_func, "class_name", None)
+            else:
+                cls_name = self.local_var_classes.get(expr_node.id)
+        elif isinstance(expr_node, ast.Call) and isinstance(expr_node.func, ast.Name):
+            cls_name = expr_node.func.id
+
+        if cls_name:
+            prop = self.resolve_property(cls_name, prop_name)
+            if prop:
+                return prop
+
+        candidates = []
+        for c in self.module.classes.values():
+            if hasattr(c, "properties") and prop_name in c.properties:
+                candidates.append(c.properties[prop_name])
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _desugar_str_format(self, fmt_str: str, args: List[ast.expr]) -> List[ast.AST]:
+        parts: List[ast.AST] = []
+        last_end = 0
+        auto_idx = 0
+        i = 0
+        n = len(fmt_str)
+        while i < n:
+            if fmt_str[i] == '{' and i + 1 < n and fmt_str[i+1] == '{':
+                prefix = fmt_str[last_end:i]
+                parts.append(ast.Constant(value=prefix + "{"))
+                i += 2
+                last_end = i
+                continue
+            elif fmt_str[i] == '}' and i + 1 < n and fmt_str[i+1] == '}':
+                prefix = fmt_str[last_end:i]
+                parts.append(ast.Constant(value=prefix + "}"))
+                i += 2
+                last_end = i
+                continue
+            elif fmt_str[i] == '{':
+                close_idx = fmt_str.find('}', i)
+                if close_idx != -1:
+                    prefix_text = fmt_str[last_end:i]
+                    if prefix_text:
+                        parts.append(ast.Constant(value=prefix_text))
+                    spec = fmt_str[i+1:close_idx].strip()
+                    if not spec:
+                        arg_idx = auto_idx
+                        auto_idx += 1
+                    elif spec.isdigit():
+                        arg_idx = int(spec)
+                    else:
+                        arg_idx = auto_idx
+                        auto_idx += 1
+                    if 0 <= arg_idx < len(args):
+                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1))
+                    i = close_idx + 1
+                    last_end = i
+                    continue
+            i += 1
+        if last_end < n:
+            parts.append(ast.Constant(value=fmt_str[last_end:]))
+        return parts
+
+    def _desugar_str_percent(self, fmt_str: str, args: List[ast.expr]) -> List[ast.AST]:
+        parts: List[ast.AST] = []
+        last_end = 0
+        arg_idx = 0
+        i = 0
+        n = len(fmt_str)
+        while i < n:
+            if fmt_str[i] == '%' and i + 1 < n:
+                ch = fmt_str[i+1]
+                if ch == '%':
+                    prefix_text = fmt_str[last_end:i]
+                    parts.append(ast.Constant(value=prefix_text + "%"))
+                    i += 2
+                    last_end = i
+                    continue
+                elif ch in ('s', 'd', 'i', 'f', 'r', 'x', 'X'):
+                    prefix_text = fmt_str[last_end:i]
+                    if prefix_text:
+                        parts.append(ast.Constant(value=prefix_text))
+                    if arg_idx < len(args):
+                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1))
+                        arg_idx += 1
+                    i += 2
+                    last_end = i
+                    continue
+            i += 1
+        if last_end < n:
+            parts.append(ast.Constant(value=fmt_str[last_end:]))
+        return parts
+
     def _extract_kwarg(self, call: ast.Call, kw_name: str) -> Optional[ast.AST]:
         for kw in call.keywords:
             if kw.arg == kw_name:
@@ -645,12 +788,13 @@ include 'functions.inc'
             self.emit("mov rax, [rbp - 40]")
             self.emit("mov [_pyfasm_last_gui_instance], rax", "store GUI instance pointer for callbacks")
 
-        # Call __init__ if present
-        init_target = None
-        if f"{cls_sym.name}___init__" in self.module.functions:
-            init_target = f"{cls_sym.name}___init__"
-        elif "__init__" in cls_sym.methods:
-            init_target = f"{cls_sym.name}___init__"
+        # Call __init__ if present (including inherited __init__)
+        init_target = self.resolve_class_method(cls_sym.name, "__init__", skip_cls=False)
+        if not init_target:
+            if f"{cls_sym.name}___init__" in self.module.functions:
+                init_target = f"{cls_sym.name}___init__"
+            elif "__init__" in cls_sym.methods:
+                init_target = f"{cls_sym.name}___init__"
 
         if init_target:
             self.emit("mov rcx, [rbp - 40]", "pass self as first arg")
@@ -1004,17 +1148,28 @@ include 'functions.inc'
                         else:
                             self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
                 elif isinstance(target, ast.Attribute):
-                    # obj.field = val (e.g. self.x = 10)
-                    self.emit("push rax", "save value to assign")
-                    self._generate_expr(target.value)
-                    self.emit("mov r8, rax", "object pointer")
-                    self.emit("pop rax", "value to store")
-                    offset = self._get_attribute_offset(target.attr)
-                    lbl_skip = self.new_label("skip_store")
-                    self.emit("test r8, r8", "check null pointer")
-                    self.emit(f"jz {lbl_skip}")
-                    self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
-                    self.emit_raw(f"{lbl_skip}:")
+                    # Check if property setter exists
+                    prop = self.resolve_property_for_expr(target.value, target.attr)
+                    if prop and getattr(prop, "setter_name", None):
+                        self.emit("push rax", "save property setter value")
+                        self._generate_expr(target.value)
+                        self.emit("mov rcx, rax", "pass self as rcx")
+                        self.emit("pop rdx", "pass value as rdx")
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit(f"call {safe_asm_label(prop.setter_name)}")
+                        self.emit("add rsp, 32")
+                    else:
+                        # obj.field = val (e.g. self.x = 10)
+                        self.emit("push rax", "save value to assign")
+                        self._generate_expr(target.value)
+                        self.emit("mov r8, rax", "object pointer")
+                        self.emit("pop rax", "value to store")
+                        offset = self._get_attribute_offset(target.attr)
+                        lbl_skip = self.new_label("skip_store")
+                        self.emit("test r8, r8", "check null pointer")
+                        self.emit(f"jz {lbl_skip}")
+                        self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
+                        self.emit_raw(f"{lbl_skip}:")
 
         elif isinstance(stmt, ast.AnnAssign):
             if stmt.value:
@@ -1082,6 +1237,38 @@ include 'functions.inc'
                     self.emit("mov [r8 + (rdx + 1) * 8], rax", "store updated list[idx]")
                 else:
                     self.emit("mov [r8 + rdx * 8], rax", "store updated arr[idx]")
+            elif isinstance(stmt.target, ast.Attribute):
+                prop = self.resolve_property_for_expr(stmt.target.value, stmt.target.attr)
+                if prop and getattr(prop, "getter_name", None) and getattr(prop, "setter_name", None):
+                    self._generate_expr(stmt.target.value)
+                    self.emit("push rax", "save self")
+                    self.emit("mov rcx, rax", "pass self to getter")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(prop.getter_name)}")
+                    self.emit("add rsp, 32")
+                    self.emit("push rax", "save old prop val")
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax", "delta")
+                    self.emit("pop rax", "old prop val")
+                    self._generate_binop_instr(stmt.op)
+                    self.emit("mov rdx, rax", "new prop val")
+                    self.emit("pop rcx", "restore self")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {safe_asm_label(prop.setter_name)}")
+                    self.emit("add rsp, 32")
+                else:
+                    self._generate_expr(stmt.target.value)
+                    self.emit("mov r8, rax", "object pointer")
+                    offset = self._get_attribute_offset(stmt.target.attr)
+                    self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{stmt.target.attr}")
+                    self.emit("push r8", "save obj ptr")
+                    self.emit("push rax", "save old val")
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax", "delta")
+                    self.emit("pop rax", "old val")
+                    self._generate_binop_instr(stmt.op)
+                    self.emit("pop r8", "restore obj ptr")
+                    self.emit(f"mov [r8 + {offset}], rax", f"store updated obj.{stmt.target.attr}")
 
         elif isinstance(stmt, ast.Expr):
             self._generate_expr(stmt.value)
@@ -1485,6 +1672,48 @@ include 'functions.inc'
                 return TYPE_STR
             if lt.is_float() or rt.is_float():
                 return TYPE_FLOAT
+        if isinstance(expr, ast.JoinedStr):
+            return TYPE_STR
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Name):
+                fn_id = expr.func.id
+                if fn_id in ("str", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct"):
+                    return TYPE_STR
+                if fn_id in ("float",):
+                    return TYPE_FLOAT
+                if fn_id in ("bool", "isinstance", "any", "all"):
+                    return TYPE_BOOL
+                if fn_id in ("list",):
+                    return TYPE_LIST
+                if fn_id in ("dict",):
+                    return TYPE_DICT
+                if fn_id in ("set",):
+                    return TYPE_SET
+                if fn_id in self.module.functions:
+                    return self.module.functions[fn_id].return_type
+            elif isinstance(expr.func, ast.Attribute):
+                attr = expr.func.attr
+                if attr in ("lower", "upper", "strip", "replace", "format"):
+                    return TYPE_STR
+                if attr in ("count", "find", "index"):
+                    return TYPE_INT
+                if attr in ("keys", "values", "items"):
+                    return TYPE_LIST
+                if isinstance(expr.func.value, ast.Name):
+                    pfx = expr.func.value.id
+                    cls_name = getattr(self.current_func, "class_name", None) if pfx in ("self", "this") else self.local_var_classes.get(pfx)
+                    if cls_name:
+                        m = self.resolve_class_method(cls_name, attr)
+                        if m and m in self.module.functions:
+                            return self.module.functions[m].return_type
+                for cls in self.module.classes.values():
+                    m = self.resolve_class_method(cls.name, attr)
+                    if m and m in self.module.functions:
+                        return self.module.functions[m].return_type
+        if isinstance(expr, ast.Attribute):
+            prop = self.resolve_property_for_expr(expr.value, expr.attr)
+            if prop and getattr(prop, "getter_name", None) and prop.getter_name in self.module.functions:
+                return self.module.functions[prop.getter_name].return_type
         return TYPE_INT
 
     def _generate_expr(self, expr: ast.expr) -> None:
@@ -1541,6 +1770,15 @@ include 'functions.inc'
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
         elif isinstance(expr, ast.Attribute):
+            prop = self.resolve_property_for_expr(expr.value, expr.attr)
+            if prop and getattr(prop, "getter_name", None):
+                self._generate_expr(expr.value)
+                self.emit("mov rcx, rax", "pass self to property getter")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {safe_asm_label(prop.getter_name)}")
+                self.emit("add rsp, 32")
+                return
+
             def _is_module_or_class(node):
                 if isinstance(node, ast.Name):
                     if node.id in ("self", "this"):
@@ -1553,7 +1791,19 @@ include 'functions.inc'
                 return False
 
             if _is_module_or_class(expr.value):
-                self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
+                val_handled = False
+                if isinstance(expr.value, ast.Name) and expr.value.id in self.module.classes:
+                    cls_sym = self.module.classes[expr.value.id]
+                    if hasattr(cls_sym, "class_attrs") and expr.attr in cls_sym.class_attrs:
+                        c_val = cls_sym.class_attrs[expr.attr]
+                        if isinstance(c_val, int):
+                            self.emit(f"mov rax, {c_val}", f"load class attribute {expr.value.id}.{expr.attr}")
+                            val_handled = True
+                        elif isinstance(c_val, str):
+                            self._emit_string_pointer("rax", c_val)
+                            val_handled = True
+                if not val_handled:
+                    self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
             else:
                 self._generate_expr(expr.value)
                 self.emit("mov r8, rax", "object pointer")
@@ -1569,6 +1819,17 @@ include 'functions.inc'
                 self.emit_raw(f"{lbl_done}:")
 
         elif isinstance(expr, ast.BinOp):
+            if isinstance(expr.op, ast.Mod):
+                if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
+                    fmt_args: List[ast.expr] = []
+                    if isinstance(expr.right, (ast.Tuple, ast.List)):
+                        fmt_args = list(expr.right.elts)
+                    else:
+                        fmt_args = [expr.right]
+                    parts = self._desugar_str_percent(expr.left.value, fmt_args)
+                    self._generate_expr(ast.JoinedStr(values=parts))
+                    return
+
             is_str_add = False
             if isinstance(expr.op, ast.Add):
                 if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
@@ -2368,54 +2629,78 @@ include 'functions.inc'
             self.emit("pop rbx")
 
     def _generate_call(self, call: ast.Call) -> None:
-        # Handle super().method() calls (e.g. super().__init__()) without recursive self-call
-        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
-            if isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "super":
+        # String .format(...) method desugaring
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "format":
+            if isinstance(call.func.value, ast.Constant) and isinstance(call.func.value.value, str):
+                parts = self._desugar_str_format(call.func.value.value, list(call.args))
+                self._generate_expr(ast.JoinedStr(values=parts))
                 return
 
+        # Handle super().method() calls (e.g. super().__init__())
+        is_super_call = False
         func_name = ""
         attr_name = ""
         prefix = ""
-        if isinstance(call.func, ast.Name):
-            func_name = call.func.id
-        elif isinstance(call.func, ast.Attribute):
-            attr_name = call.func.attr
-            if isinstance(call.func.value, ast.Name):
-                prefix = call.func.value.id
-                if prefix in ("self", "this"):
-                    current_cls = getattr(self.current_func, "class_name", None)
-                    if current_cls:
-                        cand = f"{current_cls}_{attr_name}"
-                        if cand in self.module.functions:
-                            func_name = cand
-                        elif current_cls in self.module.classes:
-                            for base in self.module.classes[current_cls].bases:
-                                base_cand = f"{base}_{attr_name}"
-                                if base_cand in self.module.functions:
-                                    func_name = base_cand
-                                    break
-                    if not func_name:
-                        if current_cls and f"{current_cls}_{attr_name}" in self.module.functions:
+
+        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
+            if isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "super":
+                is_super_call = True
+                current_cls = getattr(self.current_func, "class_name", None)
+                if call.func.value.args and isinstance(call.func.value.args[0], ast.Name):
+                    current_cls = call.func.value.args[0].id
+                if not current_cls and self.module.classes:
+                    current_cls = list(self.module.classes.keys())[0]
+                target_base_fn = None
+                if current_cls:
+                    target_base_fn = self.resolve_class_method(current_cls, call.func.attr, skip_cls=True)
+                if not target_base_fn:
+                    self.emit("xor eax, eax", "safe no-op for super call on object")
+                    return
+                func_name = target_base_fn
+
+        if not is_super_call:
+            if isinstance(call.func, ast.Name):
+                func_name = call.func.id
+            elif isinstance(call.func, ast.Attribute):
+                attr_name = call.func.attr
+                if isinstance(call.func.value, ast.Name):
+                    prefix = call.func.value.id
+                    if prefix in ("self", "this"):
+                        current_cls = getattr(self.current_func, "class_name", None)
+                        resolved = self.resolve_class_method(current_cls, attr_name, skip_cls=False)
+                        if resolved:
+                            func_name = resolved
+                        elif current_cls and f"{current_cls}_{attr_name}" in self.module.functions:
                             func_name = f"{current_cls}_{attr_name}"
                         elif f"self_{attr_name}" in self.module.functions:
                             func_name = f"self_{attr_name}"
                         else:
                             func_name = f"{current_cls}_{attr_name}" if current_cls else f"self_{attr_name}"
-                else:
-                    prefix_cls = self.local_var_classes.get(prefix)
-                    if prefix_cls and f"{prefix_cls}_{attr_name}" in self.module.functions:
-                        func_name = f"{prefix_cls}_{attr_name}"
-                    elif f"{prefix}_{attr_name}" in self.module.functions:
-                        func_name = f"{prefix}_{attr_name}"
                     else:
-                        for cls in self.module.classes.values():
-                            if f"{cls.name}_{attr_name}" in self.module.functions:
-                                func_name = f"{cls.name}_{attr_name}"
-                                break
+                        prefix_cls = self.local_var_classes.get(prefix)
+                        if prefix_cls:
+                            resolved = self.resolve_class_method(prefix_cls, attr_name, skip_cls=False)
+                            if resolved:
+                                func_name = resolved
                         if not func_name:
-                            func_name = f"{prefix}_{attr_name}"
-            else:
-                func_name = attr_name
+                            if f"{prefix}_{attr_name}" in self.module.functions:
+                                func_name = f"{prefix}_{attr_name}"
+                            else:
+                                for cls in self.module.classes.values():
+                                    resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                                    if resolved:
+                                        func_name = resolved
+                                        break
+                                if not func_name:
+                                    func_name = f"{prefix}_{attr_name}"
+                else:
+                    for cls in self.module.classes.values():
+                        resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                        if resolved:
+                            func_name = resolved
+                            break
+                    if not func_name:
+                        func_name = attr_name
 
         # Ecosystem adapters (darkdetect, requests, beautifulsoup4)
         if func_name in ("isDark", "is_dark", "darkdetect_isDark") or (attr_name in ("isDark", "is_dark") and prefix == "darkdetect"):
@@ -3331,7 +3616,9 @@ include 'functions.inc'
 
         # User Function / Method Call (x64 ABI)
         args_to_pass = list(call.args)
-        if isinstance(call.func, ast.Attribute) and func_name in self.module.functions:
+        if is_super_call:
+            args_to_pass = [ast.Name(id="self", ctx=ast.Load())] + list(call.args)
+        elif isinstance(call.func, ast.Attribute) and func_name in self.module.functions:
             fn_sym = self.module.functions[func_name]
             if fn_sym.args and fn_sym.args[0].name == "self":
                 args_to_pass = [call.func.value] + list(call.args)

@@ -39,11 +39,20 @@ class FunctionSymbol:
 
 
 @dataclass
+class PropertySymbol:
+    name: str
+    getter_name: Optional[str] = None
+    setter_name: Optional[str] = None
+
+
+@dataclass
 class ClassSymbol:
     name: str
     methods: Dict[str, FunctionSymbol] = field(default_factory=dict)
     fields: List[str] = field(default_factory=list)
     bases: List[str] = field(default_factory=list)
+    properties: Dict[str, PropertySymbol] = field(default_factory=dict)
+    class_attrs: Dict[str, Any] = field(default_factory=dict)
     ast_node: Optional[ast.ClassDef] = None
 
 
@@ -701,7 +710,16 @@ class AstAnalyzer:
         # Discover field assignments in class methods (especially self.x = ...)
         fields: List[str] = []
         for item in node.body:
-            if isinstance(item, ast.FunctionDef):
+            if isinstance(item, ast.Assign):
+                for tgt in item.targets:
+                    if isinstance(tgt, ast.Name):
+                        if tgt.id not in fields:
+                            fields.append(tgt.id)
+                        val = None
+                        if isinstance(item.value, ast.Constant):
+                            val = item.value.value
+                        cls_sym.class_attrs[tgt.id] = val
+            elif isinstance(item, ast.FunctionDef):
                 for sub in ast.walk(item):
                     if isinstance(sub, ast.Assign):
                         for tgt in sub.targets:
@@ -710,26 +728,65 @@ class AstAnalyzer:
                                     fields.append(tgt.attr)
         cls_sym.fields = fields
 
-        # Extract and register methods
+        # Extract and register methods, properties, and getters/setters
         for item in node.body:
             if isinstance(item, ast.FunctionDef):
+                is_prop_getter = False
+                prop_setter_target = None
+                for dec in item.decorator_list:
+                    if isinstance(dec, ast.Name) and dec.id == "property":
+                        is_prop_getter = True
+                    elif isinstance(dec, ast.Attribute) and dec.attr == "setter" and isinstance(dec.value, ast.Name):
+                        prop_setter_target = dec.value.id
+
                 m_fn = self._analyze_function(item)
-                method_name = f"{cls_name}_{item.name}"
-                m_fn.name = method_name  # Ensure class method has unique namespaced symbol name
                 m_fn.class_name = cls_name
-                cls_sym.methods[item.name] = m_fn
 
-                # Register namespaced method: ClassName_method (e.g. StackOverflowApp_mainloop)
-                if method_name not in module.functions:
-                    module.functions[method_name] = m_fn
+                if is_prop_getter:
+                    prop_name = item.name
+                    getter_name = f"{cls_name}_get_{prop_name}"
+                    m_fn.name = getter_name
+                    cls_sym.methods[getter_name] = m_fn
+                    if getter_name not in module.functions:
+                        module.functions[getter_name] = m_fn
+                    module.functions[f"{cls_name}_{prop_name}"] = m_fn
+                    if prop_name not in cls_sym.properties:
+                        cls_sym.properties[prop_name] = PropertySymbol(name=prop_name)
+                    cls_sym.properties[prop_name].getter_name = getter_name
+                elif prop_setter_target:
+                    prop_name = prop_setter_target
+                    setter_name = f"{cls_name}_set_{prop_name}"
+                    m_fn.name = setter_name
+                    cls_sym.methods[setter_name] = m_fn
+                    if setter_name not in module.functions:
+                        module.functions[setter_name] = m_fn
+                    if prop_name not in cls_sym.properties:
+                        cls_sym.properties[prop_name] = PropertySymbol(name=prop_name)
+                    cls_sym.properties[prop_name].setter_name = setter_name
+                else:
+                    method_name = f"{cls_name}_{item.name}"
+                    m_fn.name = method_name  # Ensure class method has unique namespaced symbol name
+                    cls_sym.methods[item.name] = m_fn
 
-                if mod_prefix:
-                    pref_name = f"{mod_prefix}_{cls_name}_{item.name}"
-                    if pref_name not in module.functions:
-                        module.functions[pref_name] = m_fn
+                    # Register namespaced method: ClassName_method (e.g. StackOverflowApp_mainloop)
+                    if method_name not in module.functions:
+                        module.functions[method_name] = m_fn
+
+                    if mod_prefix:
+                        pref_name = f"{mod_prefix}_{cls_name}_{item.name}"
+                        if pref_name not in module.functions:
+                            module.functions[pref_name] = m_fn
 
         # Register constructor function symbol
         init_fn = cls_sym.methods.get("__init__")
+        if not init_fn:
+            # Check base classes for inherited __init__
+            for base in cls_sym.bases:
+                base_sym = module.classes.get(base)
+                if base_sym and "__init__" in base_sym.methods:
+                    init_fn = base_sym.methods["__init__"]
+                    break
+
         ctor_args: List[VariableSymbol] = []
         if init_fn and len(init_fn.args) > 1:
             for idx, a in enumerate(init_fn.args[1:]):
