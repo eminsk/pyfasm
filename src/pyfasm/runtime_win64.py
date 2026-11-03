@@ -1001,14 +1001,18 @@ _pyfasm_str_concat:
     ret
 
 _pyfasm_str_cmp:
-    ; RCX = str1, RDX = str2
+    ; RCX = key1, RDX = key2
     ; Returns RAX = 1 if equal, 0 if not equal
-    test    rcx, rcx
-    jz      .cmp_c_null
-    test    rdx, rdx
-    jz      .cmp_ne
     cmp     rcx, rdx
     je      .cmp_eq
+    test    rcx, rcx
+    jz      .cmp_ne
+    test    rdx, rdx
+    jz      .cmp_ne
+    cmp     rcx, 65536
+    jb      .cmp_ne
+    cmp     rdx, 65536
+    jb      .cmp_ne
 .cmp_loop:
     mov     al, [rcx]
     mov     ah, [rdx]
@@ -1019,9 +1023,6 @@ _pyfasm_str_cmp:
     inc     rcx
     inc     rdx
     jmp     .cmp_loop
-.cmp_c_null:
-    test    rdx, rdx
-    jz      .cmp_eq
 .cmp_ne:
     xor     eax, eax
     ret
@@ -1396,12 +1397,14 @@ _pyfasm_dict_create:
     ret
 
 _pyfasm_str_hash:
-    ; RCX = null-terminated string
+    ; RCX = null-terminated string or 64-bit integer
     ; Returns RAX = 64-bit FNV-1a hash
+    test    rcx, rcx
+    jz      .hash_zero
+    cmp     rcx, 65536
+    jb      .hash_int
     mov     rax, 0CBF29CE484222325h
     mov     rdx, 100000001B3h
-    test    rcx, rcx
-    jz      .hash_ret
 .hash_loop:
     movzx   r8d, byte [rcx]
     test    r8b, r8b
@@ -1410,6 +1413,17 @@ _pyfasm_str_hash:
     imul    rax, rdx
     inc     rcx
     jmp     .hash_loop
+.hash_zero:
+    mov     rax, 0CBF29CE484222325h
+    ret
+.hash_int:
+    mov     rax, rcx
+    mov     rdx, 100000001B3h
+    imul    rax, rdx
+    test    rax, rax
+    jnz     .hash_ret
+    mov     rax, 1
+    ret
 .hash_done:
     test    rax, rax
     jnz     .hash_ret
@@ -5888,14 +5902,18 @@ _pyfasm_str_concat:
     ret
 
 _pyfasm_str_cmp:
-    ; RCX = str1, RDX = str2
+    ; RCX = key1, RDX = key2
     ; Returns RAX = 1 if equal, 0 if not equal
-    test    rcx, rcx
-    jz      .cmp_c_null
-    test    rdx, rdx
-    jz      .cmp_ne
     cmp     rcx, rdx
     je      .cmp_eq
+    test    rcx, rcx
+    jz      .cmp_ne
+    test    rdx, rdx
+    jz      .cmp_ne
+    cmp     rcx, 65536
+    jb      .cmp_ne
+    cmp     rdx, 65536
+    jb      .cmp_ne
 .cmp_loop:
     mov     al, [rcx]
     mov     ah, [rdx]
@@ -5906,9 +5924,6 @@ _pyfasm_str_cmp:
     inc     rcx
     inc     rdx
     jmp     .cmp_loop
-.cmp_c_null:
-    test    rdx, rdx
-    jz      .cmp_eq
 .cmp_ne:
     xor     eax, eax
     ret
@@ -6283,12 +6298,14 @@ _pyfasm_dict_create:
     ret
 
 _pyfasm_str_hash:
-    ; RCX = null-terminated string
+    ; RCX = null-terminated string or 64-bit integer
     ; Returns RAX = 64-bit FNV-1a hash
+    test    rcx, rcx
+    jz      .hash_zero
+    cmp     rcx, 65536
+    jb      .hash_int
     mov     rax, 0CBF29CE484222325h
     mov     rdx, 100000001B3h
-    test    rcx, rcx
-    jz      .hash_ret
 .hash_loop:
     movzx   r8d, byte [rcx]
     test    r8b, r8b
@@ -6297,6 +6314,17 @@ _pyfasm_str_hash:
     imul    rax, rdx
     inc     rcx
     jmp     .hash_loop
+.hash_zero:
+    mov     rax, 0CBF29CE484222325h
+    ret
+.hash_int:
+    mov     rax, rcx
+    mov     rdx, 100000001B3h
+    imul    rax, rdx
+    test    rax, rax
+    jnz     .hash_ret
+    mov     rax, 1
+    ret
 .hash_done:
     test    rax, rax
     jnz     .hash_ret

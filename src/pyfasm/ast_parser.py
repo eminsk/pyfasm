@@ -571,7 +571,7 @@ class AstAnalyzer:
         elif isinstance(expr, (ast.List, ast.ListComp)):
             return TYPE_LIST
 
-        elif isinstance(expr, ast.Dict):
+        elif isinstance(expr, (ast.Dict, ast.DictComp)):
             return TYPE_DICT
 
         elif isinstance(expr, ast.Tuple):
@@ -681,19 +681,25 @@ class AstAnalyzer:
             for sub_node in ast.walk(node):
                 if isinstance(sub_node, ast.Assign):
                     inferred_type = self._infer_node_type(sub_node.value, local_vars)
+                    targets_to_proc = []
                     for target in sub_node.targets:
                         if isinstance(target, ast.Name):
-                            vname = target.id
-                            if vname not in local_vars:
-                                local_vars[vname] = VariableSymbol(
-                                    name=vname,
-                                    var_type=inferred_type,
-                                    stack_offset=offset,
-                                    is_arg=False
-                                )
-                                offset += 8
-                            elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and inferred_type != TYPE_INT:
-                                local_vars[vname].var_type = inferred_type
+                            targets_to_proc.append((target.id, inferred_type))
+                        elif isinstance(target, (ast.Tuple, ast.List)):
+                            for elt in target.elts:
+                                if isinstance(elt, ast.Name):
+                                    targets_to_proc.append((elt.id, TYPE_INT))
+                    for vname, t_type in targets_to_proc:
+                        if vname not in local_vars:
+                            local_vars[vname] = VariableSymbol(
+                                name=vname,
+                                var_type=t_type,
+                                stack_offset=offset,
+                                is_arg=False
+                            )
+                            offset += 8
+                        elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and t_type != TYPE_INT:
+                            local_vars[vname].var_type = t_type
                 elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
                     vtype = TYPE_INT
@@ -731,7 +737,7 @@ class AstAnalyzer:
                                     is_arg=False
                                 )
                                 offset += 8
-                elif isinstance(sub_node, ast.ListComp):
+                elif isinstance(sub_node, (ast.ListComp, ast.DictComp)):
                     for gen in sub_node.generators:
                         if isinstance(gen.target, ast.Name):
                             vname = gen.target.id

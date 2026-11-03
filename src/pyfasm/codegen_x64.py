@@ -717,6 +717,30 @@ include 'functions.inc'
 
         elif isinstance(stmt, ast.Assign):
             # Target = Expr
+            if len(stmt.targets) == 1 and isinstance(stmt.targets[0], (ast.Tuple, ast.List)):
+                target_tup = stmt.targets[0]
+                if isinstance(stmt.value, (ast.Tuple, ast.List)) and len(stmt.value.elts) == len(target_tup.elts):
+                    for val_elt in stmt.value.elts:
+                        self._generate_expr(val_elt)
+                        self.emit("push rax", "save unpacked RHS elt")
+                    for tgt_elt in reversed(target_tup.elts):
+                        self.emit("pop rax", "restore for target elt")
+                        if isinstance(tgt_elt, ast.Name) and self.current_func:
+                            var = self.current_func.local_vars.get(tgt_elt.id)
+                            if var:
+                                self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                    return
+                else:
+                    self._generate_expr(stmt.value)
+                    self.emit("mov rbx, rax", "base pointer of tuple/list")
+                    for idx, tgt_elt in enumerate(target_tup.elts):
+                        self.emit(f"mov rax, [rbx + {(idx + 1) * 8}]", f"load element {idx}")
+                        if isinstance(tgt_elt, ast.Name) and self.current_func:
+                            var = self.current_func.local_vars.get(tgt_elt.id)
+                            if var:
+                                self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                    return
+
             self._generate_expr(stmt.value)  # result in RAX
             if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
                 func_id = stmt.value.func.id
@@ -1100,7 +1124,7 @@ include 'functions.inc'
                 return self.current_func.local_vars[expr.id].var_type
         if isinstance(expr, (ast.List, ast.ListComp)):
             return TYPE_LIST
-        if isinstance(expr, ast.Dict):
+        if isinstance(expr, (ast.Dict, ast.DictComp)):
             return TYPE_DICT
         if isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
@@ -1466,6 +1490,9 @@ include 'functions.inc'
         elif isinstance(expr, ast.ListComp):
             self._generate_list_comprehension(expr)
 
+        elif isinstance(expr, ast.DictComp):
+            self._generate_dict_comprehension(expr)
+
         elif isinstance(expr, ast.Call):
             self._generate_call(expr)
 
@@ -1580,6 +1607,123 @@ include 'functions.inc'
                 self.emit_raw(f"{lbl_null}:")
 
         self.emit("pop rax", "return list_ptr in RAX")
+
+    def _generate_dict_comprehension(self, node: ast.DictComp) -> None:
+        self.emit("mov ecx, 64", "create dict with capacity 64")
+        self.emit("call _pyfasm_dict_create")
+        self.emit("push rax", "save dict_ptr on stack")
+
+        for gen in node.generators:
+            target_var = self.current_func.local_vars.get(gen.target.id) if isinstance(gen.target, ast.Name) and self.current_func else None
+            if isinstance(gen.iter, ast.Call) and isinstance(gen.iter.func, ast.Name) and gen.iter.func.id == "range":
+                args = gen.iter.args
+                start_expr = None
+                stop_expr = None
+                step_val = 1
+                if len(args) == 1:
+                    stop_expr = args[0]
+                elif len(args) >= 2:
+                    start_expr = args[0]
+                    stop_expr = args[1]
+                    if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
+                        step_val = args[2].value
+
+                if start_expr:
+                    self._generate_expr(start_expr)
+                else:
+                    self.emit("xor eax, eax")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"init comp {target_var.name}")
+
+                lbl_start = self.new_label("dict_comp_range_start")
+                lbl_step = self.new_label("dict_comp_range_step")
+                lbl_end = self.new_label("dict_comp_range_end")
+
+                self.emit_raw(f"{lbl_start}:")
+                if target_var:
+                    self.emit(f"mov rax, [rbp - {target_var.stack_offset}]")
+                self.emit("push rax")
+                self._generate_expr(stop_expr)
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                if step_val > 0:
+                    self.emit(f"jge {lbl_end}")
+                else:
+                    self.emit(f"jle {lbl_end}")
+
+                lbl_skip = self.new_label("dict_comp_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.value)
+                self.emit("push rax", "save dict val")
+                self._generate_expr(node.key)
+                self.emit("mov rdx, rax", "dict key")
+                self.emit("pop r8", "dict val")
+                self.emit("mov rcx, [rsp]", "dict_ptr on stack")
+                self.emit("call _pyfasm_dict_set")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                if target_var:
+                    if step_val == 1:
+                        self.emit(f"inc qword [rbp - {target_var.stack_offset}]")
+                    else:
+                        self.emit(f"add qword [rbp - {target_var.stack_offset}], {step_val}")
+                self.emit(f"jmp {lbl_start}")
+                self.emit_raw(f"{lbl_end}:")
+
+            else:
+                self._generate_expr(gen.iter)
+                lbl_null = self.new_label("dict_comp_c_null")
+                lbl_start = self.new_label("dict_comp_c_start")
+                lbl_step = self.new_label("dict_comp_c_step")
+                lbl_end = self.new_label("dict_comp_c_end")
+
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_null}")
+
+                self.emit("push rax", "container ptr")
+                self.emit("push 0", "idx = 0")
+
+                self.emit_raw(f"{lbl_start}:")
+                self.emit("mov rcx, [rsp]", "idx")
+                self.emit("mov rbx, [rsp + 8]", "container ptr")
+                self.emit("mov rdx, [rbx]", "container len")
+                self.emit("cmp rcx, rdx")
+                self.emit(f"jge {lbl_end}")
+
+                self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[idx]")
+                if target_var:
+                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+
+                lbl_skip = self.new_label("dict_comp_c_skip")
+                for if_expr in gen.ifs:
+                    self._generate_expr(if_expr)
+                    self.emit("test rax, rax")
+                    self.emit(f"jz {lbl_skip}")
+
+                self._generate_expr(node.value)
+                self.emit("push rax", "save dict val")
+                self._generate_expr(node.key)
+                self.emit("mov rdx, rax", "dict key")
+                self.emit("pop r8", "dict val")
+                self.emit("mov rcx, [rsp + 16]", "dict_ptr on stack")
+                self.emit("call _pyfasm_dict_set")
+
+                self.emit_raw(f"{lbl_skip}:")
+                self.emit_raw(f"{lbl_step}:")
+                self.emit("inc qword [rsp]")
+                self.emit(f"jmp {lbl_start}")
+
+                self.emit_raw(f"{lbl_end}:")
+                self.emit("add rsp, 16", "cleanup container & idx")
+                self.emit_raw(f"{lbl_null}:")
+
+        self.emit("pop rax", "return dict_ptr in RAX")
 
     def _generate_binop_instr(self, op: ast.operator) -> None:
         if isinstance(op, ast.Add):
