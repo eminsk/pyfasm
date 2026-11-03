@@ -1929,7 +1929,7 @@ _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
     mov     rax, [rcx]
-    mov     [rcx + (rax + 1) * 8], rdx
+    mov     [rcx + rax * 8 + 8], rdx
     inc     qword [rcx]
 .la_ret:
     mov     rax, rcx
@@ -7145,7 +7145,7 @@ _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
     mov     rax, [rcx]
-    mov     [rcx + (rax + 1) * 8], rdx
+    mov     [rcx + rax * 8 + 8], rdx
     inc     qword [rcx]
 .la_ret:
     mov     rax, rcx

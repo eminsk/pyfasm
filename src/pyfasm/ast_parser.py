@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
-    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, InstanceType
+    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType
 )
 
 
@@ -22,6 +22,7 @@ class VariableSymbol:
     stack_offset: int  # Offset from RBP: [rbp - stack_offset]
     is_arg: bool = False
     arg_index: int = 0
+    is_generator: bool = False
 
 
 @dataclass
@@ -191,6 +192,165 @@ class LambdaLifter(ast.NodeTransformer):
         return ast.Name(id=fn_name, ctx=ast.Load())
 
 
+class YieldFromTransformer(ast.NodeTransformer):
+    """Desugars 'yield from expr' statements into a standard for-loop with yield."""
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+
+    def visit_Expr(self, node: ast.Expr) -> Any:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.YieldFrom):
+            self.counter += 1
+            tmp_name = f"_pyfasm_yf_{self.counter}"
+            loop_stmt = ast.For(
+                target=ast.Name(id=tmp_name, ctx=ast.Store()),
+                iter=node.value.value,
+                body=[
+                    ast.Expr(value=ast.Yield(value=ast.Name(id=tmp_name, ctx=ast.Load())))
+                ],
+                orelse=[]
+            )
+            return ast.copy_location(loop_stmt, node)
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.YieldFrom):
+            self.counter += 1
+            tmp_name = f"_pyfasm_yf_{self.counter}"
+            loop_stmt = ast.For(
+                target=ast.Name(id=tmp_name, ctx=ast.Store()),
+                iter=node.value.value,
+                body=[
+                    ast.Expr(value=ast.Yield(value=ast.Name(id=tmp_name, ctx=ast.Load())))
+                ],
+                orelse=[]
+            )
+            assign_stmt = ast.Assign(
+                targets=node.targets,
+                value=ast.Constant(value=0)
+            )
+            return [ast.copy_location(loop_stmt, node), ast.copy_location(assign_stmt, node)]
+        return node
+
+
+class GeneratorExpLifter(ast.NodeTransformer):
+    """Lifts anonymous generator expressions into module-level FunctionDef nodes."""
+
+    BUILTIN_NAMES = {
+        "range", "len", "print", "int", "str", "float", "bool",
+        "abs", "min", "max", "sum", "list", "dict", "set", "tuple",
+        "next", "iter", "open", "round", "pow", "ord", "chr", "input",
+        "any", "all", "map", "filter", "zip", "enumerate"
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.generators: List[ast.FunctionDef] = []
+        self.counter: int = 0
+
+    def _find_free_names(self, node: ast.AST, bound_names: Set[str]) -> List[str]:
+        free_names: List[str] = []
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                nid = sub.id
+                if nid not in bound_names and nid not in self.BUILTIN_NAMES:
+                    if nid not in free_names:
+                        free_names.append(nid)
+        return free_names
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
+        self.generic_visit(node)
+        self.counter += 1
+        fn_name = f"_pyfasm_genexp_{self.counter}"
+
+        # Collect targets from comprehension clauses
+        targets = set()
+        for comp in node.generators:
+            for sub in ast.walk(comp.target):
+                if isinstance(sub, ast.Name):
+                    targets.add(sub.id)
+
+        # Free names: check elt, ifs, and secondary iters (idx > 0)
+        free_names_set = set()
+        for idx, comp in enumerate(node.generators):
+            if idx > 0:
+                for fn in self._find_free_names(comp.iter, targets):
+                    free_names_set.add(fn)
+            for if_expr in comp.ifs:
+                for fn in self._find_free_names(if_expr, targets):
+                    free_names_set.add(fn)
+        for fn in self._find_free_names(node.elt, targets):
+            free_names_set.add(fn)
+
+        ordered_free = sorted(list(free_names_set))
+
+        # First iterator is passed as _iter_0 (matching Python PEP 289 semantics)
+        fn_param_names = ["_iter_0"] + ordered_free
+
+        # Build nested loop body with yield
+        inner_body: List[ast.stmt] = [ast.Expr(value=ast.Yield(value=node.elt))]
+        for comp_idx in reversed(range(len(node.generators))):
+            comp = node.generators[comp_idx]
+            current_body = inner_body
+            for if_expr in reversed(comp.ifs):
+                current_body = [ast.If(test=if_expr, body=current_body, orelse=[])]
+
+            iter_expr = ast.Name(id="_iter_0", ctx=ast.Load()) if comp_idx == 0 else comp.iter
+            inner_body = [ast.For(
+                target=comp.target,
+                iter=iter_expr,
+                body=current_body,
+                orelse=[]
+            )]
+
+        fn_def = ast.FunctionDef(
+            name=fn_name,
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[ast.arg(arg=name) for name in fn_param_names],
+                vararg=None,
+                kwonlyargs=[],
+                kw_defaults=[],
+                kwarg=None,
+                defaults=[]
+            ),
+            body=inner_body,
+            decorator_list=[],
+            returns=None,
+            lineno=getattr(node, "lineno", 1),
+            col_offset=getattr(node, "col_offset", 0)
+        )
+        self.generators.append(fn_def)
+
+        # Replace with call: first iter expr + free variable names
+        call_args = [node.generators[0].iter] + [ast.Name(id=fn, ctx=ast.Load()) for fn in ordered_free]
+        call_node = ast.Call(
+            func=ast.Name(id=fn_name, ctx=ast.Load()),
+            args=call_args,
+            keywords=[]
+        )
+        return ast.copy_location(call_node, node)
+
+
+def preprocess_ast(tree: ast.AST) -> ast.AST:
+    """Preprocesses AST: folds constants, desugars yield from, lifts generator expressions and lambdas."""
+    tree = ConstantFolder().visit(tree)
+    tree = YieldFromTransformer().visit(tree)
+    gen_lifter = GeneratorExpLifter()
+    tree = gen_lifter.visit(tree)
+    for gen_def in gen_lifter.generators:
+        tree.body.append(gen_def)
+    lambda_lifter = LambdaLifter()
+    tree = lambda_lifter.visit(tree)
+    for lambda_def in lambda_lifter.lambdas:
+        tree.body.append(lambda_def)
+    ast.fix_missing_locations(tree)
+    return tree
+
+
 class AstAnalyzer:
     """Extracts function signatures, local variables, and literals across single files or multi-module projects."""
 
@@ -259,14 +419,24 @@ class AstAnalyzer:
             except Exception:
                 pass
 
+    def _propagate_generator_types(self, module: ParsedModule) -> None:
+        """Marks local variables that receive generator call returns with is_generator = True."""
+        for fn in module.functions.values():
+            if fn.ast_node:
+                for sub in ast.walk(fn.ast_node):
+                    if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(sub.targets[0], ast.Name):
+                        if isinstance(sub.value, ast.Call) and isinstance(sub.value.func, ast.Name):
+                            target_fn = module.functions.get(sub.value.func.id)
+                            if target_fn and getattr(target_fn, "is_generator", False):
+                                v = fn.local_vars.get(sub.targets[0].id)
+                                if v:
+                                    v.is_generator = True
+                                    v.var_type = TYPE_GENERATOR
+
     def parse_source(self, source_code: str) -> ParsedModule:
         """Parses a raw Python source code string into a ParsedModule."""
         tree = ast.parse(source_code)
-        tree = ConstantFolder().visit(tree)
-        lifter = LambdaLifter()
-        tree = lifter.visit(tree)
-        for lambda_def in lifter.lambdas:
-            tree.body.append(lambda_def)
+        tree = preprocess_ast(tree)
         module = ParsedModule()
 
         # First pass: find imports, string and float constants across the AST
@@ -290,6 +460,7 @@ class AstAnalyzer:
 
         # Second pass: extract functions, classes, and top-level statements
         self._extract_top_level_and_functions(tree, module, is_entry=True, mod_prefix="")
+        self._propagate_generator_types(module)
 
         return module
 
@@ -332,6 +503,7 @@ class AstAnalyzer:
             module.ui_spec = analyze_ui_structure(entry_tree)
         except Exception:
             pass
+        self._propagate_generator_types(module)
         module.string_literals = self.strings
         module.float_literals = self.floats
         return module
@@ -391,11 +563,7 @@ class AstAnalyzer:
         try:
             source_code = real_path.read_text(encoding="utf-8")
             tree = ast.parse(source_code)
-            tree = ConstantFolder().visit(tree)
-            lifter = LambdaLifter()
-            tree = lifter.visit(tree)
-            for lambda_def in lifter.lambdas:
-                tree.body.append(lambda_def)
+            tree = preprocess_ast(tree)
         except Exception:
             return
 
@@ -785,13 +953,44 @@ class AstAnalyzer:
                             is_arg=False
                         )
                         offset += 8
-                elif isinstance(sub_node, ast.For) and isinstance(sub_node.target, ast.Name):
-                    vname = sub_node.target.id
-                    if vname in global_names:
-                        continue
-                    if vname not in local_vars:
-                        local_vars[vname] = VariableSymbol(
-                            name=vname,
+                elif isinstance(sub_node, ast.For):
+                    if isinstance(sub_node.target, ast.Name):
+                        vname = sub_node.target.id
+                        if vname not in global_names and vname not in local_vars:
+                            local_vars[vname] = VariableSymbol(
+                                name=vname,
+                                var_type=TYPE_INT,
+                                stack_offset=offset,
+                                is_arg=False
+                            )
+                            offset += 8
+                    elif isinstance(sub_node.target, (ast.Tuple, ast.List)):
+                        for elt in sub_node.target.elts:
+                            if isinstance(elt, ast.Name):
+                                vname = elt.id
+                                if vname not in global_names and vname not in local_vars:
+                                    local_vars[vname] = VariableSymbol(
+                                        name=vname,
+                                        var_type=TYPE_INT,
+                                        stack_offset=offset,
+                                        is_arg=False
+                                    )
+                                    offset += 8
+
+                    # Loop buffers for safe register spilling across yields and nested loops
+                    buf_name = f"_pyfasm_for_buf_{id(sub_node)}"
+                    idx_name = f"_pyfasm_for_idx_{id(sub_node)}"
+                    if buf_name not in local_vars:
+                        local_vars[buf_name] = VariableSymbol(
+                            name=buf_name,
+                            var_type=TYPE_PTR,
+                            stack_offset=offset,
+                            is_arg=False
+                        )
+                        offset += 8
+                    if idx_name not in local_vars:
+                        local_vars[idx_name] = VariableSymbol(
+                            name=idx_name,
                             var_type=TYPE_INT,
                             stack_offset=offset,
                             is_arg=False

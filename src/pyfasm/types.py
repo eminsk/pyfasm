@@ -38,6 +38,9 @@ class PyFasmType:
     def is_tuple(self) -> bool:
         return isinstance(self, TupleType)
 
+    def is_generator(self) -> bool:
+        return isinstance(self, GeneratorType)
+
     def is_void(self) -> bool:
         return isinstance(self, VoidType)
 
@@ -105,6 +108,12 @@ class TupleType(PyFasmType):
 
 
 @dataclass(frozen=True)
+class GeneratorType(PyFasmType):
+    name: str = "generator"
+    size_bytes: int = 8  # Pointer to heap generator frame descriptor
+
+
+@dataclass(frozen=True)
 class InstanceType(PyFasmType):
     name: str = "object"
     class_name: Optional[str] = None
@@ -127,6 +136,7 @@ TYPE_LIST = ListType()
 TYPE_DICT = DictType()
 TYPE_SET = SetType()
 TYPE_TUPLE = TupleType()
+TYPE_GENERATOR = GeneratorType()
 TYPE_VOID = VoidType()
 
 
@@ -153,6 +163,8 @@ def resolve_type(type_name: Optional[str]) -> PyFasmType:
         return TYPE_SET
     if norm in ("tuple",):
         return TYPE_TUPLE
+    if norm in ("generator", "iterator", "gen"):
+        return TYPE_GENERATOR
     if norm in ("none", "void"):
         return TYPE_VOID
     return TYPE_INT

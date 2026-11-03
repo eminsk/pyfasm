@@ -769,7 +769,6 @@ include 'functions.inc'
         self.yield_counter = 0
 
         self.emit("push rbp")
-        self.emit("mov rbp, rsp")
         self.emit("push rbx")
         self.emit("push rsi")
         self.emit("push rdi")
@@ -777,6 +776,7 @@ include 'functions.inc'
         self.emit("push r13")
         self.emit("push r14")
         self.emit("push r15")
+        self.emit("mov rbp, rsp")
         self.emit(f"sub rsp, {fn.stack_size + 32}")
         self.emit("and rsp, -16")
         self.emit("mov r15, rcx", "save generator object ptr in R15")
@@ -805,7 +805,7 @@ include 'functions.inc'
         self.emit("xor eax, eax", "return 0 on exhaust")
 
         self.emit_raw(f".{fn_lbl}_yield_exit:")
-        self.emit("lea rsp, [rbp - 56]")
+        self.emit("mov rsp, rbp")
         self.emit("pop r15")
         self.emit("pop r14")
         self.emit("pop r13")
@@ -813,7 +813,6 @@ include 'functions.inc'
         self.emit("pop rdi")
         self.emit("pop rsi")
         self.emit("pop rbx")
-        self.emit("mov rsp, rbp")
         self.emit("pop rbp")
         self.emit("ret")
         self.emit_raw("")
@@ -1132,10 +1131,9 @@ include 'functions.inc'
                     self._generate_for_range(stmt)
                     return
 
-            # for item in container (list, tuple)
-            if isinstance(stmt.target, ast.Name):
-                self._generate_for_container(stmt)
-                return
+            # for item in container (list, tuple, dict, set, gen)
+            self._generate_for_container(stmt)
+            return
 
         elif isinstance(stmt, ast.Break):
             if self.loop_stack:
@@ -1250,10 +1248,23 @@ include 'functions.inc'
         elif isinstance(stmt, ast.Match):
             self._generate_match(stmt)
 
+    def _assign_target(self, target_node: ast.AST, value_reg: str = "rax") -> None:
+        if isinstance(target_node, ast.Name):
+            var = self.current_func.local_vars.get(target_node.id) if self.current_func else None
+            if var:
+                self.emit(f"mov [rbp - {var.stack_offset}], {value_reg}", f"assign {var.name}")
+        elif isinstance(target_node, (ast.Tuple, ast.List)):
+            self.emit(f"mov r10, {value_reg}", "container item to unpack")
+            for idx, elt in enumerate(target_node.elts):
+                if isinstance(elt, ast.Name):
+                    e_var = self.current_func.local_vars.get(elt.id) if self.current_func else None
+                    if e_var:
+                        self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", f"unpack {elt.id}")
+                        self.emit(f"mov [rbp - {e_var.stack_offset}], rax")
+
     def _generate_for_container(self, stmt: ast.For) -> None:
-        target_var = self.current_func.local_vars.get(stmt.target.id) if self.current_func else None
-        if not target_var:
-            return
+        buf_var = self.current_func.local_vars.get(f"_pyfasm_for_buf_{id(stmt)}") if self.current_func else None
+        idx_var = self.current_func.local_vars.get(f"_pyfasm_for_idx_{id(stmt)}") if self.current_func else None
 
         self._generate_expr(stmt.iter)
         lbl_null = self.new_label("for_null")
@@ -1275,15 +1286,25 @@ include 'functions.inc'
                 is_gen_iter = True
 
         if is_gen_iter:
-            self.emit("push rax", "save gen_ptr")
+            if buf_var:
+                self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "save gen_ptr to stack slot")
+            else:
+                self.emit("push rax", "save gen_ptr")
+
             self.loop_stack.append((lbl_step, lbl_end))
             self.emit_raw(f"{lbl_start}:")
-            self.emit("mov rcx, [rsp]", "gen_ptr")
+            if buf_var:
+                self.emit(f"mov rcx, [rbp - {buf_var.stack_offset}]", "gen_ptr")
+            else:
+                self.emit("mov rcx, [rsp]", "gen_ptr")
             self.emit("call _pyfasm_gen_next")
-            self.emit("mov rbx, [rsp]", "gen_ptr")
+            if buf_var:
+                self.emit(f"mov rbx, [rbp - {buf_var.stack_offset}]", "gen_ptr")
+            else:
+                self.emit("mov rbx, [rsp]", "gen_ptr")
             self.emit("cmp qword [rbx + 16], 1", "check done flag")
             self.emit(f"je {lbl_end}")
-            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+            self._assign_target(stmt.target, "rax")
 
             for s in stmt.body:
                 self._generate_statement(s)
@@ -1292,7 +1313,8 @@ include 'functions.inc'
             self.emit(f"jmp {lbl_start}")
 
             self.emit_raw(f"{lbl_end}:")
-            self.emit("add rsp, 8", "cleanup gen_ptr")
+            if not buf_var:
+                self.emit("add rsp, 8", "cleanup gen_ptr")
             self.loop_stack.pop()
             self.emit_raw(f"{lbl_null}:")
             return
@@ -1307,13 +1329,23 @@ include 'functions.inc'
             if iter_t.is_set() or iter_t.is_dict():
                 is_hash_table = True
 
-        self.emit("push rax", "container ptr")
-        self.emit("push 0", "current index = 0")
+        if buf_var and idx_var:
+            self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "container ptr to stack slot")
+            self.emit(f"mov qword [rbp - {idx_var.stack_offset}], 0", "current index = 0")
+        else:
+            self.emit("push rax", "container ptr")
+            self.emit("push 0", "current index = 0")
+
         self.loop_stack.append((lbl_step, lbl_end))
 
         self.emit_raw(f"{lbl_start}:")
-        self.emit("mov rcx, [rsp]", "current index")
-        self.emit("mov rbx, [rsp + 8]", "container ptr")
+        if buf_var and idx_var:
+            self.emit(f"mov rcx, [rbp - {idx_var.stack_offset}]", "current index")
+            self.emit(f"mov rbx, [rbp - {buf_var.stack_offset}]", "container ptr")
+        else:
+            self.emit("mov rcx, [rsp]", "current index")
+            self.emit("mov rbx, [rsp + 8]", "container ptr")
+
         self.emit("mov rdx, [rbx]", "container capacity / length")
         self.emit("cmp rcx, rdx")
         self.emit(f"jge {lbl_end}")
@@ -1328,20 +1360,24 @@ include 'functions.inc'
             self.emit("cmp rax, -1")
             self.emit(f"je {lbl_step}", "skip tombstone slot")
             self.emit("mov rax, [r8 + 8]", "load key from slot")
-            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+            self._assign_target(stmt.target, "rax")
         else:
             self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[index]")
-            self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+            self._assign_target(stmt.target, "rax")
 
         for s in stmt.body:
             self._generate_statement(s)
 
         self.emit_raw(f"{lbl_step}:")
-        self.emit("inc qword [rsp]", "index++")
+        if buf_var and idx_var:
+            self.emit(f"inc qword [rbp - {idx_var.stack_offset}]", "index++")
+        else:
+            self.emit("inc qword [rsp]", "index++")
         self.emit(f"jmp {lbl_start}")
 
         self.emit_raw(f"{lbl_end}:")
-        self.emit("add rsp, 16", "cleanup container & index from stack")
+        if not (buf_var and idx_var):
+            self.emit("add rsp, 16", "cleanup container & index from stack")
         self.loop_stack.pop()
         self.emit_raw(f"{lbl_null}:")
 
@@ -2912,8 +2948,253 @@ include 'functions.inc'
         if func_name == "next" and call.args:
             self._generate_expr(call.args[0])
             self.emit("mov rcx, rax", "gen_ptr")
+            self.emit("sub rsp, 32", "shadow space for gen_next")
             self.emit("call _pyfasm_gen_next")
+            self.emit("add rsp, 32", "restore shadow space")
             return
+
+        # Built-in range(...) constructor as an expression
+        if func_name == "range" and call.args:
+            args = call.args
+            start_expr = None
+            stop_expr = None
+            step_val = 1
+            if len(args) == 1:
+                stop_expr = args[0]
+            elif len(args) >= 2:
+                start_expr = args[0]
+                stop_expr = args[1]
+                if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
+                    step_val = args[2].value
+
+            lbl_loop = self.new_label("range_expr_loop")
+            lbl_done = self.new_label("range_expr_done")
+
+            self.emit("push rbx")
+            self.emit("push r12")
+            self.emit("push r13")
+            self.emit("push r14") # 4 registers pushed = 32 bytes, aligns stack to 16
+
+            self._generate_expr(stop_expr)
+            self.emit("mov r13, rax", "range stop")
+
+            if start_expr:
+                self._generate_expr(start_expr)
+                self.emit("mov r12, rax", "range start")
+            else:
+                self.emit("xor r12, r12", "range start = 0")
+
+            self.emit("mov ecx, 1024", "initial list buffer")
+            self.emit("sub rsp, 32", "shadow space for alloc")
+            self.emit("call _pyfasm_alloc")
+            self.emit("add rsp, 32", "restore shadow space")
+            self.emit("mov qword [rax], 0", "length = 0")
+            self.emit("mov r14, rax", "list_ptr")
+
+            self.emit_raw(f".loop_{lbl_loop}:")
+            self.emit("cmp r12, r13")
+            if step_val > 0:
+                self.emit(f"jge .done_{lbl_done}")
+            else:
+                self.emit(f"jle .done_{lbl_done}")
+
+            self.emit("mov rdx, r12", "current item")
+            self.emit("mov rcx, r14", "list_ptr")
+            self.emit("sub rsp, 32", "shadow space for append")
+            self.emit("call _pyfasm_list_append")
+            self.emit("add rsp, 32", "restore shadow space")
+
+            if step_val == 1:
+                self.emit("inc r12")
+            elif step_val == -1:
+                self.emit("dec r12")
+            else:
+                self.emit(f"add r12, {step_val}")
+            self.emit(f"jmp .loop_{lbl_loop}")
+
+            self.emit_raw(f".done_{lbl_done}:")
+            self.emit("mov rax, r14", "return range list")
+            self.emit("pop r14")
+            self.emit("pop r13")
+            self.emit("pop r12")
+            self.emit("pop rbx")
+            return
+
+        # Built-in sum, any, all for containers and generators
+        if func_name in ("sum", "any", "all") and call.args:
+            arg = call.args[0]
+            is_gen = False
+            if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+                f_sym = self.module.functions.get(arg.func.id)
+                if f_sym and getattr(f_sym, "is_generator", False):
+                    is_gen = True
+            elif isinstance(arg, ast.Name) and self.current_func:
+                v_sym = self.current_func.local_vars.get(arg.id)
+                if v_sym and (getattr(v_sym, "is_generator", False) or (hasattr(v_sym, "var_type") and v_sym.var_type.is_generator())):
+                    is_gen = True
+
+            self._generate_expr(arg)
+            lbl_done = self.new_label(f"{func_name}_done")
+            lbl_loop = self.new_label(f"{func_name}_loop")
+            lbl_exit = self.new_label(f"{func_name}_exit")
+
+            self.emit("test rax, rax")
+            if func_name == "all":
+                self.emit(f"jz .all_empty_{lbl_done}")
+            else:
+                self.emit(f"jz .zero_{lbl_done}")
+
+            if is_gen:
+                self.emit("push rbx")
+                self.emit("push r12")
+                self.emit("mov rbx, rax", "gen_ptr")
+                if func_name == "sum":
+                    self.emit("xor r12, r12", "sum = 0")
+                elif func_name == "any":
+                    self.emit("xor r12, r12", "any = False")
+                elif func_name == "all":
+                    self.emit("mov r12, 1", "all = True")
+
+                self.emit_raw(f".loop_{lbl_loop}:")
+                self.emit("mov rcx, rbx", "gen_ptr")
+                self.emit("sub rsp, 32", "shadow space for gen_next")
+                self.emit("call _pyfasm_gen_next")
+                self.emit("add rsp, 32", "restore shadow space")
+                self.emit("cmp qword [rbx + 16], 1", "check done flag")
+                self.emit(f"je .done_{lbl_done}")
+
+                if func_name == "sum":
+                    self.emit("add r12, rax")
+                    self.emit(f"jmp .loop_{lbl_loop}")
+                elif func_name == "any":
+                    self.emit("test rax, rax")
+                    self.emit(f"jz .loop_{lbl_loop}")
+                    self.emit("mov r12, 1", "found truthy")
+                    self.emit(f"jmp .done_{lbl_done}")
+                elif func_name == "all":
+                    self.emit("test rax, rax")
+                    self.emit(f"jnz .loop_{lbl_loop}")
+                    self.emit("xor r12, r12", "found falsy")
+                    self.emit(f"jmp .done_{lbl_done}")
+
+                self.emit_raw(f".done_{lbl_done}:")
+                self.emit("mov rax, r12", "return result")
+                self.emit("pop r12")
+                self.emit("pop rbx")
+                self.emit(f"jmp .exit_{lbl_exit}")
+
+                if func_name == "all":
+                    self.emit_raw(f".all_empty_{lbl_done}:")
+                    self.emit("mov rax, 1")
+                    self.emit(f"jmp .exit_{lbl_exit}")
+                else:
+                    self.emit_raw(f".zero_{lbl_done}:")
+                    self.emit("xor eax, eax")
+                    self.emit(f"jmp .exit_{lbl_exit}")
+
+                self.emit_raw(f".exit_{lbl_exit}:")
+                return
+            else:
+                # Container (list, tuple, etc.)
+                self.emit("push rbx")
+                self.emit("push rsi")
+                self.emit("mov rbx, rax", "container_ptr")
+                self.emit("mov rsi, [rbx]", "container length")
+                if func_name == "sum":
+                    self.emit("xor eax, eax", "sum = 0")
+                elif func_name == "any":
+                    self.emit("xor eax, eax", "any = False")
+                elif func_name == "all":
+                    self.emit("mov eax, 1", "all = True")
+
+                self.emit("xor ecx, ecx", "idx = 0")
+                self.emit_raw(f".loop_{lbl_loop}:")
+                self.emit("cmp rcx, rsi")
+                self.emit(f"jge .done_{lbl_done}")
+                self.emit("mov rdx, [rbx + rcx * 8 + 8]", "load item")
+
+                if func_name == "sum":
+                    self.emit("add rax, rdx")
+                    self.emit("inc rcx")
+                    self.emit(f"jmp .loop_{lbl_loop}")
+                elif func_name == "any":
+                    self.emit("test rdx, rdx")
+                    self.emit(f"jz .next_{lbl_loop}")
+                    self.emit("mov eax, 1", "found truthy")
+                    self.emit(f"jmp .done_{lbl_done}")
+                    self.emit_raw(f".next_{lbl_loop}:")
+                    self.emit("inc rcx")
+                    self.emit(f"jmp .loop_{lbl_loop}")
+                elif func_name == "all":
+                    self.emit("test rdx, rdx")
+                    self.emit(f"jnz .next_{lbl_loop}")
+                    self.emit("xor eax, eax", "found falsy")
+                    self.emit(f"jmp .done_{lbl_done}")
+                    self.emit_raw(f".next_{lbl_loop}:")
+                    self.emit("inc rcx")
+                    self.emit(f"jmp .loop_{lbl_loop}")
+
+                self.emit_raw(f".done_{lbl_done}:")
+                self.emit("pop rsi")
+                self.emit("pop rbx")
+                self.emit(f"jmp .exit_{lbl_exit}")
+
+                if func_name == "all":
+                    self.emit_raw(f".all_empty_{lbl_done}:")
+                    self.emit("mov rax, 1")
+                    self.emit(f"jmp .exit_{lbl_exit}")
+                else:
+                    self.emit_raw(f".zero_{lbl_done}:")
+                    self.emit("xor eax, eax")
+                    self.emit(f"jmp .exit_{lbl_exit}")
+
+                self.emit_raw(f".exit_{lbl_exit}:")
+                return
+
+        # Built-in list(...) constructor
+        if func_name == "list" and call.args:
+            arg = call.args[0]
+            is_gen = False
+            if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+                f_sym = self.module.functions.get(arg.func.id)
+                if f_sym and getattr(f_sym, "is_generator", False):
+                    is_gen = True
+            elif isinstance(arg, ast.Name) and self.current_func:
+                v_sym = self.current_func.local_vars.get(arg.id)
+                if v_sym and (getattr(v_sym, "is_generator", False) or (hasattr(v_sym, "var_type") and v_sym.var_type.is_generator())):
+                    is_gen = True
+
+            if is_gen:
+                self._generate_expr(arg)
+                lbl_loop = self.new_label("list_gen_loop")
+                lbl_done = self.new_label("list_gen_done")
+                self.emit("push rbx")
+                self.emit("push r12")
+                self.emit("mov rbx, rax", "gen_ptr")
+                self.emit("mov ecx, 1024", "initial list capacity")
+                self.emit("sub rsp, 32", "shadow space for alloc")
+                self.emit("call _pyfasm_alloc")
+                self.emit("add rsp, 32", "restore shadow space")
+                self.emit("mov qword [rax], 0", "length = 0")
+                self.emit("mov r12, rax", "list_ptr")
+                self.emit_raw(f".loop_{lbl_loop}:")
+                self.emit("mov rcx, rbx", "gen_ptr")
+                self.emit("sub rsp, 32", "shadow space for gen_next")
+                self.emit("call _pyfasm_gen_next")
+                self.emit("add rsp, 32", "restore shadow space")
+                self.emit("cmp qword [rbx + 16], 1", "check done flag")
+                self.emit(f"je .done_{lbl_done}")
+                self.emit("mov rdx, rax", "item")
+                self.emit("mov rcx, r12", "list_ptr")
+                self.emit("sub rsp, 32", "shadow space for list_append")
+                self.emit("call _pyfasm_list_append")
+                self.emit("add rsp, 32", "restore shadow space")
+                self.emit(f"jmp .loop_{lbl_loop}")
+                self.emit_raw(f".done_{lbl_done}:")
+                self.emit("mov rax, r12", "return list_ptr")
+                self.emit("pop r12")
+                self.emit("pop rbx")
+                return
 
         if func_name in ("len", "str_len"):
             if call.args:
