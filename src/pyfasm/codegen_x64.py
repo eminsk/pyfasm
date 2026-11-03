@@ -30,11 +30,17 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
     # FASM directives & operators
     "section", "segment", "data", "text", "code", "include",
     "format", "entry", "extrn", "public", "org", "align",
-    "db", "dw", "dd", "dq", "rb", "rw", "rd", "rq",
+    "db", "dw", "dd", "dq", "rb", "rw", "rd", "rq", "dp", "df", "dt", "du",
     "macro", "struc", "virtual", "end", "repeat", "while", "if", "else",
     "type", "size", "ptr", "near", "far", "short",
     "byte", "word", "dword", "pword", "qword", "tbyte", "dqword", "qqword",
-    "as", "eq", "eqtype", "defined", "used",
+    "as", "eq", "ne", "lt", "gt", "le", "ge", "eqtype", "defined", "used",
+    # Additional FASM directives, preprocessor, relocations and predefined symbols
+    "file", "load", "store", "display", "err", "assert",
+    "postpone", "purge", "restruc", "times", "irp", "irps", "match", "rept",
+    "forward", "reverse", "common", "line",
+    "plt", "got", "rva", "dup", "offset",
+    "__file__", "__line__", "__time__", "__date__",
 }
 
 
@@ -571,6 +577,11 @@ class X64CodeGen:
 
         # Emit global variables
         for gname, gval in self.module.global_vars.items():
+            # Sanitize Python values to valid FASM integer constants
+            if isinstance(gval, bool):
+                gval = 1 if gval else 0
+            elif not isinstance(gval, int):
+                gval = 0
             lines.append(f"    _pyfasm_global_{gname} dq {gval}")
 
         return "\n".join(lines)
@@ -658,6 +669,16 @@ class X64CodeGen:
         for fn_id, names in fn_to_names.items():
             fn = next(f for f in self.module.functions.values() if id(f) == fn_id)
             if fn.name in seen_funcs:
+                # Function body already emitted — but we still need alias labels
+                # for any extra names that weren't emitted as labels yet.
+                fn_lbl = safe_asm_label(fn.name)
+                for alias in names:
+                    if alias != fn.name:
+                        safe_alias = safe_asm_label(alias)
+                        if safe_alias != fn_lbl:
+                            self.emit_raw(f"{safe_alias}:")
+                            self.emit(f"jmp {fn_lbl}", f"alias for {fn.name}")
+                            self.emit_raw("")
                 continue
             seen_funcs.add(fn.name)
             if fn.class_name:

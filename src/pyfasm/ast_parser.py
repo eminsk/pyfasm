@@ -621,6 +621,23 @@ class AstAnalyzer:
                     if dep and dep != real_path:
                         self._parse_file_recursive(dep, module, is_entry=False)
 
+                    # Register import aliases: `from mod import name as alias`
+                    # so that `alias` resolves to the already-parsed function `name`
+                    # or to the module-prefixed variant `mod_name`
+                    for alias in node.names:
+                        imported_name = alias.name
+                        local_alias = alias.asname
+                        if local_alias and local_alias != imported_name:
+                            # Try to find the original function under its bare name or module-prefixed name
+                            orig_fn = module.functions.get(imported_name)
+                            if not orig_fn:
+                                # Try module-prefix variant (e.g. gui_main for gui.main)
+                                mod_stem = mod_name.lstrip(".").split(".")[-1] if mod_name else ""
+                                prefixed = f"{mod_stem}_{imported_name}" if mod_stem else imported_name
+                                orig_fn = module.functions.get(prefixed)
+                            if orig_fn and local_alias not in module.functions:
+                                module.functions[local_alias] = orig_fn
+
     def _extract_top_level_and_functions(
         self,
         tree: ast.AST,
@@ -636,7 +653,7 @@ class AstAnalyzer:
                     if isinstance(tgt, ast.Name):
                         init_val = 0
                         if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, int):
-                            init_val = stmt.value.value
+                            init_val = int(stmt.value.value)  # bool -> int (False->0, True->1)
                         module.global_vars[tgt.id] = init_val
             if isinstance(stmt, ast.FunctionDef):
                 fn = self._analyze_function(stmt)
