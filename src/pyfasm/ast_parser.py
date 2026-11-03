@@ -596,6 +596,12 @@ class AstAnalyzer:
                 return TYPE_BOOL
             return self._infer_node_type(expr.operand, local_vars)
 
+        elif isinstance(expr, ast.IfExp):
+            return self._infer_node_type(expr.body, local_vars)
+
+        elif isinstance(expr, ast.NamedExpr):
+            return self._infer_node_type(expr.value, local_vars)
+
         elif isinstance(expr, (ast.Compare, ast.BoolOp)):
             return TYPE_BOOL
 
@@ -737,6 +743,16 @@ class AstAnalyzer:
                                     is_arg=False
                                 )
                                 offset += 8
+                elif isinstance(sub_node, ast.NamedExpr) and isinstance(sub_node.target, ast.Name):
+                    vname = sub_node.target.id
+                    if vname not in local_vars:
+                        local_vars[vname] = VariableSymbol(
+                            name=vname,
+                            var_type=self._infer_node_type(sub_node.value, local_vars),
+                            stack_offset=offset,
+                            is_arg=False
+                        )
+                        offset += 8
                 elif isinstance(sub_node, (ast.ListComp, ast.DictComp)):
                     for gen in sub_node.generators:
                         if isinstance(gen.target, ast.Name):

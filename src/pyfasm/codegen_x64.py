@@ -1005,6 +1005,26 @@ include 'functions.inc'
                 self.emit("mov ecx, eax")
                 self.emit("call [ExitProcess]")
 
+        elif isinstance(stmt, ast.Assert):
+            lbl_ok = self.new_label("assert_ok")
+            self._generate_expr(stmt.test)
+            self.emit("test rax, rax")
+            self.emit(f"jnz {lbl_ok}")
+            if self.try_stack:
+                self.emit("mov rax, 1", "AssertionError")
+                self.emit(f"jmp {self.try_stack[-1]}")
+            else:
+                self.emit("mov ecx, 1", "AssertionError exit code 1")
+                self.emit("call [ExitProcess]")
+            self.emit_raw(f"{lbl_ok}:")
+
+        elif isinstance(stmt, ast.Delete):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name) and self.current_func:
+                    var = self.current_func.local_vars.get(target.id)
+                    if var:
+                        self.emit(f"mov qword [rbp - {var.stack_offset}], 0", f"del {var.name}")
+
     def _generate_for_container(self, stmt: ast.For) -> None:
         target_var = self.current_func.local_vars.get(stmt.target.id)
         if not target_var:
@@ -1124,6 +1144,12 @@ include 'functions.inc'
                 return self.current_func.local_vars[expr.id].var_type
         if isinstance(expr, (ast.List, ast.ListComp)):
             return TYPE_LIST
+        if isinstance(expr, ast.IfExp):
+            return self._infer_expr_type(expr.body)
+        if isinstance(expr, ast.NamedExpr):
+            return self._infer_expr_type(expr.value)
+        if isinstance(expr, ast.BoolOp):
+            return TYPE_BOOL
         if isinstance(expr, (ast.Dict, ast.DictComp)):
             return TYPE_DICT
         if isinstance(expr, ast.Tuple):
@@ -1264,6 +1290,41 @@ include 'functions.inc'
                 self.emit("test rax, rax")
                 self.emit("setz al")
                 self.emit("movzx rax, al")
+
+        elif isinstance(expr, ast.BoolOp):
+            lbl_end = self.new_label("boolop_end")
+            if isinstance(expr.op, ast.And):
+                for idx, val in enumerate(expr.values):
+                    self._generate_expr(val)
+                    if idx < len(expr.values) - 1:
+                        self.emit("test rax, rax")
+                        self.emit(f"jz {lbl_end}")
+            elif isinstance(expr.op, ast.Or):
+                for idx, val in enumerate(expr.values):
+                    self._generate_expr(val)
+                    if idx < len(expr.values) - 1:
+                        self.emit("test rax, rax")
+                        self.emit(f"jnz {lbl_end}")
+            self.emit_raw(f"{lbl_end}:")
+
+        elif isinstance(expr, ast.IfExp):
+            lbl_else = self.new_label("ifexp_else")
+            lbl_done = self.new_label("ifexp_done")
+            self._generate_expr(expr.test)
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_else}")
+            self._generate_expr(expr.body)
+            self.emit(f"jmp {lbl_done}")
+            self.emit_raw(f"{lbl_else}:")
+            self._generate_expr(expr.orelse)
+            self.emit_raw(f"{lbl_done}:")
+
+        elif isinstance(expr, ast.NamedExpr):
+            self._generate_expr(expr.value)
+            if isinstance(expr.target, ast.Name) and self.current_func:
+                var = self.current_func.local_vars.get(expr.target.id)
+                if var:
+                    self.emit(f"mov [rbp - {var.stack_offset}], rax", f"walrus assign {var.name}")
 
         elif isinstance(expr, ast.Compare):
             op = expr.ops[0]
