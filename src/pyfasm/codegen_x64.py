@@ -127,7 +127,13 @@ class X64CodeGen:
 
     def _get_attribute_offset(self, attr_name: str) -> int:
         if not hasattr(self, "_attr_offsets"):
-            self._attr_offsets = {}
+            self._attr_offsets = {
+                "status_code": 0,
+                "text": 8,
+                "json": 16,
+                "reason": 24,
+                "content": 8,
+            }
         if attr_name not in self._attr_offsets:
             self._attr_offsets[attr_name] = len(self._attr_offsets) * 8
         return self._attr_offsets[attr_name]
@@ -1247,12 +1253,28 @@ include 'functions.inc'
                         continue
 
                     is_dict_target = False
-                    if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
+                    is_tuple_key = False
+                    if isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
+                        is_dict_target = True
+                        is_tuple_key = isinstance(slice_unwrapped, ast.Tuple)
+                    elif isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                         is_dict_target = True
                     elif isinstance(target.value, ast.Name) and self.current_func:
                         v = self.current_func.local_vars.get(target.value.id)
-                        if v and v.var_type.is_dict():
+                        if v and (v.var_type.is_dict() or v.var_type.is_set()):
                             is_dict_target = True
+                            if isinstance(slice_unwrapped, ast.Name):
+                                kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                                if kv and kv.var_type.is_tuple():
+                                    is_tuple_key = True
+                    else:
+                        expr_type = self._infer_expr_type(target.value)
+                        if expr_type.is_dict() or expr_type.is_set():
+                            is_dict_target = True
+                            if isinstance(slice_unwrapped, ast.Name) and self.current_func:
+                                kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                                if kv and kv.var_type.is_tuple():
+                                    is_tuple_key = True
 
                     if is_dict_target:
                         # d[k] = val
@@ -1263,7 +1285,10 @@ include 'functions.inc'
                         self.emit("mov rcx, rax", "dict_ptr")
                         self.emit("pop rdx", "key")
                         self.emit("pop r8", "val")
-                        self.emit("call _pyfasm_dict_set")
+                        if is_tuple_key:
+                            self.emit("call _pyfasm_dict_set_tuple")
+                        else:
+                            self.emit("call _pyfasm_dict_set")
                     else:
                         # arr[idx] = val
                         self.emit("push rax", "save value to assign")
@@ -1885,6 +1910,13 @@ include 'functions.inc'
                     return self.module.functions[fn_id].return_type
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
+                if attr == "loads":
+                    if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
+                        return TYPE_DICT
+                if attr == "get":
+                    obj_type = self._infer_expr_type(expr.func.value)
+                    if obj_type.is_dict() and len(expr.args) >= 2:
+                        return self._infer_expr_type(expr.args[1])
                 if attr in ("lower", "upper", "strip", "replace", "format"):
                     return TYPE_STR
                 if attr in ("count", "find", "index"):
@@ -2330,12 +2362,28 @@ include 'functions.inc'
                 return
 
             is_dict_val = False
-            if isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
+            is_tuple_key = False
+            if isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
+                is_dict_val = True
+                is_tuple_key = isinstance(slice_unwrapped, ast.Tuple)
+            elif isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                 is_dict_val = True
             elif isinstance(expr.value, ast.Name) and self.current_func:
                 v = self.current_func.local_vars.get(expr.value.id)
-                if v and v.var_type.is_dict():
+                if v and (v.var_type.is_dict() or v.var_type.is_set()):
                     is_dict_val = True
+                    if isinstance(slice_unwrapped, ast.Name):
+                        kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                        if kv and kv.var_type.is_tuple():
+                            is_tuple_key = True
+            else:
+                expr_type = self._infer_expr_type(expr.value)
+                if expr_type.is_dict() or expr_type.is_set():
+                    is_dict_val = True
+                    if isinstance(slice_unwrapped, ast.Name) and self.current_func:
+                        kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                        if kv and kv.var_type.is_tuple():
+                            is_tuple_key = True
 
             if is_dict_val:
                 self._generate_expr(expr.value)
@@ -2344,7 +2392,10 @@ include 'functions.inc'
                 self.emit("mov rdx, rax", "key")
                 self.emit("pop rcx", "dict_ptr")
                 self.emit("xor r8, r8", "default = 0")
-                self.emit("call _pyfasm_dict_get")
+                if is_tuple_key:
+                    self.emit("call _pyfasm_dict_get_tuple")
+                else:
+                    self.emit("call _pyfasm_dict_get")
             else:
                 self._generate_expr(expr.value)  # arr pointer -> RAX
                 self.emit("push rax")
@@ -3065,20 +3116,60 @@ include 'functions.inc'
                 self.emit("call _pyfasm_str_endswith")
                 return
 
-        # Dict get method
-        if attr_name == "get" and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var and (var.var_type.is_dict() or len(call.args) >= 2 or (isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str))):
+        # Dict get method / HTTP get method
+        if attr_name == "get" and call.args:
+            is_http_get = False
+            if prefix in ("requests", "http") or func_name == "requests_get":
+                is_http_get = True
+            elif isinstance(call.func, ast.Attribute):
+                if isinstance(call.func.value, ast.Attribute) and getattr(call.func.value, "attr", None) in ("session", "Session"):
+                    is_http_get = True
+                elif prefix in ("session", "Session"):
+                    is_http_get = True
+                elif call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str) and (call.args[0].value.startswith("http://") or call.args[0].value.startswith("https://")):
+                    is_http_get = True
+
+            if is_http_get:
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "URL string pointer")
+                params_node = None
+                if len(call.args) > 1 and not (isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, (int, float))):
+                    params_node = call.args[1]
+                for kw in getattr(call, "keywords", []):
+                    if kw.arg == "params":
+                        params_node = kw.value
+                        break
+                if params_node:
+                    self._generate_expr(params_node)
+                    self.emit("mov rdx, rax", "params dict")
+                else:
+                    self.emit("xor edx, edx", "no params")
+                self.emit("pop rcx", "URL string pointer")
+                self.emit("call _pyfasm_http_get")
+                return
+
+            # General Dict .get(key, default)
+            if isinstance(call.func, ast.Attribute):
+                is_tuple_key = isinstance(call.args[0], ast.Tuple)
+                if isinstance(call.args[0], ast.Name) and self.current_func:
+                    kv = self.current_func.local_vars.get(call.args[0].id)
+                    if kv and kv.var_type.is_tuple():
+                        is_tuple_key = True
                 if len(call.args) >= 2:
                     self._generate_expr(call.args[1])
                     self.emit("push rax", "default val")
                 else:
                     self.emit("push 0", "default val = 0")
                 self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax", "key")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "dict_ptr")
+                self.emit("push rax", "key")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "dict_ptr")
+                self.emit("pop rdx", "key")
                 self.emit("pop r8", "default")
-                self.emit("call _pyfasm_dict_get")
+                if is_tuple_key:
+                    self.emit("call _pyfasm_dict_get_tuple")
+                else:
+                    self.emit("call _pyfasm_dict_get")
                 return
 
         # List append
@@ -3186,10 +3277,40 @@ include 'functions.inc'
             self.emit("call fn_str")
             return
 
+        # HTTP and JSON operations
+        if attr_name == "json":
+            if isinstance(call.func, ast.Attribute):
+                lbl_raw = self.new_label("json_raw")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "response obj / text ptr")
+                self.emit("test rax, rax", "check null ptr")
+                self.emit(f"jz {lbl_raw}")
+                self.emit("cmp qword [rax], 100", "check if response struct (status_code >= 100)")
+                self.emit(f"jb {lbl_raw}")
+                self.emit("cmp qword [rax], 600")
+                self.emit(f"ja {lbl_raw}")
+                self.emit("mov rcx, [rax + 8]", "load text from response obj")
+                self.emit_raw(f"{lbl_raw}:")
+                self.emit("call _pyfasm_json_parse")
+                return
+
+        if (func_name == "loads" and prefix == "json") or func_name == "json_loads":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "json string pointer")
+                self.emit("call _pyfasm_json_parse")
+                return
+
+        if (func_name == "Session" and prefix in ("requests", "Session")) or func_name == "requests_Session":
+            self.emit("xor ecx, ecx", "default capacity")
+            self.emit("call _pyfasm_dict_create")
+            return
+
         if (func_name == "get" and prefix == "requests") or func_name == "requests_get" or (attr_name == "get" and prefix in ("requests", "http")):
             if call.args:
                 self._generate_expr(call.args[0])
                 self.emit("mov rcx, rax", "URL string pointer")
+                self.emit("xor edx, edx", "no params")
                 self.emit("call _pyfasm_http_get")
                 return
 
@@ -3524,7 +3645,11 @@ include 'functions.inc'
                         self.emit("call _pyfasm_print_float")
                     else:
                         self.emit("mov rcx, rax")
-                        self.emit("call _pyfasm_print_int")
+                        # Use runtime auto-detect for dynamic types (call results, subscripts)
+                        if isinstance(arg, (ast.Call, ast.Subscript)):
+                            self.emit("call _pyfasm_print_auto")
+                        else:
+                            self.emit("call _pyfasm_print_int")
             self.emit("call _pyfasm_print_newline")
             return
 

@@ -110,7 +110,7 @@ class ParsedModule:
 
     @property
     def is_http_app(self) -> bool:
-        return self.has_library("requests", "urllib", "urllib3", "httpx", "aiohttp", "curl_cffi")
+        return self.has_library("requests", "urllib", "urllib3", "httpx", "aiohttp", "curl_cffi", "json")
 
     @property
     def is_office_app(self) -> bool:
@@ -1027,6 +1027,16 @@ class AstAnalyzer:
                     return TYPE_LIST
                 elif attr in ("count", "find", "index"):
                     return TYPE_INT
+                elif attr == "loads":
+                    # json.loads() returns dict
+                    if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
+                        return TYPE_DICT
+                elif attr == "get":
+                    # dict.get(key, default) — infer from default arg type
+                    if isinstance(expr.func.value, ast.Name) and expr.func.value.id in local_vars:
+                        obj_type = local_vars[expr.func.value.id].var_type
+                        if obj_type.is_dict() and len(expr.args) >= 2:
+                            return self._infer_node_type(expr.args[1], local_vars)
 
         elif isinstance(expr, ast.Subscript):
             container_type = self._infer_node_type(expr.value, local_vars)
@@ -1244,6 +1254,27 @@ class AstAnalyzer:
         is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in walk_local_scope(node))
         if is_gen and ret_type == TYPE_VOID:
             ret_type = TYPE_PTR
+
+        # Usage-based type refinement: upgrade INT variables to LIST/DICT
+        # based on how they are used in the function body (e.g. .get() → dict, len() → list)
+        for sub_node in walk_local_scope(node):
+            for usage_node in ast.walk(sub_node):
+                if isinstance(usage_node, ast.Call):
+                    if isinstance(usage_node.func, ast.Attribute):
+                        attr_name = usage_node.func.attr
+                        if attr_name in ("get", "keys", "values", "items", "pop", "update", "setdefault") and isinstance(usage_node.func.value, ast.Name):
+                            vname = usage_node.func.value.id
+                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                                local_vars[vname].var_type = TYPE_DICT
+                        elif attr_name in ("append", "extend", "insert", "remove", "sort", "reverse") and isinstance(usage_node.func.value, ast.Name):
+                            vname = usage_node.func.value.id
+                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                                local_vars[vname].var_type = TYPE_LIST
+                    elif isinstance(usage_node.func, ast.Name) and usage_node.func.id == "len":
+                        if usage_node.args and isinstance(usage_node.args[0], ast.Name):
+                            vname = usage_node.args[0].id
+                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                                local_vars[vname].var_type = TYPE_LIST
 
         # If return type wasn't explicitly annotated, infer from return statements
         if ret_type == TYPE_VOID:

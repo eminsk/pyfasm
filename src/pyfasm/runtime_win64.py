@@ -58,12 +58,18 @@ section '.data' data readable writeable
     _pyfasm_reg_val_data    dd 0
     _pyfasm_reg_val_size    dd 4
 
-    ; WinINet HTTP Client Data
+    ; WinINet HTTP Client & Response Data
     _pyfasm_http_agent      db 'PyFASM-Native/1.0', 0
+    _pyfasm_http_ok_str     db 'OK', 0
+    _pyfasm_http_err_str    db 'Error', 0
     align 4
     _pyfasm_http_read_bytes dd 0
     align 8
+    _pyfasm_http_resp_obj   dq 0, 0, 0, 0 ; [status_code, text, json, reason]
+    align 8
     _pyfasm_http_buf        rb 65536 ; 64KB HTTP response buffer
+    align 8
+    _pyfasm_http_url_buf    rb 2048  ; 2KB URL + query params buffer
 
     ; HTML entity stripping buffer
     align 8
@@ -861,17 +867,139 @@ _pyfasm_strip_html:
 
 _pyfasm_http_get:
     ; RCX = pointer to URL string (e.g. "https://api.stackexchange.com/...")
-    ; Returns RAX = pointer to null-terminated response buffer (_pyfasm_http_buf)
+    ; RDX = pointer to params dictionary (or 0)
+    ; Returns RAX = pointer to _pyfasm_http_resp_obj
     push    rbp
     mov     rbp, rsp
     push    rsi
     push    rdi
     push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     sub     rsp, 64
     and     rsp, -16
 
     mov     rsi, rcx                       ; save URL in rsi
+    mov     r12, rdx                       ; save params dict in r12
 
+    ; Format URL with query parameters if params dict provided
+    test    r12, r12
+    jz      .use_direct_url
+
+    ; Copy base URL to _pyfasm_http_url_buf
+    lea     rdi, [_pyfasm_http_url_buf]
+    mov     rcx, rsi
+.copy_base_url:
+    mov     al, [rcx]
+    test    al, al
+    jz      .base_url_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_base_url
+.base_url_copied:
+    ; Check if dict has items
+    mov     rax, [r12 + 8]                 ; count of items
+    test    rax, rax
+    jz      .url_finish
+    ; Append '?'
+    mov     byte [rdi], '?'
+    inc     rdi
+
+    ; Loop over dict slots: capacity = [r12]
+    mov     r13, [r12]                     ; capacity
+    lea     r14, [r12 + 16]                ; slot ptr
+.dict_url_loop:
+    test    r13, r13
+    jz      .dict_url_done
+    dec     r13
+    mov     rax, [r14]                     ; slot hash
+    test    rax, rax
+    jz      .next_url_slot
+    cmp     rax, -1
+    je      .next_url_slot
+    ; Non-empty slot: key = [r14 + 8], val = [r14 + 16]
+    mov     rcx, [r14 + 8]                 ; key string
+    test    rcx, rcx
+    jz      .next_url_slot
+.copy_key_loop:
+    mov     al, [rcx]
+    test    al, al
+    jz      .key_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_key_loop
+.key_copied:
+    mov     byte [rdi], '='
+    inc     rdi
+    ; Copy val: could be string (> 65536) or int
+    mov     rcx, [r14 + 16]                ; val
+    cmp     rcx, 65536
+    jb      .copy_val_int
+.copy_val_str:
+    mov     al, [rcx]
+    test    al, al
+    jz      .val_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_val_str
+.copy_val_int:
+    mov     rax, rcx
+    push    r14
+    push    r13
+    mov     r8, rax
+    test    r8, r8
+    jns     .pos_val_int
+    mov     byte [rdi], '-'
+    inc     rdi
+    neg     r8
+.pos_val_int:
+    mov     rax, r8
+    mov     r9, 10
+    lea     r10, [_pyfasm_int_buf + 30]
+    mov     byte [r10], 0
+.val_digit_loop:
+    xor     edx, edx
+    div     r9
+    add     dl, '0'
+    dec     r10
+    mov     [r10], dl
+    test    rax, rax
+    jnz     .val_digit_loop
+.copy_digits:
+    mov     al, [r10]
+    test    al, al
+    jz      .digits_copied
+    mov     [rdi], al
+    inc     r10
+    inc     rdi
+    jmp     .copy_digits
+.digits_copied:
+    pop     r13
+    pop     r14
+.val_copied:
+    mov     byte [rdi], '&'
+    inc     rdi
+.next_url_slot:
+    add     r14, 24
+    jmp     .dict_url_loop
+.dict_url_done:
+    cmp     byte [rdi - 1], '&'
+    jne     .url_finish
+    dec     rdi
+.url_finish:
+    mov     byte [rdi], 0
+    lea     rsi, [_pyfasm_http_url_buf]
+    jmp     .do_http_connect
+
+.use_direct_url:
+    ; rsi is already direct url
+
+.do_http_connect:
     ; InternetOpenA
     lea     rcx, [_pyfasm_http_agent]
     mov     edx, 1                         ; INTERNET_OPEN_TYPE_DIRECT
@@ -915,8 +1043,20 @@ _pyfasm_http_get:
     mov     rcx, rbx
     call    [InternetCloseHandle]
 
+    ; Populate response object: [status_code, text, json, reason]
+    mov     qword [_pyfasm_http_resp_obj], 200
     lea     rax, [_pyfasm_http_buf]
+    mov     qword [_pyfasm_http_resp_obj + 8], rax
+    mov     qword [_pyfasm_http_resp_obj + 16], 0
+    lea     rax, [_pyfasm_http_ok_str]
+    mov     qword [_pyfasm_http_resp_obj + 24], rax
+
+    lea     rax, [_pyfasm_http_resp_obj]
     add     rsp, 64
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     pop     rdi
     pop     rsi
@@ -929,14 +1069,295 @@ _pyfasm_http_get:
     call    [InternetCloseHandle]
 
 .http_fail:
+    mov     qword [_pyfasm_http_resp_obj], 0
     mov     byte [_pyfasm_http_buf], 0
     lea     rax, [_pyfasm_http_buf]
+    mov     qword [_pyfasm_http_resp_obj + 8], rax
+    mov     qword [_pyfasm_http_resp_obj + 16], 0
+    lea     rax, [_pyfasm_http_err_str]
+    mov     qword [_pyfasm_http_resp_obj + 24], rax
+
+    lea     rax, [_pyfasm_http_resp_obj]
     add     rsp, 64
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     pop     rdi
     pop     rsi
     mov     rsp, rbp
     pop     rbp
+    ret
+
+; ============================================================
+; Native JSON Parser (Pure x86-64 recursive-descent)
+; ============================================================
+_pyfasm_json_skip_ws:
+.jsw_loop:
+    mov     al, [rsi]
+    cmp     al, ' '
+    je      .jsw_next
+    cmp     al, 9                   ; \t
+    je      .jsw_next
+    cmp     al, 10                  ; \n
+    je      .jsw_next
+    cmp     al, 13                  ; \r
+    je      .jsw_next
+    ret
+.jsw_next:
+    inc     rsi
+    jmp     .jsw_loop
+
+_pyfasm_json_parse:
+    ; RCX = pointer to JSON string
+    ; Returns RAX = parsed dict, list, str, or int
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .jp_null
+    mov     rsi, rcx
+    call    _pyfasm_json_parse_val
+    jmp     .jp_ret
+.jp_null:
+    xor     eax, eax
+.jp_ret:
+    add     rsp, 48
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_json_parse_val:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpv_zero
+    cmp     al, '{'
+    je      _pyfasm_json_parse_obj
+    cmp     al, '['
+    je      _pyfasm_json_parse_arr
+    cmp     al, '"'
+    je      _pyfasm_json_parse_str
+    cmp     al, 't'
+    je      .jpv_true
+    cmp     al, 'T'
+    je      .jpv_true
+    cmp     al, 'f'
+    je      .jpv_false
+    cmp     al, 'F'
+    je      .jpv_false
+    cmp     al, 'n'
+    je      .jpv_null
+    cmp     al, 'N'
+    je      .jpv_null
+    cmp     al, '-'
+    je      _pyfasm_json_parse_num
+    cmp     al, '0'
+    jb      .jpv_zero
+    cmp     al, '9'
+    jbe     _pyfasm_json_parse_num
+.jpv_zero:
+    xor     eax, eax
+    ret
+.jpv_true:
+    add     rsi, 4                  ; skip 'true'
+    mov     eax, 1
+    ret
+.jpv_false:
+    add     rsi, 5                  ; skip 'false'
+    xor     eax, eax
+    ret
+.jpv_null:
+    add     rsi, 4                  ; skip 'null'
+    xor     eax, eax
+    ret
+
+_pyfasm_json_parse_num:
+    xor     rax, rax
+    xor     r8d, r8d                ; sign = 0
+    cmp     byte [rsi], '-'
+    jne     .jpn_loop
+    mov     r8d, 1                  ; negative
+    inc     rsi
+.jpn_loop:
+    movzx   ecx, byte [rsi]
+    cmp     cl, '0'
+    jb      .jpn_done
+    cmp     cl, '9'
+    ja      .jpn_done
+    sub     cl, '0'
+    imul    rax, 10
+    add     rax, rcx
+    inc     rsi
+    jmp     .jpn_loop
+.jpn_done:
+    test    r8d, r8d
+    jz      .jpn_ret
+    neg     rax
+.jpn_ret:
+    ret
+
+_pyfasm_json_parse_str:
+    ; Expects [rsi] == '"'
+    inc     rsi
+    mov     rdi, rsi                ; rdi = start
+.jps_scan:
+    mov     al, [rsi]
+    test    al, al
+    jz      .jps_copy
+    cmp     al, '"'
+    je      .jps_copy
+    cmp     al, 92                  ; backslash '\'
+    jne     .jps_next
+    inc     rsi
+    cmp     byte [rsi], 0
+    je      .jps_copy
+.jps_next:
+    inc     rsi
+    jmp     .jps_scan
+.jps_copy:
+    mov     rcx, rsi
+    sub     rcx, rdi                ; rcx = length in bytes
+    push    rcx
+    push    rdi
+    inc     rcx                     ; +1 for null terminator
+    call    _pyfasm_alloc
+    pop     rdi
+    pop     rcx
+    push    rax                     ; save allocated string ptr
+    mov     rdx, rax                ; dest in rdx
+.jps_unescape:
+    cmp     rdi, rsi
+    jge     .jps_finish
+    mov     al, [rdi]
+    cmp     al, 92                  ; backslash
+    jne     .jps_put
+    inc     rdi
+    cmp     rdi, rsi
+    jge     .jps_finish
+    mov     al, [rdi]
+    cmp     al, 'n'
+    jne     .jps_chk_r
+    mov     al, 10
+    jmp     .jps_put
+.jps_chk_r:
+    cmp     al, 'r'
+    jne     .jps_chk_t
+    mov     al, 13
+    jmp     .jps_put
+.jps_chk_t:
+    cmp     al, 't'
+    jne     .jps_put
+    mov     al, 9
+.jps_put:
+    mov     [rdx], al
+    inc     rdx
+    inc     rdi
+    jmp     .jps_unescape
+.jps_finish:
+    mov     byte [rdx], 0
+    cmp     byte [rsi], '"'
+    jne     .jps_ret
+    inc     rsi
+.jps_ret:
+    pop     rax
+    ret
+
+_pyfasm_json_parse_arr:
+    ; Expects [rsi] == '['
+    inc     rsi
+    xor     ecx, ecx                ; default capacity
+    call    _pyfasm_list_create
+    push    rbx
+    mov     rbx, rax                ; rbx = list ptr
+.jpa_loop:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpa_done
+    cmp     al, ']'
+    je      .jpa_done
+    cmp     al, ','
+    jne     .jpa_val
+    inc     rsi
+    call    _pyfasm_json_skip_ws
+.jpa_val:
+    cmp     byte [rsi], ']'
+    je      .jpa_done
+    call    _pyfasm_json_parse_val
+    mov     rdx, rax                ; value in rdx
+    mov     rcx, rbx                ; list in rcx
+    call    _pyfasm_list_append
+    jmp     .jpa_loop
+.jpa_done:
+    cmp     byte [rsi], ']'
+    jne     .jpa_ret
+    inc     rsi
+.jpa_ret:
+    mov     rax, rbx
+    pop     rbx
+    ret
+
+_pyfasm_json_parse_obj:
+    ; Expects [rsi] == '{'
+    inc     rsi
+    xor     ecx, ecx                ; default capacity (16)
+    call    _pyfasm_dict_create
+    push    rbx
+    mov     rbx, rax                ; rbx = dict ptr
+.jpo_loop:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpo_done
+    cmp     al, '}'
+    je      .jpo_done
+    cmp     al, ','
+    jne     .jpo_key
+    inc     rsi
+    call    _pyfasm_json_skip_ws
+.jpo_key:
+    cmp     byte [rsi], '}'
+    je      .jpo_done
+    cmp     byte [rsi], '"'
+    jne     .jpo_done               ; invalid key
+    call    _pyfasm_json_parse_str
+    push    rax                     ; save key on stack
+    call    _pyfasm_json_skip_ws
+    cmp     byte [rsi], ':'
+    jne     .jpo_err
+    inc     rsi                     ; skip ':'
+    call    _pyfasm_json_parse_val
+    mov     r8, rax                 ; value in r8
+    pop     rdx                     ; key in rdx
+    mov     rcx, rbx                ; dict in rcx
+    call    _pyfasm_dict_set
+    jmp     .jpo_loop
+.jpo_err:
+    pop     rax
+.jpo_done:
+    cmp     byte [rsi], '}'
+    jne     .jpo_ret
+    inc     rsi
+.jpo_ret:
+    mov     rax, rbx
+    pop     rbx
     ret
 
 _pyfasm_str_concat:
@@ -1586,6 +2007,225 @@ _pyfasm_dict_get:
     pop     rbp
     ret
 
+; ============================================================
+; Dictionary Tuple Key Support (FNV-1a tuple hashing & comparison)
+; ============================================================
+_pyfasm_tuple_hash:
+    ; RCX = pointer to tuple [num_elts, elt0, elt1, ...]
+    ; Returns RAX = 64-bit FNV-1a hash
+    push    rbx
+    push    rsi
+    test    rcx, rcx
+    jz      .th_zero
+    mov     rsi, rcx
+    mov     rbx, [rsi]             ; num_elts
+    test    rbx, rbx
+    jz      .th_zero
+    mov     rax, 0CBF29CE484222325h
+    mov     r10, 100000001B3h
+.th_loop:
+    add     rsi, 8
+    mov     r8, [rsi]              ; current element
+    xor     rax, r8
+    imul    rax, r10
+    dec     rbx
+    jnz     .th_loop
+    test    rax, rax
+    jnz     .th_ret
+    mov     rax, 1
+.th_ret:
+    pop     rsi
+    pop     rbx
+    ret
+.th_zero:
+    mov     rax, 0CBF29CE484222325h
+    pop     rsi
+    pop     rbx
+    ret
+
+_pyfasm_tuple_cmp:
+    ; RCX = tuple1, RDX = tuple2
+    ; Returns RAX = 1 if equal, 0 if not equal
+    cmp     rcx, rdx
+    je      .tc_eq
+    test    rcx, rcx
+    jz      .tc_ne
+    test    rdx, rdx
+    jz      .tc_ne
+    mov     r8, [rcx]              ; len1
+    cmp     r8, [rdx]              ; len2
+    jne     .tc_ne
+    test    r8, r8
+    jz      .tc_eq
+.tc_loop:
+    add     rcx, 8
+    add     rdx, 8
+    mov     rax, [rcx]
+    cmp     rax, [rdx]
+    jne     .tc_ne
+    dec     r8
+    jnz     .tc_loop
+.tc_eq:
+    mov     eax, 1
+    ret
+.tc_ne:
+    xor     eax, eax
+    ret
+
+_pyfasm_dict_set_tuple:
+    ; RCX = dict_ptr, RDX = tuple_key_ptr, R8 = val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dst_done
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_tuple_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]             ; capacity
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+.dst_probe:
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]             ; slot hash
+    test    rax, rax
+    jz      .dst_slot_empty
+
+    cmp     rax, r13
+    jne     .dst_next_slot
+
+    push    rcx
+    mov     rcx, [rcx + 8]         ; existing tuple in slot
+    mov     rdx, rsi               ; target tuple
+    call    _pyfasm_tuple_cmp
+    pop     rcx
+    test    eax, eax
+    jnz     .dst_update_val
+
+.dst_next_slot:
+    inc     rdi
+    and     rdi, r14
+    jmp     .dst_probe
+
+.dst_slot_empty:
+    mov     [rcx], r13
+    mov     [rcx + 8], rsi
+    mov     [rcx + 16], r12
+    inc     qword [rbx + 8]
+    jmp     .dst_done
+
+.dst_update_val:
+    mov     [rcx + 16], r12
+
+.dst_done:
+    mov     rax, rbx
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_get_tuple:
+    ; RCX = dict_ptr, RDX = tuple_key_ptr, R8 = default_val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dgt_default
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_tuple_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]             ; capacity
+    test    r14, r14
+    jz      .dgt_default
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+    xor     r11, r11               ; probe counter
+.dgt_probe:
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .dgt_default
+
+    cmp     rax, r13
+    jne     .dgt_next_slot
+
+    push    rcx
+    push    r11
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_tuple_cmp
+    pop     r11
+    pop     rcx
+    test    eax, eax
+    jnz     .dgt_found
+
+.dgt_next_slot:
+    inc     r11
+    cmp     r11, [rbx]
+    jge     .dgt_default
+    inc     rdi
+    and     rdi, r14
+    jmp     .dgt_probe
+
+.dgt_found:
+    mov     rax, [rcx + 16]
+    jmp     .dgt_ret
+
+.dgt_default:
+    mov     rax, r12
+
+.dgt_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_dict_contains:
     ; RCX = dict_ptr, RDX = key_str
     push    rbp
@@ -2044,6 +2684,13 @@ _pyfasm_int_to_str:
     mov     rsp, rbp
     pop     rbp
     ret
+
+_pyfasm_print_auto:
+    ; RCX = value (could be int or string pointer)
+    ; Auto-detects type at runtime: < 65536 = integer, >= 65536 = string pointer
+    cmp     rcx, 65536
+    jb      _pyfasm_print_int
+    jmp     _pyfasm_print_str
 
 _pyfasm_print_int:
     ; RCX = signed 64-bit integer
@@ -5806,12 +6453,18 @@ section '.data' data readable writeable
 """
 
 _WIN64_NET_RUNTIME_DATA = """
-    ; WinINet HTTP Client Data
+    ; WinINet HTTP Client & Response Data
     _pyfasm_http_agent      db 'PyFASM-Native/1.0', 0
+    _pyfasm_http_ok_str     db 'OK', 0
+    _pyfasm_http_err_str    db 'Error', 0
     align 4
     _pyfasm_http_read_bytes dd 0
     align 8
+    _pyfasm_http_resp_obj   dq 0, 0, 0, 0 ; [status_code, text, json, reason]
+    align 8
     _pyfasm_http_buf        rb 65536 ; 64KB HTTP response buffer
+    align 8
+    _pyfasm_http_url_buf    rb 2048  ; 2KB URL + query params buffer
     align 8
     _pyfasm_strip_buf       rb 65536
 """
@@ -6840,6 +7493,225 @@ _pyfasm_dict_get:
     pop     rbp
     ret
 
+; ============================================================
+; Dictionary Tuple Key Support (FNV-1a tuple hashing & comparison)
+; ============================================================
+_pyfasm_tuple_hash:
+    ; RCX = pointer to tuple [num_elts, elt0, elt1, ...]
+    ; Returns RAX = 64-bit FNV-1a hash
+    push    rbx
+    push    rsi
+    test    rcx, rcx
+    jz      .th_zero
+    mov     rsi, rcx
+    mov     rbx, [rsi]             ; num_elts
+    test    rbx, rbx
+    jz      .th_zero
+    mov     rax, 0CBF29CE484222325h
+    mov     r10, 100000001B3h
+.th_loop:
+    add     rsi, 8
+    mov     r8, [rsi]              ; current element
+    xor     rax, r8
+    imul    rax, r10
+    dec     rbx
+    jnz     .th_loop
+    test    rax, rax
+    jnz     .th_ret
+    mov     rax, 1
+.th_ret:
+    pop     rsi
+    pop     rbx
+    ret
+.th_zero:
+    mov     rax, 0CBF29CE484222325h
+    pop     rsi
+    pop     rbx
+    ret
+
+_pyfasm_tuple_cmp:
+    ; RCX = tuple1, RDX = tuple2
+    ; Returns RAX = 1 if equal, 0 if not equal
+    cmp     rcx, rdx
+    je      .tc_eq
+    test    rcx, rcx
+    jz      .tc_ne
+    test    rdx, rdx
+    jz      .tc_ne
+    mov     r8, [rcx]              ; len1
+    cmp     r8, [rdx]              ; len2
+    jne     .tc_ne
+    test    r8, r8
+    jz      .tc_eq
+.tc_loop:
+    add     rcx, 8
+    add     rdx, 8
+    mov     rax, [rcx]
+    cmp     rax, [rdx]
+    jne     .tc_ne
+    dec     r8
+    jnz     .tc_loop
+.tc_eq:
+    mov     eax, 1
+    ret
+.tc_ne:
+    xor     eax, eax
+    ret
+
+_pyfasm_dict_set_tuple:
+    ; RCX = dict_ptr, RDX = tuple_key_ptr, R8 = val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dst_done
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_tuple_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]             ; capacity
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+.dst_probe:
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]             ; slot hash
+    test    rax, rax
+    jz      .dst_slot_empty
+
+    cmp     rax, r13
+    jne     .dst_next_slot
+
+    push    rcx
+    mov     rcx, [rcx + 8]         ; existing tuple in slot
+    mov     rdx, rsi               ; target tuple
+    call    _pyfasm_tuple_cmp
+    pop     rcx
+    test    eax, eax
+    jnz     .dst_update_val
+
+.dst_next_slot:
+    inc     rdi
+    and     rdi, r14
+    jmp     .dst_probe
+
+.dst_slot_empty:
+    mov     [rcx], r13
+    mov     [rcx + 8], rsi
+    mov     [rcx + 16], r12
+    inc     qword [rbx + 8]
+    jmp     .dst_done
+
+.dst_update_val:
+    mov     [rcx + 16], r12
+
+.dst_done:
+    mov     rax, rbx
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_get_tuple:
+    ; RCX = dict_ptr, RDX = tuple_key_ptr, R8 = default_val
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .dgt_default
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     r12, r8
+
+    mov     rcx, rsi
+    call    _pyfasm_tuple_hash
+    mov     r13, rax
+
+    mov     r14, [rbx]             ; capacity
+    test    r14, r14
+    jz      .dgt_default
+    dec     r14
+    and     rax, r14
+    mov     rdi, rax
+
+    xor     r11, r11               ; probe counter
+.dgt_probe:
+    lea     rax, [rdi + rdi * 2]
+    shl     rax, 3
+    lea     rcx, [rbx + 16 + rax]
+
+    mov     rax, [rcx]
+    test    rax, rax
+    jz      .dgt_default
+
+    cmp     rax, r13
+    jne     .dgt_next_slot
+
+    push    rcx
+    push    r11
+    mov     rcx, [rcx + 8]
+    mov     rdx, rsi
+    call    _pyfasm_tuple_cmp
+    pop     r11
+    pop     rcx
+    test    eax, eax
+    jnz     .dgt_found
+
+.dgt_next_slot:
+    inc     r11
+    cmp     r11, [rbx]
+    jge     .dgt_default
+    inc     rdi
+    and     rdi, r14
+    jmp     .dgt_probe
+
+.dgt_found:
+    mov     rax, [rcx + 16]
+    jmp     .dgt_ret
+
+.dgt_default:
+    mov     rax, r12
+
+.dgt_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_dict_contains:
     ; RCX = dict_ptr, RDX = key_str
     push    rbp
@@ -7281,6 +8153,13 @@ _pyfasm_int_to_str:
     pop     rbp
     ret
 
+_pyfasm_print_auto:
+    ; RCX = value (could be int or string pointer)
+    ; Auto-detects type at runtime: < 65536 = integer, >= 65536 = string pointer
+    cmp     rcx, 65536
+    jb      _pyfasm_print_int
+    jmp     _pyfasm_print_str
+
 _pyfasm_print_int:
     ; RCX = signed 64-bit integer
     push    rbp
@@ -7682,12 +8561,279 @@ _pyfasm_list_slice:
     pop     rsi
     pop     rbp
     ret
-"""
 
-_WIN64_NET_RUNTIME_CODE = """    mov     rsp, rbp
+; ============================================================
+; Native JSON Parser (Pure x86-64 recursive-descent)
+; ============================================================
+_pyfasm_json_skip_ws:
+.jsw_loop:
+    mov     al, [rsi]
+    cmp     al, ' '
+    je      .jsw_next
+    cmp     al, 9                   ; \t
+    je      .jsw_next
+    cmp     al, 10                  ; \n
+    je      .jsw_next
+    cmp     al, 13                  ; \r
+    je      .jsw_next
+    ret
+.jsw_next:
+    inc     rsi
+    jmp     .jsw_loop
+
+_pyfasm_json_parse:
+    ; RCX = pointer to JSON string
+    ; Returns RAX = parsed dict, list, str, or int
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rdi
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .jp_null
+    mov     rsi, rcx
+    call    _pyfasm_json_parse_val
+    jmp     .jp_ret
+.jp_null:
+    xor     eax, eax
+.jp_ret:
+    add     rsp, 48
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rdi
+    pop     rsi
+    mov     rsp, rbp
     pop     rbp
     ret
 
+_pyfasm_json_parse_val:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpv_zero
+    cmp     al, '{'
+    je      _pyfasm_json_parse_obj
+    cmp     al, '['
+    je      _pyfasm_json_parse_arr
+    cmp     al, '"'
+    je      _pyfasm_json_parse_str
+    cmp     al, 't'
+    je      .jpv_true
+    cmp     al, 'T'
+    je      .jpv_true
+    cmp     al, 'f'
+    je      .jpv_false
+    cmp     al, 'F'
+    je      .jpv_false
+    cmp     al, 'n'
+    je      .jpv_null
+    cmp     al, 'N'
+    je      .jpv_null
+    cmp     al, '-'
+    je      _pyfasm_json_parse_num
+    cmp     al, '0'
+    jb      .jpv_zero
+    cmp     al, '9'
+    jbe     _pyfasm_json_parse_num
+.jpv_zero:
+    xor     eax, eax
+    ret
+.jpv_true:
+    add     rsi, 4                  ; skip 'true'
+    mov     eax, 1
+    ret
+.jpv_false:
+    add     rsi, 5                  ; skip 'false'
+    xor     eax, eax
+    ret
+.jpv_null:
+    add     rsi, 4                  ; skip 'null'
+    xor     eax, eax
+    ret
+
+_pyfasm_json_parse_num:
+    xor     rax, rax
+    xor     r8d, r8d                ; sign = 0
+    cmp     byte [rsi], '-'
+    jne     .jpn_loop
+    mov     r8d, 1                  ; negative
+    inc     rsi
+.jpn_loop:
+    movzx   ecx, byte [rsi]
+    cmp     cl, '0'
+    jb      .jpn_done
+    cmp     cl, '9'
+    ja      .jpn_done
+    sub     cl, '0'
+    imul    rax, 10
+    add     rax, rcx
+    inc     rsi
+    jmp     .jpn_loop
+.jpn_done:
+    test    r8d, r8d
+    jz      .jpn_ret
+    neg     rax
+.jpn_ret:
+    ret
+
+_pyfasm_json_parse_str:
+    ; Expects [rsi] == '"'
+    inc     rsi
+    mov     rdi, rsi                ; rdi = start
+.jps_scan:
+    mov     al, [rsi]
+    test    al, al
+    jz      .jps_copy
+    cmp     al, '"'
+    je      .jps_copy
+    cmp     al, 92                  ; backslash '\'
+    jne     .jps_next
+    inc     rsi
+    cmp     byte [rsi], 0
+    je      .jps_copy
+.jps_next:
+    inc     rsi
+    jmp     .jps_scan
+.jps_copy:
+    mov     rcx, rsi
+    sub     rcx, rdi                ; rcx = length in bytes
+    push    rcx
+    push    rdi
+    inc     rcx                     ; +1 for null terminator
+    call    _pyfasm_alloc
+    pop     rdi
+    pop     rcx
+    push    rax                     ; save allocated string ptr
+    mov     rdx, rax                ; dest in rdx
+.jps_unescape:
+    cmp     rdi, rsi
+    jge     .jps_finish
+    mov     al, [rdi]
+    cmp     al, 92                  ; backslash
+    jne     .jps_put
+    inc     rdi
+    cmp     rdi, rsi
+    jge     .jps_finish
+    mov     al, [rdi]
+    cmp     al, 'n'
+    jne     .jps_chk_r
+    mov     al, 10
+    jmp     .jps_put
+.jps_chk_r:
+    cmp     al, 'r'
+    jne     .jps_chk_t
+    mov     al, 13
+    jmp     .jps_put
+.jps_chk_t:
+    cmp     al, 't'
+    jne     .jps_put
+    mov     al, 9
+.jps_put:
+    mov     [rdx], al
+    inc     rdx
+    inc     rdi
+    jmp     .jps_unescape
+.jps_finish:
+    mov     byte [rdx], 0
+    cmp     byte [rsi], '"'
+    jne     .jps_ret
+    inc     rsi
+.jps_ret:
+    pop     rax
+    ret
+
+_pyfasm_json_parse_arr:
+    ; Expects [rsi] == '['
+    inc     rsi
+    xor     ecx, ecx                ; default capacity
+    call    _pyfasm_list_create
+    push    rbx
+    mov     rbx, rax                ; rbx = list ptr
+.jpa_loop:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpa_done
+    cmp     al, ']'
+    je      .jpa_done
+    cmp     al, ','
+    jne     .jpa_val
+    inc     rsi
+    call    _pyfasm_json_skip_ws
+.jpa_val:
+    cmp     byte [rsi], ']'
+    je      .jpa_done
+    call    _pyfasm_json_parse_val
+    mov     rdx, rax                ; value in rdx
+    mov     rcx, rbx                ; list in rcx
+    call    _pyfasm_list_append
+    jmp     .jpa_loop
+.jpa_done:
+    cmp     byte [rsi], ']'
+    jne     .jpa_ret
+    inc     rsi
+.jpa_ret:
+    mov     rax, rbx
+    pop     rbx
+    ret
+
+_pyfasm_json_parse_obj:
+    ; Expects [rsi] == '{'
+    inc     rsi
+    xor     ecx, ecx                ; default capacity (16)
+    call    _pyfasm_dict_create
+    push    rbx
+    mov     rbx, rax                ; rbx = dict ptr
+.jpo_loop:
+    call    _pyfasm_json_skip_ws
+    mov     al, [rsi]
+    test    al, al
+    jz      .jpo_done
+    cmp     al, '}'
+    je      .jpo_done
+    cmp     al, ','
+    jne     .jpo_key
+    inc     rsi
+    call    _pyfasm_json_skip_ws
+.jpo_key:
+    cmp     byte [rsi], '}'
+    je      .jpo_done
+    cmp     byte [rsi], '"'
+    jne     .jpo_done               ; invalid key
+    call    _pyfasm_json_parse_str
+    push    rax                     ; save key on stack
+    call    _pyfasm_json_skip_ws
+    cmp     byte [rsi], ':'
+    jne     .jpo_err
+    inc     rsi                     ; skip ':'
+    call    _pyfasm_json_parse_val
+    mov     r8, rax                 ; value in r8
+    pop     rdx                     ; key in rdx
+    mov     rcx, rbx                ; dict in rcx
+    call    _pyfasm_dict_set
+    jmp     .jpo_loop
+.jpo_err:
+    pop     rax
+.jpo_done:
+    cmp     byte [rsi], '}'
+    jne     .jpo_ret
+    inc     rsi
+.jpo_ret:
+    mov     rax, rbx
+    pop     rbx
+    ret
+"""
+
+_WIN64_NET_RUNTIME_CODE = """
 _pyfasm_strip_html:
     ; RCX = pointer to input HTML string
     ; Returns RAX = pointer to stripped plain text string (_pyfasm_strip_buf)
@@ -7816,17 +8962,139 @@ _pyfasm_strip_html:
 
 _pyfasm_http_get:
     ; RCX = pointer to URL string (e.g. "https://api.stackexchange.com/...")
-    ; Returns RAX = pointer to null-terminated response buffer (_pyfasm_http_buf)
+    ; RDX = pointer to params dictionary (or 0)
+    ; Returns RAX = pointer to _pyfasm_http_resp_obj
     push    rbp
     mov     rbp, rsp
     push    rsi
     push    rdi
     push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
     sub     rsp, 64
     and     rsp, -16
 
     mov     rsi, rcx                       ; save URL in rsi
+    mov     r12, rdx                       ; save params dict in r12
 
+    ; Format URL with query parameters if params dict provided
+    test    r12, r12
+    jz      .use_direct_url
+
+    ; Copy base URL to _pyfasm_http_url_buf
+    lea     rdi, [_pyfasm_http_url_buf]
+    mov     rcx, rsi
+.copy_base_url:
+    mov     al, [rcx]
+    test    al, al
+    jz      .base_url_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_base_url
+.base_url_copied:
+    ; Check if dict has items
+    mov     rax, [r12 + 8]                 ; count of items
+    test    rax, rax
+    jz      .url_finish
+    ; Append '?'
+    mov     byte [rdi], '?'
+    inc     rdi
+
+    ; Loop over dict slots: capacity = [r12]
+    mov     r13, [r12]                     ; capacity
+    lea     r14, [r12 + 16]                ; slot ptr
+.dict_url_loop:
+    test    r13, r13
+    jz      .dict_url_done
+    dec     r13
+    mov     rax, [r14]                     ; slot hash
+    test    rax, rax
+    jz      .next_url_slot
+    cmp     rax, -1
+    je      .next_url_slot
+    ; Non-empty slot: key = [r14 + 8], val = [r14 + 16]
+    mov     rcx, [r14 + 8]                 ; key string
+    test    rcx, rcx
+    jz      .next_url_slot
+.copy_key_loop:
+    mov     al, [rcx]
+    test    al, al
+    jz      .key_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_key_loop
+.key_copied:
+    mov     byte [rdi], '='
+    inc     rdi
+    ; Copy val: could be string (> 65536) or int
+    mov     rcx, [r14 + 16]                ; val
+    cmp     rcx, 65536
+    jb      .copy_val_int
+.copy_val_str:
+    mov     al, [rcx]
+    test    al, al
+    jz      .val_copied
+    mov     [rdi], al
+    inc     rcx
+    inc     rdi
+    jmp     .copy_val_str
+.copy_val_int:
+    mov     rax, rcx
+    push    r14
+    push    r13
+    mov     r8, rax
+    test    r8, r8
+    jns     .pos_val_int
+    mov     byte [rdi], '-'
+    inc     rdi
+    neg     r8
+.pos_val_int:
+    mov     rax, r8
+    mov     r9, 10
+    lea     r10, [_pyfasm_int_buf + 30]
+    mov     byte [r10], 0
+.val_digit_loop:
+    xor     edx, edx
+    div     r9
+    add     dl, '0'
+    dec     r10
+    mov     [r10], dl
+    test    rax, rax
+    jnz     .val_digit_loop
+.copy_digits:
+    mov     al, [r10]
+    test    al, al
+    jz      .digits_copied
+    mov     [rdi], al
+    inc     r10
+    inc     rdi
+    jmp     .copy_digits
+.digits_copied:
+    pop     r13
+    pop     r14
+.val_copied:
+    mov     byte [rdi], '&'
+    inc     rdi
+.next_url_slot:
+    add     r14, 24
+    jmp     .dict_url_loop
+.dict_url_done:
+    cmp     byte [rdi - 1], '&'
+    jne     .url_finish
+    dec     rdi
+.url_finish:
+    mov     byte [rdi], 0
+    lea     rsi, [_pyfasm_http_url_buf]
+    jmp     .do_http_connect
+
+.use_direct_url:
+    ; rsi is already direct url
+
+.do_http_connect:
     ; InternetOpenA
     lea     rcx, [_pyfasm_http_agent]
     mov     edx, 1                         ; INTERNET_OPEN_TYPE_DIRECT
@@ -7870,8 +9138,20 @@ _pyfasm_http_get:
     mov     rcx, rbx
     call    [InternetCloseHandle]
 
+    ; Populate response object: [status_code, text, json, reason]
+    mov     qword [_pyfasm_http_resp_obj], 200
     lea     rax, [_pyfasm_http_buf]
+    mov     qword [_pyfasm_http_resp_obj + 8], rax
+    mov     qword [_pyfasm_http_resp_obj + 16], 0
+    lea     rax, [_pyfasm_http_ok_str]
+    mov     qword [_pyfasm_http_resp_obj + 24], rax
+
+    lea     rax, [_pyfasm_http_resp_obj]
     add     rsp, 64
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     pop     rdi
     pop     rsi
@@ -7884,16 +9164,26 @@ _pyfasm_http_get:
     call    [InternetCloseHandle]
 
 .http_fail:
+    mov     qword [_pyfasm_http_resp_obj], 0
     mov     byte [_pyfasm_http_buf], 0
     lea     rax, [_pyfasm_http_buf]
+    mov     qword [_pyfasm_http_resp_obj + 8], rax
+    mov     qword [_pyfasm_http_resp_obj + 16], 0
+    lea     rax, [_pyfasm_http_err_str]
+    mov     qword [_pyfasm_http_resp_obj + 24], rax
+
+    lea     rax, [_pyfasm_http_resp_obj]
     add     rsp, 64
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
     pop     rbx
     pop     rdi
     pop     rsi
     mov     rsp, rbp
     pop     rbp
     ret
-
 """
 
 _WIN64_CONSOLE_RUNTIME_IMPORTS = """
