@@ -7,7 +7,7 @@ import ast
 from pathlib import Path
 import re
 from typing import List, Dict, Optional, Tuple, Set
-from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral
+from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
@@ -23,6 +23,8 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
     "add", "sub", "mul", "imul", "div", "idiv", "inc", "dec",
     "and", "or", "xor", "not", "neg", "test", "cmp",
     "mov", "lea", "push", "pop", "call", "ret", "jmp",
+    "jz", "jnz", "je", "jne", "jc", "jnc", "js", "jns", "jo", "jno", "jp", "jnp",
+    "jl", "jle", "jg", "jge", "jb", "jbe", "ja", "jae", "jcxz", "jecxz", "jrcxz",
     "loop", "loope", "loopne", "in", "out", "int", "nop", "hlt",
     "shl", "shr", "sal", "sar", "rol", "ror", "cqo", "cdq",
     "str", "wait", "pause", "enter", "leave", "bound", "lock",
@@ -40,7 +42,21 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
     "postpone", "purge", "restruc", "times", "irp", "irps", "match", "rept",
     "forward", "reverse", "common", "line",
     "plt", "got", "rva", "dup", "offset",
+    "break", "continue", "return", "exit", "stdcall", "ccall", "fastcall",
     "__file__", "__line__", "__time__", "__date__",
+    # Common Win32 FASM structures & macro identifiers
+    "msg", "point", "points", "rect", "wndclass", "wndclassex", "createstruct",
+    "clientcreatestruct", "mdicreatestruct", "scrollinfo", "minmaxinfo",
+    "windowplacement", "windowpos", "nmhdr", "copydatastruct", "accel",
+    "paintstruct", "drawtextparams", "drawitemstruct", "menuiteminfo",
+    "measureitemstruct", "msgboxparams", "gestureconfig", "gestureinfo",
+    "wsadata", "hostent", "sockaddr", "sockaddr_in",
+    "notifyicondata", "notifyicondataa", "notifyicondataw", "browseinfo",
+    "win32_find_data", "win32_find_dataa", "win32_find_dataw",
+    "systemtime", "filetime", "security_attributes", "process_information",
+    "startupinfo", "overlapped", "bitmapinfoheader", "bitmapinfo",
+    "propsheetpage", "propsheetheader", "imageinfo", "tbbutton",
+    "initcommoncontrolsex",
 }
 
 
@@ -623,6 +639,11 @@ class X64CodeGen:
             lines.append("    and rsp, -16")
             lines.append("    call _pyfasm_init_io")
 
+            if hasattr(self.module, "module_inits") and self.module.module_inits:
+                lines.append("    ; Initialize imported modules in topological dependency order")
+                for minit in self.module.module_inits:
+                    lines.append(f"    call {safe_asm_label(minit)}")
+
             if self.target == "win64":
                 is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {})) or (
                     hasattr(self.module, "name") and "stackoverflow" in str(self.module.name).lower()
@@ -1005,7 +1026,7 @@ include 'functions.inc'
         self.emit("and rsp, -16")
         self.emit("mov r15, rcx", "save generator object ptr in R15")
 
-        yield_count = sum(1 for node in ast.walk(fn.ast_node) if isinstance(node, (ast.Yield, ast.YieldFrom)))
+        yield_count = sum(1 for node in walk_local_scope(fn.ast_node) if isinstance(node, (ast.Yield, ast.YieldFrom)))
         self.emit("mov rax, [r15]", "read current state")
         self.emit(f"test rax, rax")
         self.emit(f"jz .{fn_lbl}_state_0")
@@ -1068,11 +1089,17 @@ include 'functions.inc'
 
     def _generate_statement(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.Return):
-            if stmt.value:
-                self._generate_expr(stmt.value)
+            if self.current_func and getattr(self.current_func, "is_generator", False):
+                if stmt.value:
+                    self._generate_expr(stmt.value)
+                fn_lbl = safe_asm_label(self.current_func.name)
+                self.emit(f"jmp .{fn_lbl}_done", "return terminates generator")
             else:
-                self.emit("xor eax, eax", "return 0 / void")
-            self.emit(f"jmp .epilog_{safe_asm_label(self.current_func.name)}")
+                if stmt.value:
+                    self._generate_expr(stmt.value)
+                else:
+                    self.emit("xor eax, eax", "return 0 / void")
+                self.emit(f"jmp .epilog_{safe_asm_label(self.current_func.name)}")
 
         elif isinstance(stmt, ast.Assign):
             # Target = Expr
@@ -1197,6 +1224,10 @@ include 'functions.inc'
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                     elif (self.current_func and hasattr(self.current_func, "global_names") and target.id in self.current_func.global_names) or (target.id in self.module.global_vars):
                         self.emit(f"mov [_pyfasm_global_{target.id}], rax", f"store global {target.id}")
+                        if self.current_func and self.current_func.name.startswith("_pyfasm_modinit_"):
+                            curr_mod = self.current_func.name[len("_pyfasm_modinit_"):]
+                            if f"{curr_mod}_{target.id}" in self.module.global_vars:
+                                self.emit(f"mov [_pyfasm_global_{curr_mod}_{target.id}], rax", f"store module global {curr_mod}_{target.id}")
                 elif isinstance(target, ast.Subscript):
                     slice_unwrapped = _unwrap_slice(target.slice)
                     # Check custom __setitem__
@@ -1252,28 +1283,37 @@ include 'functions.inc'
                         else:
                             self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
                 elif isinstance(target, ast.Attribute):
-                    # Check if property setter exists
-                    prop = self.resolve_property_for_expr(target.value, target.attr)
-                    if prop and getattr(prop, "setter_name", None):
-                        self.emit("push rax", "save property setter value")
-                        self._generate_expr(target.value)
-                        self.emit("mov rcx, rax", "pass self as rcx")
-                        self.emit("pop rdx", "pass value as rdx")
-                        self.emit("sub rsp, 32", "shadow space")
-                        self.emit(f"call {safe_asm_label(prop.setter_name)}")
-                        self.emit("add rsp, 32")
+                    # Check if target is a module global attribute (e.g. config.TIMEOUT = 100)
+                    mod_name = target.value.id if isinstance(target.value, ast.Name) else None
+                    if mod_name and (f"{mod_name}_{target.attr}" in self.module.global_vars or target.attr in self.module.global_vars):
+                        namespaced = f"{mod_name}_{target.attr}"
+                        if namespaced in self.module.global_vars:
+                            self.emit(f"mov [_pyfasm_global_{namespaced}], rax", f"assign module global {namespaced}")
+                        if target.attr in self.module.global_vars:
+                            self.emit(f"mov [_pyfasm_global_{target.attr}], rax", f"assign global {target.attr}")
                     else:
-                        # obj.field = val (e.g. self.x = 10)
-                        self.emit("push rax", "save value to assign")
-                        self._generate_expr(target.value)
-                        self.emit("mov r8, rax", "object pointer")
-                        self.emit("pop rax", "value to store")
-                        offset = self._get_attribute_offset(target.attr)
-                        lbl_skip = self.new_label("skip_store")
-                        self.emit("test r8, r8", "check null pointer")
-                        self.emit(f"jz {lbl_skip}")
-                        self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
-                        self.emit_raw(f"{lbl_skip}:")
+                        # Check if property setter exists
+                        prop = self.resolve_property_for_expr(target.value, target.attr)
+                        if prop and getattr(prop, "setter_name", None):
+                            self.emit("push rax", "save property setter value")
+                            self._generate_expr(target.value)
+                            self.emit("mov rcx, rax", "pass self as rcx")
+                            self.emit("pop rdx", "pass value as rdx")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit(f"call {safe_asm_label(prop.setter_name)}")
+                            self.emit("add rsp, 32")
+                        else:
+                            # obj.field = val (e.g. self.x = 10)
+                            self.emit("push rax", "save value to assign")
+                            self._generate_expr(target.value)
+                            self.emit("mov r8, rax", "object pointer")
+                            self.emit("pop rax", "value to store")
+                            offset = self._get_attribute_offset(target.attr)
+                            lbl_skip = self.new_label("skip_store")
+                            self.emit("test r8, r8", "check null pointer")
+                            self.emit(f"jz {lbl_skip}")
+                            self.emit(f"mov [r8 + {offset}], rax", f"assign obj.{target.attr}")
+                            self.emit_raw(f"{lbl_skip}:")
 
         elif isinstance(stmt, ast.AnnAssign):
             if stmt.value:
@@ -1401,17 +1441,27 @@ include 'functions.inc'
         elif isinstance(stmt, ast.While):
             l_start = self.new_label("while_start")
             l_end = self.new_label("while_end")
-            self.loop_stack.append((l_start, l_end))
+            l_normal = self.new_label("while_normal") if stmt.orelse else l_end
+            l_break = self.new_label("while_break") if stmt.orelse else l_end
+            self.loop_stack.append((l_start, l_break))
 
             self.emit_raw(f"{l_start}:")
             self._generate_expr(stmt.test)
             self.emit("test rax, rax")
-            self.emit(f"jz {l_end}")
+            self.emit(f"jz {l_normal}")
 
             for s in stmt.body:
                 self._generate_statement(s)
 
             self.emit(f"jmp {l_start}")
+
+            if stmt.orelse:
+                self.emit_raw(f"{l_normal}:")
+                for s in stmt.orelse:
+                    self._generate_statement(s)
+                self.emit(f"jmp {l_end}")
+                self.emit_raw(f"{l_break}:")
+
             self.emit_raw(f"{l_end}:")
             self.loop_stack.pop()
 
@@ -1562,9 +1612,11 @@ include 'functions.inc'
         lbl_start = self.new_label("for_iter_start")
         lbl_step = self.new_label("for_iter_step")
         lbl_end = self.new_label("for_iter_end")
+        lbl_normal = self.new_label("for_iter_normal") if stmt.orelse else lbl_end
+        lbl_break = self.new_label("for_iter_break") if stmt.orelse else lbl_end
 
         self.emit("test rax, rax", "check null container")
-        self.emit(f"jz {lbl_null}")
+        self.emit(f"jz {lbl_normal if stmt.orelse else lbl_null}")
 
         is_gen_iter = False
         if isinstance(stmt.iter, ast.Call) and isinstance(stmt.iter.func, ast.Name):
@@ -1582,7 +1634,7 @@ include 'functions.inc'
             else:
                 self.emit("push rax", "save gen_ptr")
 
-            self.loop_stack.append((lbl_step, lbl_end))
+            self.loop_stack.append((lbl_step, lbl_break))
             self.emit_raw(f"{lbl_start}:")
             if buf_var:
                 self.emit(f"mov rcx, [rbp - {buf_var.stack_offset}]", "gen_ptr")
@@ -1594,7 +1646,7 @@ include 'functions.inc'
             else:
                 self.emit("mov rbx, [rsp]", "gen_ptr")
             self.emit("cmp qword [rbx + 16], 1", "check done flag")
-            self.emit(f"je {lbl_end}")
+            self.emit(f"je {lbl_normal}")
             self._assign_target(stmt.target, "rax")
 
             for s in stmt.body:
@@ -1603,9 +1655,22 @@ include 'functions.inc'
             self.emit_raw(f"{lbl_step}:")
             self.emit(f"jmp {lbl_start}")
 
-            self.emit_raw(f"{lbl_end}:")
-            if not buf_var:
-                self.emit("add rsp, 8", "cleanup gen_ptr")
+            if stmt.orelse:
+                self.emit_raw(f"{lbl_normal}:")
+                if not buf_var:
+                    self.emit("add rsp, 8", "cleanup gen_ptr")
+                for s in stmt.orelse:
+                    self._generate_statement(s)
+                self.emit(f"jmp {lbl_end}")
+                self.emit_raw(f"{lbl_break}:")
+                if not buf_var:
+                    self.emit("add rsp, 8", "cleanup gen_ptr")
+                self.emit_raw(f"{lbl_end}:")
+            else:
+                self.emit_raw(f"{lbl_end}:")
+                if not buf_var:
+                    self.emit("add rsp, 8", "cleanup gen_ptr")
+
             self.loop_stack.pop()
             self.emit_raw(f"{lbl_null}:")
             return
@@ -1627,7 +1692,7 @@ include 'functions.inc'
             self.emit("push rax", "container ptr")
             self.emit("push 0", "current index = 0")
 
-        self.loop_stack.append((lbl_step, lbl_end))
+        self.loop_stack.append((lbl_step, lbl_break))
 
         self.emit_raw(f"{lbl_start}:")
         if buf_var and idx_var:
@@ -1639,7 +1704,7 @@ include 'functions.inc'
 
         self.emit("mov rdx, [rbx]", "container capacity / length")
         self.emit("cmp rcx, rdx")
-        self.emit(f"jge {lbl_end}")
+        self.emit(f"jge {lbl_normal}")
 
         if is_hash_table:
             self.emit("lea rax, [rcx + rcx * 2]")
@@ -1666,9 +1731,22 @@ include 'functions.inc'
             self.emit("inc qword [rsp]", "index++")
         self.emit(f"jmp {lbl_start}")
 
-        self.emit_raw(f"{lbl_end}:")
-        if not (buf_var and idx_var):
-            self.emit("add rsp, 16", "cleanup container & index from stack")
+        if stmt.orelse:
+            self.emit_raw(f"{lbl_normal}:")
+            if not (buf_var and idx_var):
+                self.emit("add rsp, 16", "cleanup container & index from stack")
+            for s in stmt.orelse:
+                self._generate_statement(s)
+            self.emit(f"jmp {lbl_end}")
+            self.emit_raw(f"{lbl_break}:")
+            if not (buf_var and idx_var):
+                self.emit("add rsp, 16", "cleanup container & index from stack")
+            self.emit_raw(f"{lbl_end}:")
+        else:
+            self.emit_raw(f"{lbl_end}:")
+            if not (buf_var and idx_var):
+                self.emit("add rsp, 16", "cleanup container & index from stack")
+
         self.loop_stack.pop()
         self.emit_raw(f"{lbl_null}:")
 
@@ -1702,7 +1780,9 @@ include 'functions.inc'
         l_start = self.new_label("for_start")
         l_step = self.new_label("for_step")
         l_end = self.new_label("for_end")
-        self.loop_stack.append((l_step, l_end))
+        l_normal = self.new_label("for_normal") if stmt.orelse else l_end
+        l_break = self.new_label("for_break") if stmt.orelse else l_end
+        self.loop_stack.append((l_step, l_break))
 
         self.emit_raw(f"{l_start}:")
 
@@ -1714,9 +1794,9 @@ include 'functions.inc'
         self.emit("pop rax")
         self.emit("cmp rax, r11")
         if step_val > 0:
-            self.emit(f"jge {l_end}")
+            self.emit(f"jge {l_normal}")
         else:
-            self.emit(f"jle {l_end}")
+            self.emit(f"jle {l_normal}")
 
         # Body
         for s in stmt.body:
@@ -1732,6 +1812,14 @@ include 'functions.inc'
             self.emit(f"add qword [rbp - {target_var.stack_offset}], {step_val}")
 
         self.emit(f"jmp {l_start}")
+
+        if stmt.orelse:
+            self.emit_raw(f"{l_normal}:")
+            for s in stmt.orelse:
+                self._generate_statement(s)
+            self.emit(f"jmp {l_end}")
+            self.emit_raw(f"{l_break}:")
+
         self.emit_raw(f"{l_end}:")
         self.loop_stack.pop()
 
@@ -1896,15 +1984,35 @@ include 'functions.inc'
 
             if _is_module_or_class(expr.value):
                 val_handled = False
-                if isinstance(expr.value, ast.Name) and expr.value.id in self.module.classes:
-                    cls_sym = self.module.classes[expr.value.id]
-                    if hasattr(cls_sym, "class_attrs") and expr.attr in cls_sym.class_attrs:
-                        c_val = cls_sym.class_attrs[expr.attr]
-                        if isinstance(c_val, int):
-                            self.emit(f"mov rax, {c_val}", f"load class attribute {expr.value.id}.{expr.attr}")
+                mod_name = expr.value.id if isinstance(expr.value, ast.Name) else None
+                if mod_name:
+                    if mod_name in self.module.classes:
+                        cls_sym = self.module.classes[mod_name]
+                        if hasattr(cls_sym, "class_attrs") and expr.attr in cls_sym.class_attrs:
+                            c_val = cls_sym.class_attrs[expr.attr]
+                            if isinstance(c_val, int):
+                                self.emit(f"mov rax, {c_val}", f"load class attribute {mod_name}.{expr.attr}")
+                                val_handled = True
+                            elif isinstance(c_val, str):
+                                self._emit_string_pointer("rax", c_val)
+                                val_handled = True
+                    if not val_handled:
+                        namespaced_global = f"{mod_name}_{expr.attr}"
+                        if namespaced_global in self.module.global_vars:
+                            self.emit(f"mov rax, [_pyfasm_global_{namespaced_global}]", f"load module global {mod_name}.{expr.attr}")
                             val_handled = True
-                        elif isinstance(c_val, str):
-                            self._emit_string_pointer("rax", c_val)
+                        elif expr.attr in self.module.global_vars:
+                            self.emit(f"mov rax, [_pyfasm_global_{expr.attr}]", f"load global {expr.attr}")
+                            val_handled = True
+                    if not val_handled:
+                        namespaced_func = f"{mod_name}_{expr.attr}"
+                        if namespaced_func in self.module.functions:
+                            safe_fn = safe_asm_label(namespaced_func)
+                            self.emit(f"lea rax, [{safe_fn}]", f"address of {mod_name}.{expr.attr}")
+                            val_handled = True
+                        elif expr.attr in self.module.functions:
+                            safe_fn = safe_asm_label(expr.attr)
+                            self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.attr}")
                             val_handled = True
                 if not val_handled:
                     self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")

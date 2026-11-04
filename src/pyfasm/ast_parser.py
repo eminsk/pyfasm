@@ -81,6 +81,7 @@ class ParsedModule:
     main_func: Optional[FunctionSymbol] = None
     calls_main_in_top_level: bool = False
     ui_spec: Optional[Any] = None
+    module_inits: List[str] = field(default_factory=list)
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
@@ -118,6 +119,15 @@ class ParsedModule:
     @property
     def is_media_app(self) -> bool:
         return self.has_library("cv2", "opencv", "ffmpeg", "pyaudio", "sounddevice", "pil", "pillow")
+
+
+def walk_local_scope(node: ast.AST):
+    """Walk an AST node without descending into nested function or class scopes."""
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            yield from walk_local_scope(child)
+
 
 
 class ConstantFolder(ast.NodeTransformer):
@@ -369,8 +379,11 @@ class AstAnalyzer:
         self.floats: List[FloatLiteral] = []
         self.project_root: Optional[Path] = Path(project_root).resolve() if project_root else None
         self._visited_files: Set[Path] = set()
+        self._site_packages_dirs: List[Path] = []
         self._str_counter = 0
         self._flt_counter = 0
+        if self.project_root:
+            self._discover_site_packages()
 
     def get_or_create_string(self, text: str) -> str:
         for s in self.strings:
@@ -433,7 +446,7 @@ class AstAnalyzer:
         """Marks local variables that receive generator call returns with is_generator = True."""
         for fn in module.functions.values():
             if fn.ast_node:
-                for sub in ast.walk(fn.ast_node):
+                for sub in walk_local_scope(fn.ast_node):
                     if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(sub.targets[0], ast.Name):
                         if isinstance(sub.value, ast.Call) and isinstance(sub.value.func, ast.Name):
                             target_fn = module.functions.get(sub.value.func.id)
@@ -474,6 +487,45 @@ class AstAnalyzer:
 
         return module
 
+    def _discover_site_packages(self) -> None:
+        """Finds active virtual environments (.venv, venv) to enable importing pure-Python packages."""
+        if not self.project_root:
+            return
+        roots_to_check = [self.project_root]
+        roots_to_check.extend(list(self.project_root.parents)[:3])
+        for r in roots_to_check:
+            for venv_name in (".venv", "venv"):
+                v = r / venv_name
+                if not v.is_dir():
+                    continue
+                # Windows site-packages
+                win_sp = v / "Lib" / "site-packages"
+                if win_sp.is_dir() and win_sp not in self._site_packages_dirs:
+                    self._site_packages_dirs.append(win_sp)
+                # Unix site-packages
+                lib_dir = v / "lib"
+                if lib_dir.is_dir():
+                    for py_dir in lib_dir.glob("python*"):
+                        u_sp = py_dir / "site-packages"
+                        if u_sp.is_dir() and u_sp not in self._site_packages_dirs:
+                            self._site_packages_dirs.append(u_sp)
+
+    @staticmethod
+    def _is_binary_extension_module(path: Path) -> bool:
+        """Determines if a package/module relies on compiled C-extensions (.pyd, .so, .dll)."""
+        root_name = path.stem.lower() if path.is_file() else path.name.lower()
+        if root_name in (
+            "numpy", "scipy", "matplotlib", "torch", "cv2", "pandas",
+            "cryptography", "win32api", "win32gui", "pythoncom", "ctypes",
+            "customtkinter", "tkinter", "ttkbootstrap", "pil", "pillow",
+            "pyfasm", "pyfasm64",
+        ):
+            return True
+        if path.is_dir():
+            if any(path.glob("*.pyd")) or any(path.glob("*.so")):
+                return True
+        return False
+
     def parse_file(self, file_path: str | Path, project_root: Optional[Path | str] = None) -> ParsedModule:
         """
         Parses an entry Python file and recursively discovers and compiles all
@@ -484,6 +536,7 @@ class AstAnalyzer:
             self.project_root = Path(project_root).resolve()
         elif not self.project_root:
             self.project_root = entry_path.parent
+        self._discover_site_packages()
 
         module = ParsedModule()
         self._visited_files.clear()
@@ -519,8 +572,7 @@ class AstAnalyzer:
         return module
 
     def _resolve_local_module(self, mod_name: str, current_dir: Path) -> Optional[Path]:
-        """Resolves an imported module name to a local .py file, strictly ignoring pyfasm itself."""
-        # Never add or import pyfasm itself ("естественно добавлять саму себя не должна уже")
+        """Resolves an imported module name to a local or pure-Python venv file, strictly ignoring pyfasm itself."""
         if mod_name == "pyfasm" or mod_name.startswith("pyfasm."):
             return None
 
@@ -542,6 +594,15 @@ class AstAnalyzer:
             if cand4.exists() and cand4.is_file():
                 return cand4
 
+        # 3. Try site-packages from project venv (pure-Python packages only)
+        for sp in self._site_packages_dirs:
+            cand5 = sp.joinpath(*parts).with_suffix(".py")
+            if cand5.exists() and cand5.is_file() and not self._is_binary_extension_module(cand5):
+                return cand5
+            cand6 = sp.joinpath(*parts, "__init__.py")
+            if cand6.exists() and cand6.is_file() and not self._is_binary_extension_module(cand6.parent):
+                return cand6
+
         return None
 
     def _parse_file_recursive(self, path: Path, module: ParsedModule, is_entry: bool = False) -> None:
@@ -552,10 +613,14 @@ class AstAnalyzer:
             return
         self._visited_files.add(real_path)
 
-        # Ignore virtual environments, cache, and git folders
         path_str = str(real_path).lower()
-        if any(ign in path_str for ign in [".venv", "venv", "__pycache__", "site-packages", ".git"]):
+        if any(ign in path_str for ign in ["__pycache__", ".git", ".pytest_cache"]):
             return
+
+        # If it's inside venv or site-packages, make sure it's not a binary extension
+        if any(v in path_str for v in [".venv", "venv", "site-packages"]):
+            if self._is_binary_extension_module(real_path.parent) or self._is_binary_extension_module(real_path):
+                return
 
         # Never add pyfasm source itself
         if "pyfasm" in real_path.parts and "src" in real_path.parts:
@@ -591,17 +656,14 @@ class AstAnalyzer:
                 elif isinstance(node.value, float):
                     self.get_or_create_float(node.value)
 
-        # 2. Extract functions from this module
         mod_prefix = re.sub(r'[^a-zA-Z0-9_]', '_', real_path.stem)
         if mod_prefix and mod_prefix[0].isdigit():
             mod_prefix = f"_{mod_prefix}" 
-        self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
 
-        # 3. Discover and recursively parse imported project modules across entire AST
+        # 2. Discover and recursively parse imported project modules across entire AST first (topological post-order)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    # Never import self or pyfasm
                     if alias.name == "pyfasm" or alias.name.startswith("pyfasm."):
                         continue
                     dep = self._resolve_local_module(alias.name, real_path.parent)
@@ -622,21 +684,20 @@ class AstAnalyzer:
                         self._parse_file_recursive(dep, module, is_entry=False)
 
                     # Register import aliases: `from mod import name as alias`
-                    # so that `alias` resolves to the already-parsed function `name`
-                    # or to the module-prefixed variant `mod_name`
                     for alias in node.names:
                         imported_name = alias.name
                         local_alias = alias.asname
                         if local_alias and local_alias != imported_name:
-                            # Try to find the original function under its bare name or module-prefixed name
                             orig_fn = module.functions.get(imported_name)
                             if not orig_fn:
-                                # Try module-prefix variant (e.g. gui_main for gui.main)
                                 mod_stem = mod_name.lstrip(".").split(".")[-1] if mod_name else ""
                                 prefixed = f"{mod_stem}_{imported_name}" if mod_stem else imported_name
                                 orig_fn = module.functions.get(prefixed)
                             if orig_fn and local_alias not in module.functions:
                                 module.functions[local_alias] = orig_fn
+
+        # 3. Extract functions and top-level code from this module
+        self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
 
     def _extract_top_level_and_functions(
         self,
@@ -655,6 +716,8 @@ class AstAnalyzer:
                         if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, int):
                             init_val = int(stmt.value.value)  # bool -> int (False->0, True->1)
                         module.global_vars[tgt.id] = init_val
+                        if mod_prefix:
+                            module.global_vars[f"{mod_prefix}_{tgt.id}"] = init_val
             if isinstance(stmt, ast.FunctionDef):
                 fn = self._analyze_function(stmt)
                 if fn.name not in module.functions:
@@ -667,18 +730,21 @@ class AstAnalyzer:
                     module.main_func = fn
             elif isinstance(stmt, ast.ClassDef):
                 self._analyze_class(stmt, module, mod_prefix=mod_prefix)
-            elif is_entry:
-                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                    continue
-                if isinstance(stmt, ast.If):
-                    is_main_guard = False
-                    if isinstance(stmt.test, ast.Compare):
-                        if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
-                           any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
-                            is_main_guard = True
-                    if is_main_guard:
+            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                continue
+            elif isinstance(stmt, ast.If):
+                is_main_guard = False
+                if isinstance(stmt.test, ast.Compare):
+                    if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
+                       any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
+                        is_main_guard = True
+                if is_main_guard:
+                    if is_entry:
                         top_level_stmts.extend(stmt.body)
-                        continue
+                    continue
+                else:
+                    top_level_stmts.append(stmt)
+            else:
                 top_level_stmts.append(stmt)
 
         if is_entry and top_level_stmts:
@@ -700,6 +766,18 @@ class AstAnalyzer:
                 module.functions["main"] = fn_sym
                 module.main_func = fn_sym
             else:
+                assigned_names = []
+                for s in top_level_stmts:
+                    if isinstance(s, ast.Assign):
+                        for tgt in s.targets:
+                            if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
+                                assigned_names.append(tgt.id)
+                    elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                        if s.target.id not in assigned_names:
+                            assigned_names.append(s.target.id)
+                if assigned_names:
+                    top_level_stmts = [ast.Global(names=assigned_names)] + top_level_stmts
+
                 entry_fn_def = ast.FunctionDef(
                     name="_pyfasm_top_level_init",
                     args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
@@ -713,6 +791,33 @@ class AstAnalyzer:
                 module.functions["_pyfasm_top_level_init"] = fn_sym
                 if calls_main:
                     module.calls_main_in_top_level = True
+        elif not is_entry and mod_prefix and top_level_stmts:
+            init_fn_name = f"_pyfasm_modinit_{mod_prefix}"
+            assigned_names = []
+            for s in top_level_stmts:
+                if isinstance(s, ast.Assign):
+                    for tgt in s.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
+                            assigned_names.append(tgt.id)
+                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                    if s.target.id not in assigned_names:
+                        assigned_names.append(s.target.id)
+            if assigned_names:
+                top_level_stmts = [ast.Global(names=assigned_names)] + top_level_stmts
+
+            init_fn_def = ast.FunctionDef(
+                name=init_fn_name,
+                args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                body=top_level_stmts,
+                decorator_list=[],
+                returns=None,
+                lineno=1,
+                col_offset=0
+            )
+            fn_sym = self._analyze_function(init_fn_def)
+            module.functions[init_fn_name] = fn_sym
+            if init_fn_name not in module.module_inits:
+                module.module_inits.append(init_fn_name)
 
     def _analyze_class(self, node: ast.ClassDef, module: ParsedModule, mod_prefix: str = "") -> ClassSymbol:
         cls_name = node.name
@@ -976,7 +1081,7 @@ class AstAnalyzer:
 
         # Discover all assigned variables in the function body with local type inference (multi-pass for chained type resolution)
         global_names: Set[str] = set()
-        for sub_node in ast.walk(node):
+        for sub_node in walk_local_scope(node):
             if isinstance(sub_node, ast.Global):
                 for gname in sub_node.names:
                     global_names.add(gname)
@@ -985,7 +1090,7 @@ class AstAnalyzer:
                             self.current_module.global_vars[gname] = 0
 
         for _pass in range(3):
-            for sub_node in ast.walk(node):
+            for sub_node in walk_local_scope(node):
                 if isinstance(sub_node, ast.Assign):
                     inferred_type = self._infer_node_type(sub_node.value, local_vars)
                     targets_to_proc = []
@@ -1136,13 +1241,13 @@ class AstAnalyzer:
                         )
                         offset += 8
     
-        is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node))
+        is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in walk_local_scope(node))
         if is_gen and ret_type == TYPE_VOID:
             ret_type = TYPE_PTR
 
         # If return type wasn't explicitly annotated, infer from return statements
         if ret_type == TYPE_VOID:
-            for sub_node in ast.walk(node):
+            for sub_node in walk_local_scope(node):
                 if isinstance(sub_node, ast.Return) and sub_node.value is not None:
                     ret_type = self._infer_node_type(sub_node.value, local_vars)
                     break

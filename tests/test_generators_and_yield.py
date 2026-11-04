@@ -75,3 +75,50 @@ def main() -> int:
     assert "Count 4: 40" in res.stdout
     assert "Total from count_up(5): 150" in res.stdout
     assert "Fib sum 7: 20" in res.stdout
+
+
+def test_loop_else_and_generator_isolation(tmp_path: Path):
+    source = """
+def loop_else_gen():
+    found = 0
+    for x in [1, 2, 3]:
+        if x == 99:
+            break
+    else:
+        yield 42
+
+    w = 0
+    while w < 2:
+        w += 1
+    else:
+        yield 84
+
+def outer_with_nested():
+    def inner_generator():
+        yield 100
+    return 777
+
+def main() -> int:
+    vals = []
+    for v in loop_else_gen():
+        vals.append(v)
+    print("Loop else yield 1:", vals[0])
+    print("Loop else yield 2:", vals[1])
+    print("Outer returned:", outer_with_nested())
+    return 0
+"""
+    src_file = tmp_path / "loop_else_test.py"
+    src_file.write_text(source, encoding="utf-8")
+    out_exe = tmp_path / "loop_else_test.exe"
+
+    compiler = PyFasmCompiler()
+    ok, bin_path, log = compiler.compile_file(str(src_file), str(out_exe), target="win64")
+    assert ok is True, f"Compilation failed:\n{log}"
+    assert out_exe.exists()
+
+    res = subprocess.run([str(out_exe)], capture_output=True, text=True)
+    assert res.returncode == 0
+    assert "Loop else yield 1: 42" in res.stdout
+    assert "Loop else yield 2: 84" in res.stdout
+    assert "Outer returned: 777" in res.stdout
+

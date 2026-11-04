@@ -1925,6 +1925,22 @@ _pyfasm_gen_next:
     pop     rbp
     ret
 
+_pyfasm_list_create:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    test    ecx, ecx
+    jnz     .plc_cap
+    mov     ecx, 16
+.plc_cap:
+    shl     ecx, 3
+    add     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
@@ -1933,6 +1949,25 @@ _pyfasm_list_append:
     inc     qword [rcx]
 .la_ret:
     mov     rax, rcx
+    ret
+
+_pyfasm_load_ext_symbol:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    mov     [rbp - 8], rdx
+    call    [LoadLibraryA]
+    test    rax, rax
+    jz      .les_fail
+    mov     rcx, rax
+    mov     rdx, [rbp - 8]
+    call    [GetProcAddress]
+    jmp     .les_ret
+.les_fail:
+    xor     eax, eax
+.les_ret:
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_darkdetect_theme:
@@ -5667,6 +5702,9 @@ section '.idata' import data readable writeable
            MultiByteToWideChar, 'MultiByteToWideChar', \\
            WideCharToMultiByte, 'WideCharToMultiByte', \\
            GetCurrentThreadId, 'GetCurrentThreadId', \\
+           LoadLibraryA, 'LoadLibraryA', \\
+           GetProcAddress, 'GetProcAddress', \\
+           FreeLibrary, 'FreeLibrary', \\
            ExitProcess, 'ExitProcess'
 
     import user32, \\
@@ -7141,6 +7179,22 @@ _pyfasm_gen_next:
     pop     rbp
     ret
 
+_pyfasm_list_create:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    test    ecx, ecx
+    jnz     .plc_cap
+    mov     ecx, 16
+.plc_cap:
+    shl     ecx, 3
+    add     ecx, 16
+    call    _pyfasm_alloc
+    mov     qword [rax], 0
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_append:
     test    rcx, rcx
     jz      .la_ret
@@ -7149,6 +7203,25 @@ _pyfasm_list_append:
     inc     qword [rcx]
 .la_ret:
     mov     rax, rcx
+    ret
+
+_pyfasm_load_ext_symbol:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    mov     [rbp - 8], rdx
+    call    [LoadLibraryA]
+    test    rax, rax
+    jz      .les_fail
+    mov     rcx, rax
+    mov     rdx, [rbp - 8]
+    call    [GetProcAddress]
+    jmp     .les_ret
+.les_fail:
+    xor     eax, eax
+.les_ret:
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_int_to_str:
@@ -7845,6 +7918,9 @@ section '.idata' import data readable writeable
            MultiByteToWideChar, 'MultiByteToWideChar', \
            WideCharToMultiByte, 'WideCharToMultiByte', \
            GetCurrentThreadId, 'GetCurrentThreadId', \
+           LoadLibraryA, 'LoadLibraryA', \
+           GetProcAddress, 'GetProcAddress', \
+           FreeLibrary, 'FreeLibrary', \
            ExitProcess, 'ExitProcess'
 """
 
@@ -7871,6 +7947,9 @@ section '.idata' import data readable writeable
            MultiByteToWideChar, 'MultiByteToWideChar', \
            WideCharToMultiByte, 'WideCharToMultiByte', \
            GetCurrentThreadId, 'GetCurrentThreadId', \
+           LoadLibraryA, 'LoadLibraryA', \
+           GetProcAddress, 'GetProcAddress', \
+           FreeLibrary, 'FreeLibrary', \
            ExitProcess, 'ExitProcess'
 
     import wininet, \
