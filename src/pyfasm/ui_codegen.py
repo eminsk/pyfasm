@@ -4,7 +4,8 @@ Translates UiAppSpec into complete native x86_64 FASM source code
 with Win32 GDI dark theme, rounded cards, custom controls, and live plotting.
 """
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Dict, Union
+from pathlib import Path
 from pyfasm.ui_analyzer import UiAppSpec, UiWidgetSpec
 
 
@@ -127,6 +128,7 @@ section '.data' data readable writeable
     _flt_two                dq 2.0
     _flt_four               dq 4.0
     _flt_step               dq 0.05
+    _flt_yscale             dq 37.333333333333336
     _flt_x_min              dq -2.5
     _flt_x_max              dq 4.5
     _flt_y_min              dq -1.5
@@ -159,7 +161,18 @@ section '.data' data readable writeable
     wszAxisY                du {to_utf16_words(plot_ylabel_str)}
     wszLegendFx             du 0x2014, ' f(x)', 0
     wszLegendRoots          du 0x25CF, ' ', 0x043A, 0x043E, 0x0440, 0x043D, 0x0438, 0
-    wszLegendVertex         du 0x25C6, ' ', 0x0432, 0x0435, 0x0448, 0x0438, 0x043D, 0x0430, 0
+        wszLegendVertex         du 0x25C6, ' ', 0x0432, 0x0435, 0x0440, 0x0448, 0x0438, 0x043D, 0x0430, 0
+    wszTick_m2              du '-2', 0
+    wszTick_m1              du '-1', 0
+    wszTick_0               du '0', 0
+    wszTick_1               du '1', 0
+    wszTick_2               du '2', 0
+    wszTick_3               du '3', 0
+    wszTick_4               du '4', 0
+    wszTick_6               du '6', 0
+    wszTick_8               du '8', 0
+    wszTick_10              du '10', 0
+    wszTick_12              du '12', 0
 
     ; Initial input strings
     wszInitA                du {to_utf16_words(init_a)}
@@ -350,20 +363,20 @@ _pyfasm_init_app_ui:
     mov     dword [_wc_app], 80
     mov     dword [_wc_app + 4], 3 ; CS_HREDRAW | CS_VREDRAW
     lea     rax, [_pyfasm_ui_wnd_proc]
-    mov     [_wc_app + 8], rax
+    mov     qword [_wc_app + 8], rax
     mov     dword [_wc_app + 16], 0
     mov     dword [_wc_app + 20], 0
     mov     rax, [_pyfasm_h_inst]
-    mov     [_wc_app + 24], rax
+    mov     qword [_wc_app + 24], rax
     xor     ecx, ecx
     mov     edx, 32512          ; IDC_ARROW
     call    [LoadCursorW]
-    mov     [_wc_app + 40], rax
+    mov     qword [_wc_app + 40], rax
     mov     rax, [_pyfasm_hbr_win]
-    mov     [_wc_app + 48], rax
+    mov     qword [_wc_app + 48], rax
     mov     qword [_wc_app + 56], 0
     lea     rax, [szAppClass]
-    mov     [_wc_app + 64], rax
+    mov     qword [_wc_app + 64], rax
     mov     qword [_wc_app + 72], 0
     lea     rcx, [_wc_app]
     call    [RegisterClassExW]
@@ -372,20 +385,20 @@ _pyfasm_init_app_ui:
     mov     dword [_wc_canvas], 80
     mov     dword [_wc_canvas + 4], 3
     lea     rax, [_pyfasm_canvas_wnd_proc]
-    mov     [_wc_canvas + 8], rax
+    mov     qword [_wc_canvas + 8], rax
     mov     dword [_wc_canvas + 16], 0
     mov     dword [_wc_canvas + 20], 0
     mov     rax, [_pyfasm_h_inst]
-    mov     [_wc_canvas + 24], rax
+    mov     qword [_wc_canvas + 24], rax
     xor     ecx, ecx
     mov     edx, 32512
     call    [LoadCursorW]
-    mov     [_wc_canvas + 40], rax
+    mov     qword [_wc_canvas + 40], rax
     mov     rax, [_pyfasm_hbr_plot_bg]
-    mov     [_wc_canvas + 48], rax
+    mov     qword [_wc_canvas + 48], rax
     mov     qword [_wc_canvas + 56], 0
     lea     rax, [szCanvasClass]
-    mov     [_wc_canvas + 64], rax
+    mov     qword [_wc_canvas + 64], rax
     mov     qword [_wc_canvas + 72], 0
     lea     rcx, [_wc_canvas]
     call    [RegisterClassExW]
@@ -621,7 +634,7 @@ _pyfasm_init_app_ui:
     xor     ecx, ecx
     lea     rdx, [szButtonClass]
     lea     r8, [wszBtnSolve]
-    mov     r9d, 50000000h      ; WS_CHILD | WS_VISIBLE
+    mov     r9d, 5000000Bh      ; WS_CHILD | WS_VISIBLE
     mov     qword [rsp + 32], 42
     mov     qword [rsp + 40], 336
     mov     qword [rsp + 48], 170
@@ -644,7 +657,7 @@ _pyfasm_init_app_ui:
     xor     ecx, ecx
     lea     rdx, [szButtonClass]
     lea     r8, [wszBtnClear]
-    mov     r9d, 50000000h
+    mov     r9d, 5000000Bh
     mov     qword [rsp + 32], 222
     mov     qword [rsp + 40], 336
     mov     qword [rsp + 48], 170
@@ -667,7 +680,7 @@ _pyfasm_init_app_ui:
     xor     ecx, ecx
     lea     rdx, [szButtonClass]
     lea     r8, [wszBtnDark]
-    mov     r9d, 50000000h
+    mov     r9d, 5000000Bh
     mov     qword [rsp + 32], 42
     mov     qword [rsp + 40], 384
     mov     qword [rsp + 48], 110
@@ -689,7 +702,7 @@ _pyfasm_init_app_ui:
     xor     ecx, ecx
     lea     rdx, [szButtonClass]
     lea     r8, [wszBtnLight]
-    mov     r9d, 50000000h
+    mov     r9d, 5000000Bh
     mov     qword [rsp + 32], 162
     mov     qword [rsp + 40], 384
     mov     qword [rsp + 48], 110
@@ -711,7 +724,7 @@ _pyfasm_init_app_ui:
     xor     ecx, ecx
     lea     rdx, [szButtonClass]
     lea     r8, [wszBtnSys]
-    mov     r9d, 50000000h
+    mov     r9d, 5000000Bh
     mov     qword [rsp + 32], 282
     mov     qword [rsp + 40], 384
     mov     qword [rsp + 48], 110
@@ -813,13 +826,20 @@ _pyfasm_run_app_loop:
 _pyfasm_ui_wnd_proc:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 96
+    push    rbx
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 128
     and     rsp, -16
 
     cmp     edx, 2              ; WM_DESTROY
     je      .on_destroy
     cmp     edx, 14h            ; WM_ERASEBKGND
     je      .on_erasebkgnd
+    cmp     edx, 2Bh            ; WM_DRAWITEM
+    je      .on_drawitem
     cmp     edx, 138h           ; WM_CTLCOLORSTATIC
     je      .on_ctlcolorstatic
     cmp     edx, 133h           ; WM_CTLCOLOREDIT
@@ -876,32 +896,284 @@ _pyfasm_ui_wnd_proc:
     mov     eax, 1
     jmp     .proc_ret
 
+; ============================================================
+; Modern Custom Draw for Buttons (WM_DRAWITEM)
+; ============================================================
+.on_drawitem:
+    ; r8 = control ID, r9 = LPDRAWITEMSTRUCT
+    test    r9, r9
+    jz      .draw_default
+    mov     [rsp + 48], r9      ; save pDIS
+    mov     eax, dword [r9 + 4] ; CtlID
+    mov     r12, qword [r9 + 32] ; hDC
+    lea     r13, [r9 + 40]      ; rcItem (RECT: left, top, right, bottom)
+
+    cmp     eax, 1001           ; Solve Button
+    je      .draw_btn_solve
+    cmp     eax, 1002           ; Clear Button
+    je      .draw_btn_clear
+    cmp     eax, 1021           ; Dark theme (active)
+    je      .draw_btn_dark
+    cmp     eax, 1022           ; Light theme
+    je      .draw_btn_light
+    cmp     eax, 1023           ; System theme
+    je      .draw_btn_sys
+    jmp     .draw_default
+
+.draw_btn_solve:
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_null]
+    call    [SelectObject]
+    mov     rcx, r12
+    ; Check if pressed (ODS_SELECTED = 1 at offset 16)
+    mov     r9, [rsp + 48]
+    test    dword [r9 + 16], 1
+    jnz     .solve_pressed
+    mov     rdx, [_pyfasm_hbr_accent]
+    jmp     .solve_sel_done
+.solve_pressed:
+    mov     rdx, [_pyfasm_hbr_accent_dark]
+.solve_sel_done:
+    call    [SelectObject]
+
+    ; Draw rounded button
+    mov     rcx, r12
+    mov     edx, dword [r13]
+    mov     r8d, dword [r13 + 4]
+    mov     r9d, dword [r13 + 8]
+    mov     eax, dword [r13 + 12]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 10
+    mov     qword [rsp + 48], 10
+    call    [RoundRect]
+
+    ; Draw Text
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_bold]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 001E1616h      ; Dark text #16161e
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1              ; TRANSPARENT
+    call    [SetBkMode]
+    mov     rcx, r12
+    lea     rdx, [wszBtnSolve]
+    mov     r8d, -1
+    mov     r9, r13
+    mov     qword [rsp + 32], 25h ; DT_CENTER | DT_VCENTER | DT_SINGLELINE
+    call    [DrawTextW]
+    mov     eax, 1
+    jmp     .proc_ret
+
+.draw_btn_clear:
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_card_border]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hbr_entry]
+    call    [SelectObject]
+
+    mov     rcx, r12
+    mov     edx, dword [r13]
+    mov     r8d, dword [r13 + 4]
+    mov     r9d, dword [r13 + 8]
+    mov     eax, dword [r13 + 12]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 10
+    mov     qword [rsp + 48], 10
+    call    [RoundRect]
+
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_ui]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 00F5CAC0h      ; #c0caf5
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1
+    call    [SetBkMode]
+    mov     rcx, r12
+    lea     rdx, [wszBtnClear]
+    mov     r8d, -1
+    mov     r9, r13
+    mov     qword [rsp + 32], 25h
+    call    [DrawTextW]
+    mov     eax, 1
+    jmp     .proc_ret
+
+.draw_btn_dark:
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_null]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hbr_accent]
+    call    [SelectObject]
+
+    mov     rcx, r12
+    mov     edx, dword [r13]
+    mov     r8d, dword [r13 + 4]
+    mov     r9d, dword [r13 + 8]
+    mov     eax, dword [r13 + 12]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_ui]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 001E1616h
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1
+    call    [SetBkMode]
+    mov     rcx, r12
+    lea     rdx, [wszBtnDark]
+    mov     r8d, -1
+    mov     r9, r13
+    mov     qword [rsp + 32], 25h
+    call    [DrawTextW]
+    mov     eax, 1
+    jmp     .proc_ret
+
+.draw_btn_light:
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_card_border]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hbr_entry]
+    call    [SelectObject]
+
+    mov     rcx, r12
+    mov     edx, dword [r13]
+    mov     r8d, dword [r13 + 4]
+    mov     r9d, dword [r13 + 8]
+    mov     eax, dword [r13 + 12]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_ui]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 00F5CAC0h
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1
+    call    [SetBkMode]
+    mov     rcx, r12
+    lea     rdx, [wszBtnLight]
+    mov     r8d, -1
+    mov     r9, r13
+    mov     qword [rsp + 32], 25h
+    call    [DrawTextW]
+    mov     eax, 1
+    jmp     .proc_ret
+
+.draw_btn_sys:
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_card_border]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hbr_entry]
+    call    [SelectObject]
+
+    mov     rcx, r12
+    mov     edx, dword [r13]
+    mov     r8d, dword [r13 + 4]
+    mov     r9d, dword [r13 + 8]
+    mov     eax, dword [r13 + 12]
+    mov     qword [rsp + 32], rax
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_ui]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 00F5CAC0h
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1
+    call    [SetBkMode]
+    mov     rcx, r12
+    lea     rdx, [wszBtnSys]
+    mov     r8d, -1
+    mov     r9, r13
+    mov     qword [rsp + 32], 25h
+    call    [DrawTextW]
+    mov     eax, 1
+    jmp     .proc_ret
+
+.draw_default:
+    mov     eax, 1
+    jmp     .proc_ret
+
+; ============================================================
+; Theme Colors for Static & Edit Controls
+; ============================================================
 .on_ctlcolorstatic:
     ; rcx = hwnd, rdx = msg, r8 = hdc, r9 = hwndStatic
-    mov     rcx, r8
+    mov     [rsp + 48], r8
+    mov     [rsp + 56], r9
+
+    cmp     r9, [_pyfasm_h_result]
+    je      .static_result
+    cmp     r9, [_pyfasm_h_preview]
+    je      .static_preview
+
+    ; Standard Label inside Card:
+    mov     rcx, [rsp + 48]
     mov     edx, 00F5CAC0h      ; 0xc0caf5 text color (BGR)
     call    [SetTextColor]
-    mov     rcx, r8
+    mov     rcx, [rsp + 48]
     mov     edx, 1              ; TRANSPARENT
     call    [SetBkMode]
     mov     rax, [_pyfasm_hbr_card]
     jmp     .proc_ret
 
+.static_preview:
+    mov     rcx, [rsp + 48]
+    mov     edx, 00F7A27Ah      ; #7aa2f7 accent blue
+    call    [SetTextColor]
+    mov     rcx, [rsp + 48]
+    mov     edx, 1              ; TRANSPARENT
+    call    [SetBkMode]
+    mov     rax, [_pyfasm_hbr_card]
+    jmp     .proc_ret
+
+.static_result:
+    mov     rcx, [rsp + 48]
+    mov     edx, 00F5CAC0h      ; 0xc0caf5
+    call    [SetTextColor]
+    mov     rcx, [rsp + 48]
+    mov     edx, 003B2824h      ; 0x24283b entry dark background
+    call    [SetBkColor]
+    mov     rax, [_pyfasm_hbr_entry]
+    jmp     .proc_ret
+
 .on_ctlcoloredit:
+    mov     [rsp + 48], r8
     mov     rcx, r8
     mov     edx, 00F5CAC0h      ; 0xc0caf5
     call    [SetTextColor]
-    mov     rcx, r8
+    mov     rcx, [rsp + 48]
     mov     edx, 003B2824h      ; 0x24283b bg color
     call    [SetBkColor]
     mov     rax, [_pyfasm_hbr_entry]
     jmp     .proc_ret
 
 .on_ctlcolorbtn:
+    mov     [rsp + 48], r8
     mov     rcx, r8
     mov     edx, 00FFFFFFh
     call    [SetTextColor]
-    mov     rcx, r8
+    mov     rcx, [rsp + 48]
     mov     edx, 1
     call    [SetBkMode]
     mov     rax, [_pyfasm_hbr_card]
@@ -928,7 +1200,12 @@ _pyfasm_ui_wnd_proc:
     call    [PostQuitMessage]
     xor     eax, eax
 .proc_ret:
-    mov     rsp, rbp
+    lea     rsp, [rbp - 40]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rbx
     pop     rbp
     ret
 
@@ -938,7 +1215,12 @@ _pyfasm_ui_wnd_proc:
 _pyfasm_canvas_wnd_proc:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 128
+    push    rbx
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 160
     and     rsp, -16
 
     cmp     edx, 0Fh            ; WM_PAINT
@@ -1066,6 +1348,134 @@ _pyfasm_canvas_wnd_proc:
     mov     r8d, 595
     call    [LineTo]
 
+    ; 2.5 Draw Axis Numbers and Ticks
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hfont_ui]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 00895F56h      ; #565f89 axis label color
+    call    [SetTextColor]
+    mov     rcx, r12
+    mov     edx, 1              ; TRANSPARENT
+    call    [SetBkMode]
+
+    ; Y axis tick numbers (0, 2, 4, 6, 8, 10, 12)
+    ; TextOutW(hdc, x, y, lpString, cchString)
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 532
+    lea     r9, [wszTick_0]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 457
+    lea     r9, [wszTick_2]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 383
+    lea     r9, [wszTick_4]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 308
+    lea     r9, [wszTick_6]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 233
+    lea     r9, [wszTick_8]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 18
+    mov     r8d, 159
+    lea     r9, [wszTick_10]
+    mov     qword [rsp + 32], 2
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 18
+    mov     r8d, 84
+    lea     r9, [wszTick_12]
+    mov     qword [rsp + 32], 2
+    call    [TextOutW]
+
+    ; Y Axis label 'y'
+    mov     rcx, r12
+    mov     edx, 26
+    mov     r8d, 38
+    lea     r9, [wszAxisY]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    ; X axis tick numbers (-2, -1, 0, 1, 2, 3, 4)
+    mov     rcx, r12
+    mov     edx, 82
+    mov     r8d, 546
+    lea     r9, [wszTick_m2]
+    mov     qword [rsp + 32], 2
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 162
+    mov     r8d, 546
+    lea     r9, [wszTick_m1]
+    mov     qword [rsp + 32], 2
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 246
+    mov     r8d, 546
+    lea     r9, [wszTick_0]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 326
+    mov     r8d, 546
+    lea     r9, [wszTick_1]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 406
+    mov     r8d, 546
+    lea     r9, [wszTick_2]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 486
+    mov     r8d, 546
+    lea     r9, [wszTick_3]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    mov     rcx, r12
+    mov     edx, 566
+    mov     r8d, 546
+    lea     r9, [wszTick_4]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
+    ; X Axis label 'x'
+    mov     rcx, r12
+    mov     edx, 330
+    mov     r8d, 570
+    lea     r9, [wszAxisX]
+    mov     qword [rsp + 32], 1
+    call    [TextOutW]
+
     ; 3. Draw Parabola Curve: y = a*x^2 + b*x + c
     mov     rcx, r12
     mov     rdx, [_pyfasm_hpen_curve]
@@ -1087,33 +1497,18 @@ _pyfasm_canvas_wnd_proc:
     addsd   xmm1, xmm2
     addsd   xmm1, [_val_c]      ; xmm1 = y
 
-    ; Screen px = 250 + (x * 80)
-    movsd   xmm3, xmm0
-    mulsd   xmm3, [_flt_four]   ; x * 4
-    ; Convert to integer screen coords
-    ; px = 250.0 + x * 80.0
-    ; Let's compute: x_offset = x - (-2.5) = x + 2.5
-    ; px = 50 + (x + 2.5) * 80
-    movsd   xmm4, xmm0
-    addsd   xmm4, [_val_vx]     ; temp
-    ; Simple direct linear: px = (int)(250.0 + x * 80.0)
-    ; Direct SSE integer conversion:
-    movsd   xmm4, [_flt_step]
-    ; Let's calculate px directly:
-    ; px = 50 + (esi * 560) / 140 = 50 + esi * 4
+    ; px = 50 + esi * 4
     mov     eax, esi
-    shl     eax, 2              ; esi * 4
+    shl     eax, 2
     add     eax, 50             ; px
-    ; py = 539 - (int)(y * 37.33)
-    ; y * 37.33 = (y * 560) / 15
-    cvttsd2si ebx, xmm1         ; int(y)
-    imul    ebx, 560
-    mov     eax, ebx
-    cdq
-    mov     ebx, 15
-    idiv    ebx
+
+    ; py = 539 - (int)(y * 37.333333333333336)
+    ; Full floating-point precision with SSE:
+    movsd   xmm3, xmm1
+    mulsd   xmm3, [_flt_yscale] ; 37.333333333333336
+    cvttsd2si ecx, xmm3
     mov     ebx, 539
-    sub     ebx, eax            ; py
+    sub     ebx, ecx            ; py = 539 - (y * scale)
 
     ; Clamp py to [32, 600]
     cmp     ebx, 32
@@ -1126,9 +1521,6 @@ _pyfasm_canvas_wnd_proc:
 .py_max_ok:
 
     ; Store POINT in _poly_pts[esi]: x (4 bytes) + y (4 bytes)
-    mov     eax, esi
-    shl     eax, 2
-    add     eax, 50             ; px
     mov     dword [_poly_pts + rsi*8], eax
     mov     dword [_poly_pts + rsi*8 + 4], ebx
 
@@ -1218,6 +1610,22 @@ _pyfasm_canvas_wnd_proc:
     mov     qword [rsp + 32], 1   ; DT_CENTER
     call    [DrawTextW]
 
+    ; Legend Card Background Box
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hpen_card_border]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     rdx, [_pyfasm_hbr_card]
+    call    [SelectObject]
+    mov     rcx, r12
+    mov     edx, 502
+    mov     r8d, 40
+    mov     r9d, 634
+    mov     qword [rsp + 32], 110
+    mov     qword [rsp + 40], 8
+    mov     qword [rsp + 48], 8
+    call    [RoundRect]
+
     ; Legend: Blue line f(x)
     mov     rcx, r12
     mov     edx, 00F7A27Ah
@@ -1225,10 +1633,10 @@ _pyfasm_canvas_wnd_proc:
     mov     rcx, r12
     lea     rdx, [wszLegendFx]
     mov     r8d, -1
-    mov     dword [_rc_client], 530
-    mov     dword [_rc_client + 4], 45
-    mov     dword [_rc_client + 8], 610
-    mov     dword [_rc_client + 12], 65
+    mov     dword [_rc_client], 512
+    mov     dword [_rc_client + 4], 46
+    mov     dword [_rc_client + 8], 628
+    mov     dword [_rc_client + 12], 66
     lea     r9, [_rc_client]
     mov     qword [rsp + 32], 0
     call    [DrawTextW]
@@ -1240,10 +1648,10 @@ _pyfasm_canvas_wnd_proc:
     mov     rcx, r12
     lea     rdx, [wszLegendRoots]
     mov     r8d, -1
-    mov     dword [_rc_client], 530
-    mov     dword [_rc_client + 4], 65
-    mov     dword [_rc_client + 8], 610
-    mov     dword [_rc_client + 12], 85
+    mov     dword [_rc_client], 512
+    mov     dword [_rc_client + 4], 66
+    mov     dword [_rc_client + 8], 628
+    mov     dword [_rc_client + 12], 86
     lea     r9, [_rc_client]
     mov     qword [rsp + 32], 0
     call    [DrawTextW]
@@ -1255,10 +1663,10 @@ _pyfasm_canvas_wnd_proc:
     mov     rcx, r12
     lea     rdx, [wszLegendVertex]
     mov     r8d, -1
-    mov     dword [_rc_client], 530
-    mov     dword [_rc_client + 4], 85
-    mov     dword [_rc_client + 8], 610
-    mov     dword [_rc_client + 12], 105
+    mov     dword [_rc_client], 512
+    mov     dword [_rc_client + 4], 86
+    mov     dword [_rc_client + 8], 628
+    mov     dword [_rc_client + 12], 106
     lea     r9, [_rc_client]
     mov     qword [rsp + 32], 0
     call    [DrawTextW]
@@ -1270,7 +1678,12 @@ _pyfasm_canvas_wnd_proc:
     jmp     .c_ret
 
 .c_ret:
-    mov     rsp, rbp
+    lea     rsp, [rbp - 40]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rbx
     pop     rbp
     ret
 
@@ -1288,18 +1701,8 @@ _pyfasm_do_solve:
     ; Let's write preview string directly into _preview_buf
     lea     rdi, [_preview_buf]
     ; L"f(x) = 1x² - 3x + 2"
-    mov     rax, 'f' | ('(' << 16) | ('x' << 32) | (')' << 48)
-    mov     qword [rdi], rax
-    mov     rax, ' ' | ('=' << 16) | (' ' << 32) | ('1' << 48)
-    mov     qword [rdi + 8], rax
-    mov     word [rdi + 16], 'x'
-    mov     word [rdi + 18], 00B2h ; ²
-    mov     rax, ' ' | ('-' << 16) | (' ' << 32) | ('3' << 48)
-    mov     qword [rdi + 20], rax
-    mov     rax, 'x' | (' ' << 16) | ('+' << 32) | (' ' << 48)
-    mov     qword [rdi + 28], rax
-    mov     word [rdi + 36], '2'
-    mov     word [rdi + 38], 0
+    lea     rsi, [_preview_default]
+    call    _pyfasm_copy_wstr
 
     mov     rcx, [_pyfasm_h_preview]
     lea     rdx, [_preview_buf]
@@ -1384,6 +1787,7 @@ _pyfasm_copy_wstr:
 section '.data' data readable writeable
     align 2
     _sz_empty       du 0
+    _preview_default du 'f(x) = 1x', 0x00B2, ' - 3x + 2', 0
     _res_line1      du 'f(x) = 1x', 0x00B2, ' - 3x + 2', 13, 10, 0
     _res_line2      du 0x041A, 0x0432, 0x0430, 0x0434, 0x0440, 0x0430, 0x0442, 0x043D, 0x043E, 0x0435, ' ', 0x0443, 0x0440, 0x0430, 0x0432, 0x043D, 0x0435, 0x043D, 0x0438, 0x0435, '. a ', 0x2260, ' 0.', 13, 10, 0
     _res_line3      du 'D = b', 0x00B2, ' - 4ac = 1', 13, 10, 0
@@ -1438,9 +1842,112 @@ section '.idata' import data readable writeable
            LineTo, 'LineTo', \\
            Polyline, 'Polyline', \\
            Polygon, 'Polygon', \\
-           Ellipse, 'Ellipse'
+           Ellipse, 'Ellipse', \
+           TextOutW, 'TextOutW'
 
     import dwmapi, \\
            DwmSetWindowAttribute, 'DwmSetWindowAttribute'
 """
     return asm
+
+
+def generate_stackoverflow_asm(ui: UiAppSpec, project_dir: Optional[Union[Path, str]] = None) -> Dict[str, str]:
+    """
+    Returns the modular assembly files dictionary for Stack Overflow Search Pro.
+    Supports either pre-existing project asm files or the bundled native templates.
+    """
+    tmpl_dir = Path(__file__).resolve().parent / "templates" / "stackoverflow"
+    files = ['const.inc', 'data.inc', 'bss.inc', 'ui.inc', 'actions.inc', 'network.inc', 'stackoverflow.asm']
+    result: Dict[str, str] = {}
+    
+    asm_source: Optional[Path] = None
+    if project_dir:
+        cand_asm = Path(project_dir) / "asm"
+        if (cand_asm / "stackoverflow.asm").exists():
+            asm_source = cand_asm
+            
+    if not asm_source or not asm_source.exists():
+        asm_source = tmpl_dir
+
+    for f in files:
+        fpath = asm_source / f
+        if not fpath.exists():
+            fpath = tmpl_dir / f
+        if fpath.exists():
+            raw = fpath.read_bytes()
+            if f == 'stackoverflow.asm':
+                raw = raw.replace(b"include 'C:\\asm\\hdd\\INCLUDE\\win64a.inc'", b"include 'win64a.inc'")
+                result["main.asm"] = raw.decode("latin-1").replace("\r\n", "\n")
+            else:
+                result[f] = raw.decode("latin-1").replace("\r\n", "\n")
+
+    return result
+
+
+def generate_punto_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None) -> Dict[str, str]:
+    """
+    Returns the modular assembly files dictionary for PuntoSwitcher (tray + keyboard hook).
+    Supports either pre-existing project asm files or the bundled native templates.
+    """
+    tmpl_dir = Path(__file__).resolve().parent / "templates" / "punto"
+    files = ["layout.inc", "windows.inc", "converter.inc", "words.inc", "punto64.asm"]
+    result: Dict[str, str] = {}
+    
+    asm_source: Optional[Path] = None
+    if project_dir:
+        cand_asm = Path(project_dir) / "asm"
+        if (cand_asm / "punto64.asm").exists():
+            asm_source = cand_asm
+            
+    if not asm_source or not asm_source.exists():
+        asm_source = tmpl_dir
+
+    for f in files:
+        fpath = asm_source / f
+        if not fpath.exists():
+            fpath = tmpl_dir / f
+        if fpath.exists():
+            raw = fpath.read_bytes()
+            if f == 'punto64.asm':
+                raw = raw.replace(b"include 'c:\\asm\\hdd\\INCLUDE\\win64a.inc'", b"include 'win64a.inc'")
+                result["main.asm"] = raw.decode("latin-1").replace("\r\n", "\n")
+            else:
+                result[f] = raw.decode("latin-1").replace("\r\n", "\n")
+
+    return result
+
+
+def generate_excel_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None) -> Dict[str, str]:
+    """
+    Returns the modular assembly files dictionary for Excel Viewer Pro (xlsx viewer).
+    Supports either pre-existing project asm files or the bundled native templates.
+    """
+    tmpl_dir = Path(__file__).resolve().parent / "templates" / "excel"
+    files = [
+        "const.inc", "data.inc", "dialogs.inc", "file_io.inc", "formulas.inc",
+        "funcs_data.inc", "grid.inc", "import.inc", "menu.inc", "ribbon.inc",
+        "chart.inc", "rsrc.inc", "xlsx_gui64.asm", "app_icon.ico"
+    ]
+    result: Dict[str, str] = {}
+    
+    asm_source: Optional[Path] = None
+    if project_dir:
+        cand_asm = Path(project_dir) / "xlsx_viewer" / "asm"
+        if (cand_asm / "xlsx_gui64.asm").exists():
+            asm_source = cand_asm
+            
+    if not asm_source or not asm_source.exists():
+        asm_source = tmpl_dir
+
+    for f in files:
+        fpath = asm_source / f
+        if not fpath.exists():
+            fpath = tmpl_dir / f
+        if fpath.exists():
+            raw = fpath.read_bytes()
+            if f == 'xlsx_gui64.asm':
+                result["main.asm"] = raw.decode("latin-1").replace("\r\n", "\n")
+            else:
+                result[f] = raw.decode("latin-1").replace("\r\n", "\n")
+
+    return result

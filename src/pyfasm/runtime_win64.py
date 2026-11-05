@@ -2395,6 +2395,31 @@ _pyfasm_list_contains:
     pop     rbp
     ret
 
+
+_pyfasm_random_choice:
+    ; RCX = list pointer
+    push    rbp
+    mov     rbp, rsp
+    test    rcx, rcx
+    jz      .rc_null
+    mov     r8, [rcx]
+    test    r8, r8
+    jz      .rc_null
+    push    rcx
+    rdtsc
+    pop     rcx
+    xor     edx, edx
+    div     r8d
+    mov     rax, [rcx + rdx * 8 + 8]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.rc_null:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_pop:
     ; RCX = list_ptr
     test    rcx, rcx
@@ -7877,6 +7902,31 @@ _pyfasm_list_contains:
     pop     rdi
     pop     rsi
     pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+
+_pyfasm_random_choice:
+    ; RCX = list pointer
+    push    rbp
+    mov     rbp, rsp
+    test    rcx, rcx
+    jz      .rc_null
+    mov     r8, [rcx]
+    test    r8, r8
+    jz      .rc_null
+    push    rcx
+    rdtsc
+    pop     rcx
+    xor     edx, edx
+    div     r8d
+    mov     rax, [rcx + rdx * 8 + 8]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.rc_null:
+    xor     eax, eax
     mov     rsp, rbp
     pop     rbp
     ret

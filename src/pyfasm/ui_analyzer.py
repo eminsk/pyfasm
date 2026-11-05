@@ -84,7 +84,7 @@ def analyze_ui_structure(tree: ast.AST) -> Optional[UiAppSpec]:
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             base_names = [b.id if isinstance(b, ast.Name) else getattr(b, "attr", "") for b in node.bases]
-            if any(b in ("CTk", "Tk", "QMainWindow", "Window") for b in base_names) or "app" in node.name.lower():
+            if any(b in ("CTk", "Tk", "QMainWindow", "Window") for b in base_names) or node.name.lower().endswith("app") or node.name.lower() in ("app", "application", "gui"):
                 app_cls = node
                 break
 

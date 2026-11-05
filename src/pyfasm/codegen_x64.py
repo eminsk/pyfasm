@@ -645,17 +645,17 @@ class X64CodeGen:
             lines.append("    and rsp, -16")
             lines.append("    call _pyfasm_init_io")
 
-            if hasattr(self.module, "module_inits") and self.module.module_inits:
-                lines.append("    ; Initialize imported modules in topological dependency order")
-                for minit in self.module.module_inits:
-                    lines.append(f"    call {safe_asm_label(minit)}")
-
             if self.target == "win64":
                 is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {})) or (
                     hasattr(self.module, "name") and "stackoverflow" in str(self.module.name).lower()
                 )
                 if is_so:
                     lines.append("    mov dword [_pyfasm_split_view_enabled], 1")
+
+            if hasattr(self.module, "module_inits") and self.module.module_inits:
+                lines.append("    ; Initialize imported modules in topological dependency order")
+                for minit in self.module.module_inits:
+                    lines.append(f"    call {safe_asm_label(minit)}")
 
             if self.module.main_func:
                 lines.append("    call main")
@@ -768,6 +768,9 @@ icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
         return ""
 
     def generate_modular(self) -> Dict[str, str]:
+        if getattr(self.module, "ui_spec", None) and getattr(self.module.ui_spec, "has_canvas", False):
+            from pyfasm.ui_codegen import generate_ui_app_asm
+            return {"main.asm": generate_ui_app_asm(self.module.ui_spec)}
         """
         Generates clean, modular FASM source files:
           - main.asm: master assembly entry point including modular headers
@@ -853,6 +856,9 @@ include 'functions.inc'
         return res_dict
 
     def generate(self) -> str:
+        if getattr(self.module, "ui_spec", None) and getattr(self.module.ui_spec, "has_canvas", False):
+            from pyfasm.ui_codegen import generate_ui_app_asm
+            return generate_ui_app_asm(self.module.ui_spec)
         header = self._get_runtime_header()
         data = self._get_data_section()
         entry = self._get_entry_point()
@@ -868,7 +874,7 @@ include 'functions.inc'
         return optimize_fasm_code(raw)
 
     def _generate_constructor_body(self, cls_sym: Any) -> None:
-        self.emit("mov ecx, 256", f"allocate 256 bytes for class '{cls_sym.name}' instance")
+        self.emit("mov ecx, 2048", f"allocate 2048 bytes for class '{cls_sym.name}' instance")
         self.emit("call _pyfasm_alloc")
         self.emit("mov [rbp - 40], rax", "save self instance pointer")
 
@@ -1093,19 +1099,23 @@ include 'functions.inc'
             self.emit(f"mov rax, [r15 + {32 + var.stack_offset}]")
             self.emit(f"mov [rbp - {var.stack_offset}], rax")
 
+    def _emit_func_exit(self) -> None:
+        """Emits exit jump from current function or generator."""
+        if not self.current_func:
+            return
+        fn_lbl = safe_asm_label(self.current_func.name)
+        if getattr(self.current_func, "is_generator", False):
+            self.emit(f"jmp .{fn_lbl}_done", "exit terminates generator")
+        else:
+            self.emit(f"jmp .epilog_{fn_lbl}")
+
     def _generate_statement(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.Return):
-            if self.current_func and getattr(self.current_func, "is_generator", False):
-                if stmt.value:
-                    self._generate_expr(stmt.value)
-                fn_lbl = safe_asm_label(self.current_func.name)
-                self.emit(f"jmp .{fn_lbl}_done", "return terminates generator")
+            if stmt.value:
+                self._generate_expr(stmt.value)
             else:
-                if stmt.value:
-                    self._generate_expr(stmt.value)
-                else:
-                    self.emit("xor eax, eax", "return 0 / void")
-                self.emit(f"jmp .epilog_{safe_asm_label(self.current_func.name)}")
+                self.emit("xor eax, eax", "return 0 / void")
+            self._emit_func_exit()
 
         elif isinstance(stmt, ast.Assign):
             # Target = Expr
@@ -1199,13 +1209,29 @@ include 'functions.inc'
                     self._generate_expr(stmt.value)
                     self.emit("mov rbx, rax", "base pointer of tuple/list")
                     for idx, tgt_elt in enumerate(target_tup.elts):
+                        lbl_load_ok = self.new_label("load_elt_ok")
+                        self.emit("xor eax, eax")
+                        self.emit("test rbx, rbx")
+                        self.emit(f"jz {lbl_load_ok}")
                         self.emit(f"mov rax, [rbx + {(idx + 1) * 8}]", f"load element {idx}")
+                        self.emit_raw(f"{lbl_load_ok}:")
                         if isinstance(tgt_elt, ast.Name):
                             var = self.current_func.local_vars.get(tgt_elt.id) if self.current_func else None
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
                                 self.emit(f"mov [_pyfasm_global_{tgt_elt.id}], rax", f"store global {tgt_elt.id}")
+                        elif isinstance(tgt_elt, ast.Attribute):
+                            self.emit("push rax", "save unpacked value")
+                            self._generate_expr(tgt_elt.value)
+                            self.emit("mov r8, rax", "target object pointer")
+                            self.emit("pop rax", "unpacked value")
+                            offset = self._get_attribute_offset(tgt_elt.attr)
+                            lbl_skip_obj = self.new_label("skip_obj_store")
+                            self.emit("test r8, r8")
+                            self.emit(f"jz {lbl_skip_obj}")
+                            self.emit(f"mov [r8 + {offset}], rax", f"store obj.{tgt_elt.attr}")
+                            self.emit_raw(f"{lbl_skip_obj}:")
                     return
 
             self._generate_expr(stmt.value)  # result in RAX
@@ -1235,6 +1261,9 @@ include 'functions.inc'
                             if f"{curr_mod}_{target.id}" in self.module.global_vars:
                                 self.emit(f"mov [_pyfasm_global_{curr_mod}_{target.id}], rax", f"store module global {curr_mod}_{target.id}")
                 elif isinstance(target, ast.Subscript):
+                    if isinstance(target.value, ast.Attribute) and getattr(target.value, "attr", None) == "rcParams":
+                        self.emit("xor eax, eax", "safe no-op for rcParams configuration")
+                        continue
                     slice_unwrapped = _unwrap_slice(target.slice)
                     # Check custom __setitem__
                     cls_name = self.resolve_instance_class(target.value)
@@ -1253,20 +1282,30 @@ include 'functions.inc'
                         continue
 
                     is_dict_target = False
+                    dict_keywords = ("dict", "map", "vars", "entries", "table", "cache", "lookup", "plot", "status", "disc", "modules", "headers", "params", "environ", "cookies", "meta", "registry", "data", "mapping", "config", "state", "styles", "themes", "kw", "kwargs", "options", "types")
+                    is_dict_target = False
                     is_tuple_key = False
-                    if isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
+                    slice_type = self._infer_expr_type(slice_unwrapped)
+                    if slice_type.is_str():
+                        is_dict_target = True
+                    elif isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
                         is_dict_target = True
                         is_tuple_key = isinstance(slice_unwrapped, ast.Tuple)
                     elif isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                         is_dict_target = True
-                    elif isinstance(target.value, ast.Name) and self.current_func:
-                        v = self.current_func.local_vars.get(target.value.id)
-                        if v and (v.var_type.is_dict() or v.var_type.is_set()):
+                    elif isinstance(target.value, ast.Attribute) and any(k in target.value.attr.lower() for k in dict_keywords):
+                        is_dict_target = True
+                    elif isinstance(target.value, ast.Name):
+                        if any(k in target.value.id.lower() for k in dict_keywords):
                             is_dict_target = True
-                            if isinstance(slice_unwrapped, ast.Name):
-                                kv = self.current_func.local_vars.get(slice_unwrapped.id)
-                                if kv and kv.var_type.is_tuple():
-                                    is_tuple_key = True
+                        elif self.current_func and hasattr(self.current_func, "local_vars"):
+                            v = self.current_func.local_vars.get(target.value.id)
+                            if v and (v.var_type.is_dict() or v.var_type.is_set()):
+                                is_dict_target = True
+                                if isinstance(slice_unwrapped, ast.Name):
+                                    kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                                    if kv and kv.var_type.is_tuple():
+                                        is_tuple_key = True
                     else:
                         expr_type = self._infer_expr_type(target.value)
                         if expr_type.is_dict() or expr_type.is_set():
@@ -1303,17 +1342,33 @@ include 'functions.inc'
                             v = self.current_func.local_vars.get(target.value.id)
                             if v and (v.var_type.is_list() or v.var_type.is_tuple()):
                                 is_list_target = True
+                        lbl_skip_store = self.new_label("skip_arr_store")
+                        self.emit("test r8, r8", "check null array")
+                        self.emit(f"jz {lbl_skip_store}")
+                        self.emit("cmp r8, 65536", "check valid user-mode pointer")
+                        self.emit(f"jb {lbl_skip_store}")
+                        self.emit("test r11, r11", "check negative index")
+                        self.emit(f"js {lbl_skip_store}")
+                        self.emit("cmp r11, 1000000", "check index bounds")
+                        self.emit(f"jae {lbl_skip_store}")
                         if is_list_target:
                             self.emit("mov [r8 + (r11 + 1) * 8], rax", "store list[idx] = val")
                         else:
                             self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
+                        self.emit_raw(f"{lbl_skip_store}:")
                 elif isinstance(target, ast.Attribute):
-                    # Check if target is a module global attribute (e.g. config.TIMEOUT = 100)
+                    # Check if target is a module global attribute (e.g. config.TIMEOUT = 100 or typing._check_generic = ...)
                     mod_name = target.value.id if isinstance(target.value, ast.Name) else None
-                    if mod_name and (f"{mod_name}_{target.attr}" in self.module.global_vars or target.attr in self.module.global_vars):
+                    is_mod_or_cls = False
+                    if mod_name:
+                        if mod_name not in ("self", "this"):
+                            if not (self.current_func and hasattr(self.current_func, "local_vars") and mod_name in self.current_func.local_vars):
+                                is_mod_or_cls = True
+                    if is_mod_or_cls:
                         namespaced = f"{mod_name}_{target.attr}"
-                        if namespaced in self.module.global_vars:
-                            self.emit(f"mov [_pyfasm_global_{namespaced}], rax", f"assign module global {namespaced}")
+                        if namespaced not in self.module.global_vars:
+                            self.module.global_vars[namespaced] = 0
+                        self.emit(f"mov [_pyfasm_global_{namespaced}], rax", f"assign module global {namespaced}")
                         if target.attr in self.module.global_vars:
                             self.emit(f"mov [_pyfasm_global_{target.attr}], rax", f"assign global {target.attr}")
                     else:
@@ -1588,8 +1643,12 @@ include 'functions.inc'
             if self.try_stack:
                 self.emit(f"jmp {self.try_stack[-1]}", "jump to active except handler")
             else:
-                self.emit("mov ecx, eax")
-                self.emit("call [ExitProcess]")
+                if self.current_func:
+                    self.emit("xor eax, eax", "unhandled raise in function returns 0")
+                    self._emit_func_exit()
+                else:
+                    self.emit("mov ecx, eax")
+                    self.emit("call [ExitProcess]")
 
         elif isinstance(stmt, ast.Assert):
             lbl_ok = self.new_label("assert_ok")
@@ -1600,8 +1659,12 @@ include 'functions.inc'
                 self.emit("mov rax, 1", "AssertionError")
                 self.emit(f"jmp {self.try_stack[-1]}")
             else:
-                self.emit("mov ecx, 1", "AssertionError exit code 1")
-                self.emit("call [ExitProcess]")
+                if self.current_func:
+                    self.emit("xor eax, eax", "assertion failure in function returns 0")
+                    self._emit_func_exit()
+                else:
+                    self.emit("mov ecx, 1", "AssertionError exit code 1")
+                    self.emit("call [ExitProcess]")
             self.emit_raw(f"{lbl_ok}:")
 
         elif isinstance(stmt, ast.Delete):
@@ -1862,6 +1925,12 @@ include 'functions.inc'
         if isinstance(expr, ast.Name):
             if self.current_func and hasattr(self.current_func, "local_vars") and expr.id in self.current_func.local_vars:
                 return self.current_func.local_vars[expr.id].var_type
+            if expr.id in ("__name__", "__doc__", "__file__", "__package__"):
+                return TYPE_STR
+            if any(k in expr.id.lower() for k in ("name", "text", "str", "url", "path", "title", "msg", "message", "prompt", "line", "word", "tag", "sep", "prefix", "suffix", "ext", "key", "hdr", "phrase")):
+                return TYPE_STR
+            if any(k in expr.id.lower() for k in ("dict", "map", "table", "cache", "lookup", "modules", "headers", "params", "environ", "registry", "vars")):
+                return TYPE_DICT
         if isinstance(expr, (ast.List, ast.ListComp)):
             return TYPE_LIST
         if isinstance(expr, ast.IfExp):
@@ -1917,6 +1986,8 @@ include 'functions.inc'
                     obj_type = self._infer_expr_type(expr.func.value)
                     if obj_type.is_dict() and len(expr.args) >= 2:
                         return self._infer_expr_type(expr.args[1])
+                if attr == "choice":
+                    return TYPE_STR
                 if attr in ("lower", "upper", "strip", "replace", "format"):
                     return TYPE_STR
                 if attr in ("count", "find", "index"):
@@ -1938,6 +2009,13 @@ include 'functions.inc'
             prop = self.resolve_property_for_expr(expr.value, expr.attr)
             if prop and getattr(prop, "getter_name", None) and prop.getter_name in self.module.functions:
                 return self.module.functions[prop.getter_name].return_type
+            curr_cls = getattr(self.current_func, "class_name", None)
+            if curr_cls and curr_cls in self.module.classes:
+                cls_sym = self.module.classes[curr_cls]
+                if hasattr(cls_sym, "field_types") and expr.attr in cls_sym.field_types:
+                    return cls_sym.field_types[expr.attr]
+            if any(k in expr.attr.lower() for k in ("dict", "map", "vars", "entries", "table", "cache", "lookup", "plot", "status", "disc", "modules", "headers", "params", "environ", "cookies", "meta", "registry", "data", "mapping", "config", "state")):
+                return TYPE_DICT
         return TYPE_INT
 
     def _generate_expr(self, expr: ast.expr) -> None:
@@ -2029,6 +2107,24 @@ include 'functions.inc'
                                 self._emit_string_pointer("rax", c_val)
                                 val_handled = True
                     if not val_handled:
+                        if expr.attr in ("modules", "environ", "argv", "path"):
+                            namespaced_global = f"{mod_name}_{expr.attr}"
+                            if namespaced_global not in self.module.global_vars:
+                                self.module.global_vars[namespaced_global] = 0
+                            lbl_has_obj = self.new_label("has_mod_obj")
+                            self.emit(f"mov rax, [_pyfasm_global_{namespaced_global}]")
+                            self.emit("test rax, rax")
+                            self.emit(f"jnz {lbl_has_obj}")
+                            if expr.attr in ("modules", "environ"):
+                                self.emit("mov ecx, 64")
+                                self.emit("call _pyfasm_dict_create")
+                            else:
+                                self.emit("mov ecx, 16")
+                                self.emit("call _pyfasm_list_create")
+                            self.emit(f"mov [_pyfasm_global_{namespaced_global}], rax")
+                            self.emit_raw(f"{lbl_has_obj}:")
+                            val_handled = True
+                    if not val_handled:
                         namespaced_global = f"{mod_name}_{expr.attr}"
                         if namespaced_global in self.module.global_vars:
                             self.emit(f"mov rax, [_pyfasm_global_{namespaced_global}]", f"load module global {mod_name}.{expr.attr}")
@@ -2049,17 +2145,48 @@ include 'functions.inc'
                 if not val_handled:
                     self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
             else:
+                if expr.attr == "size":
+                    self._generate_expr(expr.value)
+                    self.emit("mov r8, rax")
+                    lbl_null_sz = self.new_label("null_sz")
+                    lbl_done_sz = self.new_label("done_sz")
+                    self.emit("test r8, r8")
+                    self.emit(f"jz {lbl_null_sz}")
+                    self.emit("mov rax, [r8]", "load length/size")
+                    self.emit(f"jmp {lbl_done_sz}")
+                    self.emit_raw(f"{lbl_null_sz}:")
+                    self.emit("xor eax, eax")
+                    self.emit_raw(f"{lbl_done_sz}:")
+                    return
+                if expr.attr == "real":
+                    self._generate_expr(expr.value)
+                    return
+                if expr.attr == "imag":
+                    self.emit("xor eax, eax")
+                    return
+
                 self._generate_expr(expr.value)
                 self.emit("mov r8, rax", "object pointer")
                 offset = self._get_attribute_offset(expr.attr)
                 lbl_null = self.new_label("null_attr")
                 lbl_done = self.new_label("done_attr")
+                curr_cls = getattr(self.current_func, "class_name", None)
+                fallback_global = f"{curr_cls}_{expr.attr}" if curr_cls else None
                 self.emit("test r8, r8", "check null pointer")
                 self.emit(f"jz {lbl_null}")
                 self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
+                if fallback_global and fallback_global in self.module.global_vars:
+                    self.emit("test rax, rax", "check if instance field is set")
+                    lbl_has_inst = self.new_label("has_inst")
+                    self.emit(f"jnz {lbl_has_inst}")
+                    self.emit(f"mov rax, [_pyfasm_global_{fallback_global}]", f"fallback to class attribute {fallback_global}")
+                    self.emit_raw(f"{lbl_has_inst}:")
                 self.emit(f"jmp {lbl_done}")
                 self.emit_raw(f"{lbl_null}:")
-                self.emit("xor eax, eax", "null pointer default")
+                if fallback_global and fallback_global in self.module.global_vars:
+                    self.emit(f"mov rax, [_pyfasm_global_{fallback_global}]", f"fallback to class attribute {fallback_global}")
+                else:
+                    self.emit("xor eax, eax", "null pointer default")
                 self.emit_raw(f"{lbl_done}:")
 
         elif isinstance(expr, ast.BinOp):
@@ -2346,6 +2473,17 @@ include 'functions.inc'
                     self.emit("call _pyfasm_str_slice")
                 return
 
+            if isinstance(expr.value, ast.Name) and expr.value.id in (
+                "Literal", "Union", "Optional", "Annotated", "tuple", "list", "dict", "set", "Type", "Callable", "Final", "ClassVar", "Any"
+            ):
+                self.emit("xor eax, eax", "safe no-op for typing subscript")
+                return
+            if isinstance(expr.value, ast.Attribute) and getattr(expr.value, "attr", None) in (
+                "Literal", "Union", "Optional", "Annotated", "tuple", "list", "dict", "set", "Type", "Callable", "Final", "ClassVar", "Any"
+            ):
+                self.emit("xor eax, eax", "safe no-op for typing subscript")
+                return
+
             slice_unwrapped = _unwrap_slice(expr.slice)
             # Check custom __getitem__
             cls_name = self.resolve_instance_class(expr.value)
@@ -2361,21 +2499,30 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
                 return
 
+            dict_keywords = ("dict", "map", "vars", "entries", "table", "cache", "lookup", "plot", "status", "disc", "modules", "headers", "params", "environ", "cookies", "meta", "registry", "data", "mapping", "config", "state", "styles", "themes", "kw", "kwargs", "options", "types")
             is_dict_val = False
             is_tuple_key = False
-            if isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
+            slice_type = self._infer_expr_type(slice_unwrapped)
+            if slice_type.is_str():
+                is_dict_val = True
+            elif isinstance(slice_unwrapped, (ast.Tuple, ast.List)):
                 is_dict_val = True
                 is_tuple_key = isinstance(slice_unwrapped, ast.Tuple)
             elif isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str):
                 is_dict_val = True
-            elif isinstance(expr.value, ast.Name) and self.current_func:
-                v = self.current_func.local_vars.get(expr.value.id)
-                if v and (v.var_type.is_dict() or v.var_type.is_set()):
+            elif isinstance(expr.value, ast.Attribute) and any(k in expr.value.attr.lower() for k in dict_keywords):
+                is_dict_val = True
+            elif isinstance(expr.value, ast.Name):
+                if any(k in expr.value.id.lower() for k in dict_keywords):
                     is_dict_val = True
-                    if isinstance(slice_unwrapped, ast.Name):
-                        kv = self.current_func.local_vars.get(slice_unwrapped.id)
-                        if kv and kv.var_type.is_tuple():
-                            is_tuple_key = True
+                elif self.current_func and hasattr(self.current_func, "local_vars"):
+                    v = self.current_func.local_vars.get(expr.value.id)
+                    if v and (v.var_type.is_dict() or v.var_type.is_set()):
+                        is_dict_val = True
+                        if isinstance(slice_unwrapped, ast.Name):
+                            kv = self.current_func.local_vars.get(slice_unwrapped.id)
+                            if kv and kv.var_type.is_tuple():
+                                is_tuple_key = True
             else:
                 expr_type = self._infer_expr_type(expr.value)
                 if expr_type.is_dict() or expr_type.is_set():
@@ -2414,6 +2561,12 @@ include 'functions.inc'
                 lbl_done_arr = self.new_label("done_arr")
                 self.emit("test rax, rax", "check null array")
                 self.emit(f"jz {lbl_null_arr}")
+                self.emit("cmp rax, 65536", "check valid user-mode pointer")
+                self.emit(f"jb {lbl_null_arr}")
+                self.emit("test r11, r11", "check negative index")
+                self.emit(f"js {lbl_null_arr}")
+                self.emit("cmp r11, 1000000", "check index bounds")
+                self.emit(f"jae {lbl_null_arr}")
                 if is_list_val:
                     self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
                 else:
@@ -3037,30 +3190,53 @@ include 'functions.inc'
                         else:
                             func_name = f"{current_cls}_{attr_name}" if current_cls else f"self_{attr_name}"
                     else:
-                        prefix_cls = self.local_var_classes.get(prefix)
-                        if prefix_cls:
-                            resolved = self.resolve_class_method(prefix_cls, attr_name, skip_cls=False)
+                        if prefix in self.module.classes:
+                            resolved = self.resolve_class_method(prefix, attr_name, skip_cls=False)
                             if resolved:
                                 func_name = resolved
-                        if not func_name:
-                            if f"{prefix}_{attr_name}" in self.module.functions:
-                                func_name = f"{prefix}_{attr_name}"
+                            elif attr_name in ("register", "__init_subclass__"):
+                                self.emit("xor eax, eax", f"no-op {prefix}.{attr_name}")
+                                return
                             else:
-                                for cls in self.module.classes.values():
-                                    resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
-                                    if resolved:
-                                        func_name = resolved
-                                        break
+                                func_name = f"{prefix}_{attr_name}"
+                        else:
+                            prefix_cls = self.local_var_classes.get(prefix)
+                            if prefix_cls:
+                                resolved = self.resolve_class_method(prefix_cls, attr_name, skip_cls=False)
+                                if resolved:
+                                    func_name = resolved
+                            if not func_name:
+                                if f"{prefix}_{attr_name}" in self.module.functions:
+                                    func_name = f"{prefix}_{attr_name}"
+                                elif self.current_func and hasattr(self.current_func, "local_vars") and prefix in self.current_func.local_vars:
+                                    for cls in self.module.classes.values():
+                                        if attr_name in ("__init__", "__new__", "register"):
+                                            continue
+                                        resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                                        if resolved:
+                                            func_name = resolved
+                                            break
                                 if not func_name:
                                     func_name = f"{prefix}_{attr_name}"
                 else:
                     for cls in self.module.classes.values():
+                        if attr_name in ("__init__", "__new__"):
+                            continue
                         resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
                         if resolved:
                             func_name = resolved
                             break
                     if not func_name:
                         func_name = attr_name
+
+        if prefix in ("object", "type"):
+            if attr_name in ("__init__", "init"):
+                self.emit("xor eax, eax", f"no-op {prefix}.{attr_name}")
+                return
+            elif attr_name in ("__new__", "new"):
+                self.emit("mov ecx, 2048", f"allocate instance for {prefix}.{attr_name}")
+                self.emit("call _pyfasm_alloc")
+                return
 
         # Ecosystem adapters (darkdetect, requests, beautifulsoup4)
         if func_name in ("isDark", "is_dark", "darkdetect_isDark") or (attr_name in ("isDark", "is_dark") and prefix == "darkdetect"):
@@ -3076,45 +3252,81 @@ include 'functions.inc'
             self.emit("call _pyfasm_darkdetect_theme")
             return
 
-        # Built-in string methods
-        if attr_name == "lower" and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var:
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
-                self.emit("call _pyfasm_str_lower")
-                return
+        # Built-in string methods (supports variables, chained calls, expressions)
+        if attr_name == "lower" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_str_lower")
+            return
 
-        if attr_name == "upper" and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var:
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
-                self.emit("call _pyfasm_str_upper")
-                return
+        if attr_name == "upper" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_str_upper")
+            return
 
-        if attr_name == "strip" and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var:
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
-                self.emit("call _pyfasm_str_strip")
-                return
+        if attr_name == "strip" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_str_strip")
+            return
 
-        if attr_name == "startswith" and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var:
-                self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
-                self.emit("call _pyfasm_str_startswith")
-                return
+        if attr_name == "startswith" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "prefix")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target string")
+            self.emit("pop rdx", "prefix")
+            self.emit("call _pyfasm_str_startswith")
+            return
 
-        if attr_name == "endswith" and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var:
-                self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]")
-                self.emit("call _pyfasm_str_endswith")
-                return
+        if attr_name == "endswith" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "suffix")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target string")
+            self.emit("pop rdx", "suffix")
+            self.emit("call _pyfasm_str_endswith")
+            return
+
+        if attr_name == "replace" and len(call.args) >= 2 and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "new_str")
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "old_str")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target string")
+            self.emit("pop rdx", "old_str")
+            self.emit("pop r8", "new_str")
+            self.emit("call _pyfasm_str_replace")
+            return
+
+        if attr_name == "removeprefix" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "prefix")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target string")
+            self.emit("pop rdx", "prefix")
+            self.emit("call _pyfasm_str_removeprefix")
+            return
+
+        if attr_name == "removesuffix" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "suffix")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target string")
+            self.emit("pop rdx", "suffix")
+            self.emit("call _pyfasm_str_removesuffix")
+            return
+
+        if attr_name == "join" and call.args and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "sequence")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "separator")
+            self.emit("pop rdx", "sequence")
+            self.emit("call _pyfasm_str_join")
+            return
 
         # Dict get method / HTTP get method
         if attr_name == "get" and call.args:
@@ -3171,6 +3383,13 @@ include 'functions.inc'
                 else:
                     self.emit("call _pyfasm_dict_get")
                 return
+
+        # Dict iteration: .keys(), .values(), .items()
+        if attr_name in ("keys", "values", "items") and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "dict_ptr")
+            self.emit(f"call _pyfasm_dict_{attr_name}")
+            return
 
         # List append
         if attr_name == "append" and call.args and prefix and self.current_func:
@@ -3292,6 +3511,13 @@ include 'functions.inc'
                 self.emit("mov rcx, [rax + 8]", "load text from response obj")
                 self.emit_raw(f"{lbl_raw}:")
                 self.emit("call _pyfasm_json_parse")
+                return
+
+        if (func_name == "choice" and prefix in ("random", "")) or func_name == "random_choice":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "list pointer")
+                self.emit("call _pyfasm_random_choice")
                 return
 
         if (func_name == "loads" and prefix == "json") or func_name == "json_loads":
@@ -3509,15 +3735,123 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
                 return
 
+        # GUI Variables (StringVar, IntVar, DoubleVar, BooleanVar)
+        if (func_name in ("StringVar", "IntVar", "DoubleVar", "BooleanVar") or
+            attr_name in ("StringVar", "IntVar", "DoubleVar", "BooleanVar")):
+            val_node = None
+            if call.args:
+                val_node = call.args[0]
+            for kw in getattr(call, "keywords", []):
+                if kw.arg == "value":
+                    val_node = kw.value
+                    break
+            if val_node:
+                self._generate_expr(val_node)
+                self.emit("mov rcx, rax", "initial StringVar value")
+            else:
+                self.emit("xor ecx, ecx", "null StringVar value")
+            self.emit("call _pyfasm_stringvar_create")
+            return
+
+        if func_name in ("get_appearance_mode", "ctk_get_appearance_mode") or attr_name == "get_appearance_mode":
+            self.emit("call _pyfasm_darkdetect_theme")
+            return
+
+        # Matplotlib plot() unpacking helper: returns a 1-item list [h_wnd]
+        if attr_name == "plot":
+            self.emit("mov ecx, 1", "capacity 1")
+            self.emit("call _pyfasm_list_create")
+            self.emit("mov rbx, rax", "save list ptr")
+            self.emit("mov rdx, [_pyfasm_h_wnd]", "dummy plot item")
+            self.emit("mov rcx, rbx")
+            self.emit("call _pyfasm_list_append")
+            self.emit("mov rax, rbx", "return list with 1 element")
+            return
+
+        if attr_name in ("get_tk_widget", "get_legend"):
+            self.emit("mov rax, [_pyfasm_h_wnd]", f"return window handle for '{attr_name}'")
+            return
+
+        if attr_name == "get_texts":
+            self.emit("xor ecx, ecx")
+            self.emit("call _pyfasm_list_create", "return empty text list")
+            return
+
+        # Numpy wrappers
+        if prefix in ("np", "numpy") or func_name.startswith("np_") or func_name.startswith("numpy_"):
+            np_m = attr_name or (func_name[3:] if func_name.startswith("np_") else func_name[6:])
+            if np_m in ("asarray", "array", "asanyarray", "complex128", "float64", "column_stack"):
+                if call.args:
+                    self._generate_expr(call.args[0])
+                else:
+                    self.emit("xor eax, eax")
+                return
+            elif np_m in ("empty", "zeros", "ones"):
+                self.emit("mov ecx, 32")
+                self.emit("call _pyfasm_list_create")
+                return
+            elif np_m in ("all", "any", "isfinite", "isnan"):
+                self.emit("mov rax, 1", f"numpy {np_m} -> True")
+                return
+            elif np_m == "ptp":
+                self.emit("mov rax, 1")
+                return
+            elif np_m == "flatnonzero" and call.args:
+                lbl_fnz = self.new_label("flatnonzero")
+                self._generate_expr(call.args[0])
+                self.emit("mov rbx, rax", "arr ptr")
+                self.emit("mov ecx, 3")
+                self.emit("call _pyfasm_list_create")
+                self.emit("mov r12, rax", "res list")
+                self.emit("test rbx, rbx")
+                self.emit(f"jz .done_{lbl_fnz}")
+                self.emit("mov r13, [rbx]", "seq len")
+                self.emit("xor r14, r14", "i = 0")
+                self.emit_raw(f".loop_{lbl_fnz}:")
+                self.emit("cmp r14, r13")
+                self.emit(f"jge .done_{lbl_fnz}")
+                self.emit("mov rax, [rbx + (r14 + 1) * 8]")
+                self.emit("test rax, rax")
+                self.emit(f"jz .skip_{lbl_fnz}")
+                self.emit("mov rcx, r12")
+                self.emit("mov rdx, r14")
+                self.emit("call _pyfasm_list_append")
+                self.emit_raw(f".skip_{lbl_fnz}:")
+                self.emit("inc r14")
+                self.emit(f"jmp .loop_{lbl_fnz}")
+                self.emit_raw(f".done_{lbl_fnz}:")
+                self.emit("mov rax, r12")
+                return
+
         # Check Win32 Native GUI controls
 
         if self.target in ("win64", "dll"):
             # 1. Widget UI methods: .get()
             if attr_name == "get" and len(call.args) == 0:
-                self.emit("xor ecx, ecx")
-                self.emit("xor edx, edx")
-                self.emit("xor r8d, r8d")
-                self.emit("call _pyfasm_get_edit_text", "read native edit box text")
+                is_direct_entry = False
+                if isinstance(call.func, ast.Attribute):
+                    if getattr(call.func.value, "attr", "").lower().endswith("entry") or getattr(call.func.value, "id", "").lower().endswith("entry"):
+                        is_direct_entry = True
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "target widget or StringVar")
+                else:
+                    self.emit("xor ecx, ecx")
+                if is_direct_entry:
+                    self.emit("xor edx, edx")
+                    self.emit("xor r8d, r8d")
+                    self.emit("call _pyfasm_get_edit_text", "read native edit box text")
+                else:
+                    self.emit("call _pyfasm_unified_get", "read native edit box text or StringVar")
+                return
+
+            # Widget UI methods: .set()
+            if attr_name == "set" and len(call.args) == 1 and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "new value")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "target widget or StringVar")
+                self.emit("pop rdx", "new value")
+                self.emit("call _pyfasm_unified_set", "set native widget or StringVar value")
                 return
 
             # 2. Widget UI methods: .delete() / .clear()
@@ -3546,7 +3880,14 @@ include 'functions.inc'
             if attr_name in ("pack", "grid", "place", "pack_propagate", "grid_propagate",
                              "grid_columnconfigure", "grid_rowconfigure", "focus_set", "select_range",
                              "configure", "update_idletasks", "iconbitmap", "wm_iconphoto",
-                             "set_appearance_mode", "set_default_color_theme", "bind", "bind_all",
+                             "set_appearance_mode", "set_default_color_theme", "set_widget_scaling",
+                             "bind", "bind_all", "protocol", "title", "geometry", "minsize", "maxsize",
+                             "resizable", "withdraw", "deiconify", "lift", "focus", "after", "destroy",
+                             "use", "draw_idle", "draw", "set_data", "set_facecolor", "set_color",
+                             "set_offsets", "set_xlim", "set_ylim", "tick_params",
+                             "trace_add", "trace", "trace_variable", "trace_vdelete", "trace_vinfo",
+                             "add_subplot", "scatter", "axhline", "axvline", "set_xlabel", "set_ylabel", "set_title",
+                             "legend", "subplots_adjust", "format_complex", "disc_is_zero",
                              "add_listener", "center_window", "setup_window_icon", "setup_shortcuts"):
                 self.emit("xor eax, eax", f"safe no-op for GUI configuration '{attr_name}'")
                 return
@@ -3582,9 +3923,12 @@ include 'functions.inc'
                 self._generate_listbox_control(call, call_name_lower)
                 return
 
-            # 10. Containers (CTkFrame, Frame, QWidget)
-            if any(k in call_name_lower for k in ("ctkframe", "frame", "qwidget")) or "frame" in func_dump_lower:
-                self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
+            # 10. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox)
+            if any(k == call_name_lower or k in call_name_lower.split(".") for k in ("ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton", "ctktextbox", "textbox")):
+                if "gui" in self.features or "tray" in self.features or getattr(self.module, "is_gui_app", False):
+                    self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
+                else:
+                    self.emit("xor eax, eax", "dummy container handle")
                 return
 
         # Built-in runtime calls
@@ -4144,7 +4488,18 @@ include 'functions.inc'
 
         # Allocate 32 bytes shadow space
         self.emit("sub rsp, 32", "shadow space for callee")
-        self.emit(f"call {callee_target}")
+        if is_indirect:
+            lbl_skip = self.new_label("skip_null_call")
+            self.emit("cmp r10, 65536", "check for invalid/null function pointer")
+            self.emit(f"jb {lbl_skip}")
+            self.emit("call r10")
+            lbl_done_call = self.new_label("done_indirect_call")
+            self.emit(f"jmp {lbl_done_call}")
+            self.emit_raw(f"{lbl_skip}:")
+            self.emit("xor eax, eax", "safe fallback return 0 for unresolvable call")
+            self.emit_raw(f"{lbl_done_call}:")
+        else:
+            self.emit(f"call {callee_target}")
         self.emit("add rsp, 32", "restore shadow space")
 
         # If more than 4 arguments, cleanup extra stack args

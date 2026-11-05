@@ -97,3 +97,25 @@ def test_ui_codegen_fasm_output():
     assert "DwmSetWindowAttribute" in asm
     assert "CreateWindowExW" in asm
     assert "Polyline" in asm
+
+
+def test_ui_codegen_stackoverflow_search():
+    """Verify PyFASM compiler handles Stack Overflow Search Pro (Project 0122)."""
+    p = Path("C:/proekts/0122/main.py")
+    if not p.exists():
+        pytest.skip("0122 main.py not found on filesystem")
+    from pyfasm.ast_parser import AstAnalyzer
+    from pyfasm.ui_codegen import generate_stackoverflow_asm
+
+    analyzer = AstAnalyzer(project_root=p.parent)
+    mod = analyzer.parse_file(p, project_root=p.parent)
+    assert mod.ui_spec is not None
+    assert mod.ui_spec.root_class_name == "StackOverflowApp"
+    assert mod.ui_spec.window_title == "Stack Overflow Search Pro"
+
+    modular = generate_stackoverflow_asm(mod.ui_spec, project_dir=p.parent)
+    assert "main.asm" in modular
+    assert "ui.inc" in modular
+    assert "network.inc" in modular
+    assert "format PE64 GUI 5.0" in modular["main.asm"]
+    assert "include 'win64a.inc'" in modular["main.asm"]

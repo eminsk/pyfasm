@@ -54,6 +54,7 @@ class ClassSymbol:
     bases: List[str] = field(default_factory=list)
     properties: Dict[str, PropertySymbol] = field(default_factory=dict)
     class_attrs: Dict[str, Any] = field(default_factory=dict)
+    field_types: Dict[str, PyFasmType] = field(default_factory=dict)
     ast_node: Optional[ast.ClassDef] = None
 
 
@@ -557,13 +558,21 @@ class AstAnalyzer:
 
         try:
             from pyfasm.ui_analyzer import analyze_ui_structure
-            module.ui_spec = analyze_ui_structure(tree)
-        except Exception:
-            pass
-        try:
-            from pyfasm.ui_analyzer import analyze_ui_structure
             entry_tree = ast.parse(entry_path.read_text(encoding="utf-8"))
             module.ui_spec = analyze_ui_structure(entry_tree)
+            if not module.ui_spec and hasattr(self, "_visited_files"):
+                for v_path in self._visited_files:
+                    v_str = str(v_path).replace("\\", "/").lower()
+                    if ".venv" in v_str or "site-packages" in v_str:
+                        continue
+                    try:
+                        v_tree = ast.parse(v_path.read_text(encoding="utf-8"))
+                        cand_spec = analyze_ui_structure(v_tree)
+                        if cand_spec and (cand_spec.widgets or cand_spec.window_title != "PyFASM Application"):
+                            module.ui_spec = cand_spec
+                            break
+                    except Exception:
+                        pass
         except Exception:
             pass
         self._propagate_generator_types(module)
@@ -729,7 +738,9 @@ class AstAnalyzer:
                 if is_entry and fn.name == "main":
                     module.main_func = fn
             elif isinstance(stmt, ast.ClassDef):
-                self._analyze_class(stmt, module, mod_prefix=mod_prefix)
+                cls_assigns = self._analyze_class(stmt, module, mod_prefix=mod_prefix)
+                if cls_assigns:
+                    top_level_stmts.extend(cls_assigns)
             elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
                 continue
             elif isinstance(stmt, ast.If):
@@ -767,7 +778,11 @@ class AstAnalyzer:
                 module.main_func = fn_sym
             else:
                 assigned_names = []
-                for s in top_level_stmts:
+                filtered_stmts = [
+                    s for s in top_level_stmts
+                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main")
+                ]
+                for s in filtered_stmts:
                     if isinstance(s, ast.Assign):
                         for tgt in s.targets:
                             if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
@@ -776,12 +791,12 @@ class AstAnalyzer:
                         if s.target.id not in assigned_names:
                             assigned_names.append(s.target.id)
                 if assigned_names:
-                    top_level_stmts = [ast.Global(names=assigned_names)] + top_level_stmts
+                    filtered_stmts = [ast.Global(names=assigned_names)] + filtered_stmts
 
                 entry_fn_def = ast.FunctionDef(
                     name="_pyfasm_top_level_init",
                     args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-                    body=top_level_stmts,
+                    body=filtered_stmts,
                     decorator_list=[],
                     returns=None,
                     lineno=1,
@@ -789,8 +804,8 @@ class AstAnalyzer:
                 )
                 fn_sym = self._analyze_function(entry_fn_def)
                 module.functions["_pyfasm_top_level_init"] = fn_sym
-                if calls_main:
-                    module.calls_main_in_top_level = True
+                if "_pyfasm_top_level_init" not in module.module_inits:
+                    module.module_inits.append("_pyfasm_top_level_init")
         elif not is_entry and mod_prefix and top_level_stmts:
             init_fn_name = f"_pyfasm_modinit_{mod_prefix}"
             assigned_names = []
@@ -832,8 +847,12 @@ class AstAnalyzer:
 
         # Discover field assignments in class methods (especially self.x = ...)
         fields: List[str] = []
+        class_assigns: List[ast.Assign] = []
         for item in node.body:
-            if isinstance(item, ast.Assign):
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                if item.target.id not in fields:
+                    fields.append(item.target.id)
+            elif isinstance(item, ast.Assign):
                 for tgt in item.targets:
                     if isinstance(tgt, ast.Name):
                         if tgt.id not in fields:
@@ -842,6 +861,17 @@ class AstAnalyzer:
                         if isinstance(item.value, ast.Constant):
                             val = item.value.value
                         cls_sym.class_attrs[tgt.id] = val
+                        global_name = f"{cls_name}_{tgt.id}"
+                        module.global_vars[global_name] = 0
+                        module.global_vars[tgt.id] = 0
+                        if isinstance(item.value, (ast.Dict, ast.DictComp)):
+                            cls_sym.field_types[tgt.id] = TYPE_DICT
+                        elif isinstance(item.value, (ast.List, ast.ListComp)):
+                            cls_sym.field_types[tgt.id] = TYPE_LIST
+                        class_assigns.append(ast.Assign(
+                            targets=[ast.Name(id=global_name, ctx=ast.Store())],
+                            value=item.value
+                        ))
             elif isinstance(item, ast.FunctionDef):
                 for sub in ast.walk(item):
                     if isinstance(sub, ast.Assign):
@@ -849,6 +879,10 @@ class AstAnalyzer:
                             if isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name) and tgt.value.id == "self":
                                 if tgt.attr not in fields:
                                     fields.append(tgt.attr)
+                                if isinstance(sub.value, (ast.Dict, ast.DictComp)):
+                                    cls_sym.field_types[tgt.attr] = TYPE_DICT
+                                elif isinstance(sub.value, (ast.List, ast.ListComp)):
+                                    cls_sym.field_types[tgt.attr] = TYPE_LIST
         cls_sym.fields = fields
 
         # Extract and register methods, properties, and getters/setters
@@ -910,6 +944,32 @@ class AstAnalyzer:
                     init_fn = base_sym.methods["__init__"]
                     break
 
+        if not init_fn and fields:
+            synth_args = [ast.arg(arg="self")] + [ast.arg(arg=f) for f in fields]
+            assign_stmts = [
+                ast.Assign(
+                    targets=[ast.Attribute(value=ast.Name(id="self", ctx=ast.Load()), attr=f, ctx=ast.Store())],
+                    value=ast.Name(id=f, ctx=ast.Load())
+                )
+                for f in fields
+            ]
+            synth_node = ast.FunctionDef(
+                name="__init__",
+                args=ast.arguments(posonlyargs=[], args=synth_args, vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                body=assign_stmts or [ast.Pass()],
+                decorator_list=[],
+                returns=None,
+                lineno=getattr(node, "lineno", 1),
+                col_offset=0
+            )
+            init_fn = self._analyze_function(synth_node)
+            init_fn.class_name = cls_name
+            method_name = f"{cls_name}___init__"
+            init_fn.name = method_name
+            cls_sym.methods["__init__"] = init_fn
+            cls_sym.methods[method_name] = init_fn
+            module.functions[method_name] = init_fn
+
         ctor_args: List[VariableSymbol] = []
         if init_fn and len(init_fn.args) > 1:
             for idx, a in enumerate(init_fn.args[1:]):
@@ -935,7 +995,7 @@ class AstAnalyzer:
         if mod_prefix:
             module.classes[f"{mod_prefix}_{cls_name}"] = cls_sym
 
-        return cls_sym
+        return class_assigns
 
     def _infer_node_type(self, expr: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> PyFasmType:
         """Infers the PyFasmType of an AST expression using local type propagation (inspired by Shedskin & Mypyc)."""
@@ -1021,7 +1081,7 @@ class AstAnalyzer:
                     return TYPE_TUPLE
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format"):
+                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice"):
                     return TYPE_STR
                 elif attr in ("keys", "values", "items"):
                     return TYPE_LIST
