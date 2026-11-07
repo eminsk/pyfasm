@@ -16,3 +16,8 @@ scratch/
 !tests/
 !src/pyfasm/bin/*
 !tools/fasm/*
+
+*coocky*
+*cookie*
+*.log
+

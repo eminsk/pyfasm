@@ -122,13 +122,19 @@ section '.data' data readable writeable
     _val_vy                 dq -0.25
     _has_real_roots         dd 1
     _root_count             dd 2
+    _has_vertex             dd 1
+    _is_cleared             dd 0
 
     _flt_zero               dq 0.0
     _flt_half               dq 0.5
+    _flt_one                dq 1.0
     _flt_two                dq 2.0
     _flt_four               dq 4.0
+    _flt_ten                dq 10.0
+    _flt_10000              dq 10000.0
     _flt_step               dq 0.05
     _flt_yscale             dq 37.333333333333336
+    _flt_xscale             dq 80.0
     _flt_x_min              dq -2.5
     _flt_x_max              dq 4.5
     _flt_y_min              dq -1.5
@@ -178,6 +184,27 @@ section '.data' data readable writeable
     wszInitA                du {to_utf16_words(init_a)}
     wszInitB                du {to_utf16_words(init_b)}
     wszInitC                du {to_utf16_words(init_c)}
+
+    wszPreviewEmpty         du 'f(x) = …', 0
+    wszInputErr             du 0x0412, 0x0432, 0x0435, 0x0434, 0x0438, 0x0442, 0x0435, ' ', 0x0432, 0x0441, 0x0435, ' ', 0x0442, 0x0440, 0x0438, ' ', 0x0447, 0x0438, 0x0441, 0x043B, 0x0430, ' (a, b, c).', 0
+    wszLinearWarn           du 0x041B, 0x0438, 0x043D, 0x0435, 0x0439, 0x043D, 0x043E, 0x0435, ' ', 0x0443, 0x0440, 0x0430, 0x0432, 0x043D, 0x0435, 0x043D, 0x0438, 0x0435, '. a = 0.', 13, 10, 0
+    wszFxPrefix             du 'f(x) = ', 0
+    wszXsq                  du 'x', 0x00B2, ' ', 0
+    wszX                    du 'x ', 0
+    wszPlus                 du '+ ', 0
+    wszMinus                du '- ', 0
+    wszCrLf                 du 13, 10, 0
+    wszResQuad              du 0x041A, 0x0432, 0x0430, 0x0434, 0x0440, 0x0430, 0x0442, 0x043D, 0x043E, 0x0435, ' ', 0x0443, 0x0440, 0x0430, 0x0432, 0x043D, 0x0435, 0x043D, 0x0438, 0x0435, '. a ', 0x2260, ' 0.', 13, 10, 0
+    wszDiscPrefix           du 'D = b', 0x00B2, ' - 4ac = ', 0
+    wszDgt0                 du 'D > 0: ', 0x0434, 0x0432, 0x0430, ' ', 0x0440, 0x0430, 0x0437, 0x043D, 0x044B, 0x0445, ' ', 0x0432, 0x0435, 0x0449, 0x0435, 0x0441, 0x0442, 0x0432, 0x0435, 0x043D, 0x043D, 0x044B, 0x0445, ' ', 0x043A, 0x043E, 0x0440, 0x043D, 0x044F, '.', 13, 10, 0
+    wszDeq0                 du 'D = 0: ', 0x043E, 0x0434, 0x0438, 0x043D, ' ', 0x0432, 0x0435, 0x0449, 0x0435, 0x0441, 0x0442, 0x0432, 0x0435, 0x043D, 0x043D, 0x044B, 0x0439, ' ', 0x043A, 0x043E, 0x0440, 0x0435, 0x043D, 0x044C, ' (', 0x043A, 0x0440, 0x0430, 0x0442, 0x043D, 0x043E, 0x0441, 0x0442, 0x0438, ' 2).', 13, 10, 0
+    wszDlt0                 du 'D < 0: ', 0x0434, 0x0435, 0x0439, 0x0441, 0x0442, 0x0432, 0x0438, 0x0442, 0x0435, 0x043B, 0x044C, 0x043D, 0x044B, 0x0445, ' ', 0x043A, 0x043E, 0x0440, 0x043D, 0x0435, 0x0439, ' ', 0x043D, 0x0435, 0x0442, '.', 13, 10, 0
+    wszX1Prefix             du 'x1 = ', 0
+    wszX2Prefix             du 'x2 = ', 0
+    wszXPrefix              du 'x = ', 0
+    wszVertexPrefix         du 0x0412, 0x0435, 0x0440, 0x0448, 0x0438, 0x043D, 0x0430, ' = (', 0
+    wszCommaSpace           du ', ', 0
+    wszCloseParen           du ')', 0
 
     ; Buffers
     align 8
@@ -1181,10 +1208,20 @@ _pyfasm_ui_wnd_proc:
 
 .on_command:
     movzx   eax, r8w            ; control ID
+    mov     edx, r8d
+    shr     edx, 16             ; notification code (e.g. EN_CHANGE = 0x0300)
     cmp     eax, 1001           ; Solve button
     je      .cmd_solve
     cmp     eax, 1002           ; Clear button
     je      .cmd_clear
+    cmp     edx, 300h           ; EN_CHANGE notification from edit boxes
+    jne     .cmd_done
+    cmp     eax, 1011           ; Edit A
+    je      .cmd_solve
+    cmp     eax, 1012           ; Edit B
+    je      .cmd_solve
+    cmp     eax, 1013           ; Edit C
+    je      .cmd_solve
     jmp     .cmd_done
 .cmd_solve:
     call    _pyfasm_do_solve
@@ -1476,6 +1513,10 @@ _pyfasm_canvas_wnd_proc:
     mov     qword [rsp + 32], 1
     call    [TextOutW]
 
+    ; Check if cleared
+    cmp     dword [_is_cleared], 1
+    je      .skip_all_draw
+
     ; 3. Draw Parabola Curve: y = a*x^2 + b*x + c
     mov     rcx, r12
     mov     rdx, [_pyfasm_hpen_curve]
@@ -1545,26 +1586,79 @@ _pyfasm_canvas_wnd_proc:
     mov     rdx, [_pyfasm_hbr_root]
     call    [SelectObject]
 
-    ; Root 1: x = 2.0 -> px = 250 + 2*80 = 410, py = 539
+    ; Root 1: px = 250 + (int)(_val_root1 * 80.0)
+    movsd   xmm0, [_val_root1]
+    mulsd   xmm0, [_flt_xscale]
+    cvttsd2si eax, xmm0
+    add     eax, 250
+    cmp     eax, 45
+    jl      .draw_root2
+    cmp     eax, 615
+    jg      .draw_root2
+
+    mov     ecx, eax
+    sub     ecx, 6
+    mov     r8d, 533
+    mov     r9d, eax
+    add     r9d, 6
+    mov     qword [rsp + 32], 545
+    mov     edx, ecx
     mov     rcx, r12
-    mov     edx, 404            ; 410 - 6
-    mov     r8d, 533            ; 539 - 6
-    mov     r9d, 416            ; 410 + 6
-    mov     qword [rsp + 32], 545 ; 539 + 6
     call    [Ellipse]
 
-    ; Root 2: x = 1.0 -> px = 250 + 1*80 = 330, py = 539
-    mov     rcx, r12
-    mov     edx, 324            ; 330 - 6
+.draw_root2:
+    cmp     dword [_root_count], 2
+    jne     .skip_roots
+
+    ; Root 2: px = 250 + (int)(_val_root2 * 80.0)
+    movsd   xmm0, [_val_root2]
+    mulsd   xmm0, [_flt_xscale]
+    cvttsd2si eax, xmm0
+    add     eax, 250
+    cmp     eax, 45
+    jl      .skip_roots
+    cmp     eax, 615
+    jg      .skip_roots
+
+    mov     ecx, eax
+    sub     ecx, 6
     mov     r8d, 533
-    mov     r9d, 336
+    mov     r9d, eax
+    add     r9d, 6
     mov     qword [rsp + 32], 545
+    mov     edx, ecx
+    mov     rcx, r12
     call    [Ellipse]
 
 .skip_roots:
 
-    ; 5. Draw Vertex Diamond (vx = 1.5, vy = -0.25)
-    ; px = 250 + 1.5*80 = 370, py = 539 - (-0.25 * 37.3) = 539 + 9 = 548
+    ; 5. Draw Vertex Diamond (vx, vy)
+    cmp     dword [_has_vertex], 1
+    jne     .skip_vertex
+
+    movsd   xmm0, [_val_vx]
+    mulsd   xmm0, [_flt_xscale]
+    cvttsd2si eax, xmm0
+    add     eax, 250            ; pvx
+
+    movsd   xmm0, [_val_vy]
+    mulsd   xmm0, [_flt_yscale]
+    cvttsd2si ebx, xmm0
+    mov     ecx, 539
+    sub     ecx, ebx            ; pvy
+
+    cmp     eax, 45
+    jl      .skip_vertex
+    cmp     eax, 615
+    jg      .skip_vertex
+    cmp     ecx, 32
+    jl      .skip_vertex
+    cmp     ecx, 600
+    jg      .skip_vertex
+
+    mov     r13d, eax
+    mov     r14d, ecx
+
     mov     rcx, r12
     mov     rdx, [_pyfasm_hpen_null]
     call    [SelectObject]
@@ -1572,20 +1666,33 @@ _pyfasm_canvas_wnd_proc:
     mov     rdx, [_pyfasm_hbr_vertex]
     call    [SelectObject]
 
-    ; 4 points of diamond around (370, 548)
-    mov     dword [_poly_pts], 370      ; Top: (370, 541)
-    mov     dword [_poly_pts + 4], 541
-    mov     dword [_poly_pts + 8], 377  ; Right: (377, 548)
-    mov     dword [_poly_pts + 12], 548
-    mov     dword [_poly_pts + 16], 370 ; Bottom: (370, 555)
-    mov     dword [_poly_pts + 20], 555
-    mov     dword [_poly_pts + 24], 363 ; Left: (363, 548)
-    mov     dword [_poly_pts + 28], 548
+    mov     dword [_poly_pts], r13d
+    mov     eax, r14d
+    sub     eax, 7
+    mov     dword [_poly_pts + 4], eax
+
+    mov     eax, r13d
+    add     eax, 7
+    mov     dword [_poly_pts + 8], eax
+    mov     dword [_poly_pts + 12], r14d
+
+    mov     dword [_poly_pts + 16], r13d
+    mov     eax, r14d
+    add     eax, 7
+    mov     dword [_poly_pts + 20], eax
+
+    mov     eax, r13d
+    sub     eax, 7
+    mov     dword [_poly_pts + 24], eax
+    mov     dword [_poly_pts + 28], r14d
 
     mov     rcx, r12
     lea     rdx, [_poly_pts]
     mov     r8d, 4
     call    [Polygon]
+
+.skip_vertex:
+.skip_all_draw:
 
     ; 6. Draw Title & Legend
     mov     rcx, r12
@@ -1694,55 +1801,246 @@ _pyfasm_canvas_wnd_proc:
 _pyfasm_do_solve:
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 128
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 64
     and     rsp, -16
 
-    ; Format live preview: "f(x) = 1x² - 3x + 2"
-    ; Let's write preview string directly into _preview_buf
-    lea     rdi, [_preview_buf]
-    ; L"f(x) = 1x² - 3x + 2"
-    lea     rsi, [_preview_default]
-    call    _pyfasm_copy_wstr
+    ; 1. Read input string A
+    mov     rcx, [_pyfasm_h_edit_a]
+    lea     rdx, [_str_buf_a]
+    mov     r8d, 30
+    call    [GetWindowTextW]
+    test    eax, eax
+    jz      .solve_err
 
+    ; Parse A
+    lea     rcx, [_str_buf_a]
+    call    _pyfasm_parse_float_w
+    test    eax, eax
+    jz      .solve_err
+    movsd   [_val_a], xmm0
+
+    ; 2. Read input string B
+    mov     rcx, [_pyfasm_h_edit_b]
+    lea     rdx, [_str_buf_b]
+    mov     r8d, 30
+    call    [GetWindowTextW]
+    test    eax, eax
+    jz      .solve_err
+
+    ; Parse B
+    lea     rcx, [_str_buf_b]
+    call    _pyfasm_parse_float_w
+    test    eax, eax
+    jz      .solve_err
+    movsd   [_val_b], xmm0
+
+    ; 3. Read input string C
+    mov     rcx, [_pyfasm_h_edit_c]
+    lea     rdx, [_str_buf_c]
+    mov     r8d, 30
+    call    [GetWindowTextW]
+    test    eax, eax
+    jz      .solve_err
+
+    ; Parse C
+    lea     rcx, [_str_buf_c]
+    call    _pyfasm_parse_float_w
+    test    eax, eax
+    jz      .solve_err
+    movsd   [_val_c], xmm0
+
+    ; Check if A is 0
+    xorpd   xmm1, xmm1
+    movsd   xmm0, [_val_a]
+    ucomisd xmm0, xmm1
+    jne     .is_quadratic
+
+    ; a == 0: linear equation
+    mov     dword [_is_cleared], 0
+    mov     dword [_has_real_roots], 0
+    mov     dword [_has_vertex], 0
+    call    _pyfasm_format_preview
+    lea     rdi, [_result_buf]
+    lea     rsi, [_preview_buf]
+    call    _pyfasm_copy_wstr_cat
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+    lea     rsi, [wszLinearWarn]
+    call    _pyfasm_copy_wstr_cat
+    mov     word [rdi], 0
+    jmp     .update_ui
+
+.is_quadratic:
+    mov     dword [_is_cleared], 0
+
+    ; D = b^2 - 4ac
+    movsd   xmm0, [_val_b]
+    mulsd   xmm0, xmm0
+    movsd   xmm1, [_val_a]
+    mulsd   xmm1, [_val_c]
+    mulsd   xmm1, [_flt_four]
+    subsd   xmm0, xmm1
+    movsd   [_val_disc], xmm0
+
+    ; Vertex: vx = -b / (2a)
+    xorpd   xmm1, xmm1
+    subsd   xmm1, [_val_b]
+    movsd   xmm2, [_val_a]
+    mulsd   xmm2, [_flt_two]
+    divsd   xmm1, xmm2
+    movsd   [_val_vx], xmm1
+
+    ; vy = (a*vx + b)*vx + c
+    movsd   xmm3, [_val_a]
+    mulsd   xmm3, xmm1
+    addsd   xmm3, [_val_b]
+    mulsd   xmm3, xmm1
+    addsd   xmm3, [_val_c]
+    movsd   [_val_vy], xmm3
+    mov     dword [_has_vertex], 1
+
+    ; Roots:
+    xorpd   xmm1, xmm1
+    movsd   xmm0, [_val_disc]
+    ucomisd xmm0, xmm1
+    jb      .d_lt_zero
+    ja      .d_gt_zero
+
+    ; D == 0
+    mov     dword [_has_real_roots], 1
+    mov     dword [_root_count], 1
+    movsd   xmm1, [_val_vx]
+    movsd   [_val_root1], xmm1
+    jmp     .do_format
+
+.d_gt_zero:
+    mov     dword [_has_real_roots], 1
+    mov     dword [_root_count], 2
+    sqrtsd  xmm3, xmm0          ; sqrt(D)
+
+    ; x1 = (-b + sqrt(D)) / (2a)
+    xorpd   xmm1, xmm1
+    subsd   xmm1, [_val_b]
+    addsd   xmm1, xmm3
+    movsd   xmm2, [_val_a]
+    mulsd   xmm2, [_flt_two]
+    divsd   xmm1, xmm2
+    movsd   [_val_root1], xmm1
+
+    ; x2 = (-b - sqrt(D)) / (2a)
+    xorpd   xmm1, xmm1
+    subsd   xmm1, [_val_b]
+    subsd   xmm1, xmm3
+    divsd   xmm1, xmm2
+    movsd   [_val_root2], xmm1
+    jmp     .do_format
+
+.d_lt_zero:
+    mov     dword [_has_real_roots], 0
+    mov     dword [_root_count], 0
+
+.do_format:
+    call    _pyfasm_format_preview
+
+    ; Format result
+    lea     rdi, [_result_buf]
+    lea     rsi, [_preview_buf]
+    call    _pyfasm_copy_wstr_cat
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+
+    lea     rsi, [wszResQuad]
+    call    _pyfasm_copy_wstr_cat
+
+    lea     rsi, [wszDiscPrefix]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_disc]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+
+    cmp     dword [_root_count], 2
+    je      .fmt_r2
+    cmp     dword [_root_count], 1
+    je      .fmt_r1
+
+    lea     rsi, [wszDlt0]
+    call    _pyfasm_copy_wstr_cat
+    jmp     .fmt_v
+
+.fmt_r1:
+    lea     rsi, [wszDeq0]
+    call    _pyfasm_copy_wstr_cat
+    lea     rsi, [wszXPrefix]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_root1]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+    jmp     .fmt_v
+
+.fmt_r2:
+    lea     rsi, [wszDgt0]
+    call    _pyfasm_copy_wstr_cat
+    lea     rsi, [wszX1Prefix]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_root1]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+
+    lea     rsi, [wszX2Prefix]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_root2]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCrLf]
+    call    _pyfasm_copy_wstr_cat
+
+.fmt_v:
+    lea     rsi, [wszVertexPrefix]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_vx]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCommaSpace]
+    call    _pyfasm_copy_wstr_cat
+    movsd   xmm0, [_val_vy]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszCloseParen]
+    call    _pyfasm_copy_wstr_cat
+    mov     word [rdi], 0
+    jmp     .update_ui
+
+.solve_err:
+    mov     dword [_is_cleared], 1
+    lea     rdi, [_preview_buf]
+    lea     rsi, [wszPreviewEmpty]
+    call    _pyfasm_copy_wstr_cat
+
+    lea     rdi, [_result_buf]
+    lea     rsi, [wszInputErr]
+    call    _pyfasm_copy_wstr_cat
+
+.update_ui:
     mov     rcx, [_pyfasm_h_preview]
     lea     rdx, [_preview_buf]
     call    [SetWindowTextW]
 
-    ; Build complete result text matching Python SolveResult output
-    ; Line 1: f(x) = 1x² - 3x + 2
-    ; Line 2: Квадратное уравнение. a ≠ 0.
-    ; Line 3: D = b² - 4ac = 1
-    ; Line 4: D > 0: два разных вещественных корня.
-    ; Line 5: x1 = 2
-    ; Line 6: x2 = 1
-    ; Line 7: Вершина = (1.5, -0.25)
-    lea     rdi, [_result_buf]
-    lea     rsi, [_res_line1]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line2]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line3]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line4]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line5]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line6]
-    call    _pyfasm_copy_wstr
-    lea     rsi, [_res_line7]
-    call    _pyfasm_copy_wstr
-
-    ; Set Window Text for Result Textbox
     mov     rcx, [_pyfasm_h_result]
     lea     rdx, [_result_buf]
     call    [SetWindowTextW]
 
-    ; Invalidate Canvas to repaint graph
     mov     rcx, [_pyfasm_h_canvas]
     xor     edx, edx
     mov     r8d, 1
     call    [InvalidateRect]
 
+    add     rsp, 64
+    pop     rdi
+    pop     rsi
+    pop     rbx
     mov     rsp, rbp
     pop     rbp
     ret
@@ -1769,32 +2067,318 @@ _pyfasm_do_clear:
     mov     rcx, [_pyfasm_h_result]
     call    [SetWindowTextW]
 
+    mov     dword [_is_cleared], 1
+    mov     dword [_has_real_roots], 0
+    mov     dword [_has_vertex], 0
+
+    mov     rcx, [_pyfasm_h_canvas]
+    xor     edx, edx
+    mov     r8d, 1
+    call    [InvalidateRect]
+
     mov     rsp, rbp
     pop     rbp
     ret
 
-_pyfasm_copy_wstr:
-.c_loop:
-    lodsw
-    test    ax, ax
-    jz      .c_done
-    stosw
-    jmp     .c_loop
-.c_done:
+_pyfasm_format_preview:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 32
+
+    lea     rdi, [_preview_buf]
+    lea     rsi, [wszFxPrefix]
+    call    _pyfasm_copy_wstr_cat
+
+    movsd   xmm0, [_val_a]
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszXsq]
+    call    _pyfasm_copy_wstr_cat
+
+    movsd   xmm0, [_val_b]
+    xorpd   xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jb      .prev_b_neg
+    lea     rsi, [wszPlus]
+    call    _pyfasm_copy_wstr_cat
+    jmp     .prev_b_num
+.prev_b_neg:
+    lea     rsi, [wszMinus]
+    call    _pyfasm_copy_wstr_cat
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.prev_b_num:
+    call    _pyfasm_format_double_w
+    lea     rsi, [wszX]
+    call    _pyfasm_copy_wstr_cat
+
+    movsd   xmm0, [_val_c]
+    xorpd   xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jb      .prev_c_neg
+    lea     rsi, [wszPlus]
+    call    _pyfasm_copy_wstr_cat
+    jmp     .prev_c_num
+.prev_c_neg:
+    lea     rsi, [wszMinus]
+    call    _pyfasm_copy_wstr_cat
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.prev_c_num:
+    call    _pyfasm_format_double_w
     mov     word [rdi], 0
+
+    add     rsp, 32
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_copy_wstr_cat:
+.cat_loop:
+    movzx   eax, word [rsi]
+    test    ax, ax
+    jz      .cat_done
+    mov     [rdi], ax
+    add     rsi, 2
+    add     rdi, 2
+    jmp     .cat_loop
+.cat_done:
+    mov     word [rdi], 0
+    ret
+
+_pyfasm_parse_float_w:
+    push    rbp
+    mov     rbp, rsp
+    push    rsi
+    push    rbx
+    sub     rsp, 32
+
+    mov     rsi, rcx
+    xorpd   xmm0, xmm0
+    xor     eax, eax
+    mov     r8d, 0
+
+.skip_ws:
+    movzx   edx, word [rsi]
+    cmp     edx, ' '
+    je      .inc_skip
+    cmp     edx, 9
+    je      .inc_skip
+    jmp     .check_sign
+.inc_skip:
+    add     rsi, 2
+    jmp     .skip_ws
+
+.check_sign:
+    cmp     edx, '-'
+    jne     .check_plus
+    mov     eax, 1
+    add     rsi, 2
+    movzx   edx, word [rsi]
+    jmp     .parse_int
+.check_plus:
+    cmp     edx, '+'
+    jne     .parse_int
+    add     rsi, 2
+    movzx   edx, word [rsi]
+
+.parse_int:
+.int_loop:
+    cmp     edx, '0'
+    jb      .check_dot
+    cmp     edx, '9'
+    ja      .check_dot
+    sub     edx, '0'
+    cvtsi2sd xmm1, edx
+    mulsd   xmm0, [_flt_ten]
+    addsd   xmm0, xmm1
+    mov     r8d, 1
+    add     rsi, 2
+    movzx   edx, word [rsi]
+    jmp     .int_loop
+
+.check_dot:
+    cmp     edx, '.'
+    je      .has_frac
+    cmp     edx, ','
+    je      .has_frac
+    jmp     .finish_num
+
+.has_frac:
+    add     rsi, 2
+    movzx   edx, word [rsi]
+    movsd   xmm2, [_flt_one]
+
+.frac_loop:
+    cmp     edx, '0'
+    jb      .finish_num
+    cmp     edx, '9'
+    ja      .finish_num
+    sub     edx, '0'
+    cvtsi2sd xmm1, edx
+    mulsd   xmm2, [_flt_ten]
+    divsd   xmm1, xmm2
+    addsd   xmm0, xmm1
+    mov     r8d, 1
+    add     rsi, 2
+    movzx   edx, word [rsi]
+    jmp     .frac_loop
+
+.finish_num:
+    test    r8d, r8d
+    jz      .parse_fail
+    test    eax, eax
+    jz      .parse_ok
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.parse_ok:
+    mov     eax, 1
+    jmp     .ret_parse
+.parse_fail:
+    xorpd   xmm0, xmm0
+    xor     eax, eax
+.ret_parse:
+    add     rsp, 32
+    pop     rbx
+    pop     rsi
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_format_double_w:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 48
+
+    ; Check if negative
+    xorpd   xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jae     .fmt_pos
+    mov     word [rdi], '-'
+    add     rdi, 2
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+
+.fmt_pos:
+    cvttsd2si rax, xmm0
+    lea     rsi, [rsp + 40]
+    mov     byte [rsi], 0
+    mov     rbx, 10
+.fmt_int_loop:
+    xor     edx, edx
+    div     rbx
+    add     edx, '0'
+    dec     rsi
+    mov     [rsi], dl
+    test    rax, rax
+    jnz     .fmt_int_loop
+
+.copy_int_chars:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .int_copied
+    mov     [rdi], ax
+    add     rdi, 2
+    inc     rsi
+    jmp     .copy_int_chars
+
+.int_copied:
+    ; Fractional part
+    cvttsd2si rax, xmm0
+    cvtsi2sd xmm1, rax
+    subsd   xmm0, xmm1          ; xmm0 = frac [0, 1)
+
+    ; frac_int = (int)(frac * 10000.0 + 0.5)
+    movsd   xmm2, [_flt_10000]
+    mulsd   xmm0, xmm2
+    addsd   xmm0, [_flt_half]
+    cvttsd2si r8, xmm0
+    test    r8, r8
+    jz      .fmt_done
+
+    mov     word [rdi], '.'
+    add     rdi, 2
+    mov     r10, rdi            ; pointer after '.'
+
+    ; Format up to 4 decimal digits
+    ; D1 = (r8 / 1000) % 10
+    mov     rax, r8
+    xor     edx, edx
+    mov     ebx, 1000
+    div     ebx
+    xor     edx, edx
+    mov     ebx, 10
+    div     ebx
+    add     edx, '0'
+    mov     [rdi], dx
+    add     rdi, 2
+
+    ; D2 = (r8 / 100) % 10
+    mov     rax, r8
+    xor     edx, edx
+    mov     ebx, 100
+    div     ebx
+    xor     edx, edx
+    mov     ebx, 10
+    div     ebx
+    add     edx, '0'
+    mov     [rdi], dx
+    add     rdi, 2
+
+    ; D3 = (r8 / 10) % 10
+    mov     rax, r8
+    xor     edx, edx
+    mov     ebx, 10
+    div     ebx
+    xor     edx, edx
+    mov     ebx, 10
+    div     ebx
+    add     edx, '0'
+    mov     [rdi], dx
+    add     rdi, 2
+
+    ; D4 = r8 % 10
+    mov     rax, r8
+    xor     edx, edx
+    mov     ebx, 10
+    div     ebx
+    add     edx, '0'
+    mov     [rdi], dx
+    add     rdi, 2
+
+.trim_zeros:
+    cmp     rdi, r10
+    jbe     .remove_dot
+    cmp     word [rdi - 2], '0'
+    jne     .fmt_done
+    sub     rdi, 2
+    jmp     .trim_zeros
+
+.remove_dot:
+    sub     rdi, 2
+
+.fmt_done:
+    mov     word [rdi], 0
+    add     rsp, 48
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 section '.data' data readable writeable
     align 2
     _sz_empty       du 0
-    _preview_default du 'f(x) = 1x', 0x00B2, ' - 3x + 2', 0
-    _res_line1      du 'f(x) = 1x', 0x00B2, ' - 3x + 2', 13, 10, 0
-    _res_line2      du 0x041A, 0x0432, 0x0430, 0x0434, 0x0440, 0x0430, 0x0442, 0x043D, 0x043E, 0x0435, ' ', 0x0443, 0x0440, 0x0430, 0x0432, 0x043D, 0x0435, 0x043D, 0x0438, 0x0435, '. a ', 0x2260, ' 0.', 13, 10, 0
-    _res_line3      du 'D = b', 0x00B2, ' - 4ac = 1', 13, 10, 0
-    _res_line4      du 'D > 0: ', 0x0434, 0x0432, 0x0430, ' ', 0x0440, 0x0430, 0x0437, 0x043D, 0x044B, 0x0445, ' ', 0x0432, 0x0435, 0x0449, 0x0435, 0x0441, 0x0442, 0x0432, 0x0435, 0x043D, 0x043D, 0x044B, 0x0445, ' ', 0x043A, 0x043E, 0x0440, 0x043D, 0x044F, '.', 13, 10, 0
-    _res_line5      du 'x1 = 2', 13, 10, 0
-    _res_line6      du 'x2 = 1', 13, 10, 0
-    _res_line7      du 0x0412, 0x0435, 0x0440, 0x0448, 0x0438, 0x043D, 0x0430, ' = (1.5, -0.25)', 0
 
 section '.idata' import data readable writeable
     library kernel32, 'KERNEL32.DLL', \\

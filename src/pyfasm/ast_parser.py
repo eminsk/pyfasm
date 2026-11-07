@@ -558,7 +558,7 @@ class AstAnalyzer:
 
         try:
             from pyfasm.ui_analyzer import analyze_ui_structure
-            entry_tree = ast.parse(entry_path.read_text(encoding="utf-8"))
+            entry_tree = ast.parse(entry_path.read_text(encoding="utf-8-sig"))
             module.ui_spec = analyze_ui_structure(entry_tree)
             if not module.ui_spec and hasattr(self, "_visited_files"):
                 for v_path in self._visited_files:
@@ -566,7 +566,7 @@ class AstAnalyzer:
                     if ".venv" in v_str or "site-packages" in v_str:
                         continue
                     try:
-                        v_tree = ast.parse(v_path.read_text(encoding="utf-8"))
+                        v_tree = ast.parse(v_path.read_text(encoding="utf-8-sig"))
                         cand_spec = analyze_ui_structure(v_tree)
                         if cand_spec and (cand_spec.widgets or cand_spec.window_title != "PyFASM Application"):
                             module.ui_spec = cand_spec
@@ -645,7 +645,7 @@ class AstAnalyzer:
             return
 
         try:
-            source_code = real_path.read_text(encoding="utf-8")
+            source_code = real_path.read_text(encoding="utf-8-sig")
             tree = ast.parse(source_code)
             tree = preprocess_ast(tree)
         except Exception:
