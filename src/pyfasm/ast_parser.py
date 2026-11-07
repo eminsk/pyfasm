@@ -328,7 +328,8 @@ class GeneratorExpLifter(ast.NodeTransformer):
         "abs", "min", "max", "sum", "list", "dict", "set", "tuple",
         "next", "iter", "open", "round", "pow", "ord", "chr", "input",
         "any", "all", "map", "filter", "zip", "enumerate",
-        "bisect", "bisect_right", "bisect_left", "heappush", "heappop"
+        "bisect", "bisect_right", "bisect_left", "heappush", "heappop",
+        "gcd", "lcm", "isqrt", "factorial", "accumulate", "chain", "reduce"
     }
 
     def __init__(self):
@@ -1168,7 +1169,7 @@ class AstAnalyzer:
                     return TYPE_FLOAT
                 elif fid in ("bool", "isinstance", "issubclass"):
                     return TYPE_BOOL
-                elif fid in ("list", "range", "map", "filter"):
+                elif fid in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted"):
                     return TYPE_LIST
                 elif fid in ("dict",):
                     return TYPE_DICT
@@ -1180,7 +1181,7 @@ class AstAnalyzer:
                 attr = expr.func.attr
                 if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice"):
                     return TYPE_STR
-                elif attr in ("keys", "values", "items"):
+                elif attr in ("keys", "values", "items", "chain", "accumulate"):
                     return TYPE_LIST
                 elif attr in ("count", "find", "index"):
                     return TYPE_INT

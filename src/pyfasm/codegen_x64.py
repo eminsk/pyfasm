@@ -723,7 +723,7 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
-                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop"):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce"):
                     continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
@@ -2016,7 +2016,7 @@ include 'functions.inc'
                     return TYPE_FLOAT
                 if fn_id in ("bool", "isinstance", "any", "all"):
                     return TYPE_BOOL
-                if fn_id in ("list",):
+                if fn_id in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted"):
                     return TYPE_LIST
                 if fn_id in ("dict",):
                     return TYPE_DICT
@@ -2040,7 +2040,7 @@ include 'functions.inc'
                     return TYPE_STR
                 if attr in ("count", "find", "index"):
                     return TYPE_INT
-                if attr in ("keys", "values", "items"):
+                if attr in ("keys", "values", "items", "chain", "accumulate"):
                     return TYPE_LIST
                 if isinstance(expr.func.value, ast.Name):
                     pfx = expr.func.value.id
@@ -4629,6 +4629,82 @@ include 'functions.inc'
             self.emit("sub rsp, 32", "shadow space for _pyfasm_heappop")
             self.emit("call _pyfasm_heappop")
             self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # math.gcd(a, b)
+        if (func_name in ("gcd", "math_gcd") or (prefix == "math" and attr_name == "gcd")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("pop rdx")
+            self.emit("call _pyfasm_math_gcd")
+            return
+
+        # math.lcm(a, b)
+        if (func_name in ("lcm", "math_lcm") or (prefix == "math" and attr_name == "lcm")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("pop rdx")
+            self.emit("call _pyfasm_math_lcm")
+            return
+
+        # math.isqrt(n)
+        if (func_name in ("isqrt", "math_isqrt") or (prefix == "math" and attr_name == "isqrt")) and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_math_isqrt")
+            return
+
+        # math.factorial(n)
+        if (func_name in ("factorial", "math_factorial") or (prefix == "math" and attr_name == "factorial")) and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("call _pyfasm_math_factorial")
+            return
+
+        # itertools.chain(a, b)
+        if (func_name in ("chain", "itertools_chain") or (prefix == "itertools" and attr_name == "chain")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("pop rdx")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_itertools_chain")
+            self.emit("call _pyfasm_itertools_chain")
+            self.emit("add rsp, 32")
+            return
+
+        # itertools.accumulate(seq)
+        if (func_name in ("accumulate", "itertools_accumulate") or (prefix == "itertools" and attr_name == "accumulate")) and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_itertools_accumulate")
+            self.emit("call _pyfasm_itertools_accumulate")
+            self.emit("add rsp, 32")
+            return
+
+        # functools.reduce(fn, seq, [initial])
+        if (func_name in ("reduce", "functools_reduce") or (prefix == "functools" and attr_name == "reduce")) and len(call.args) >= 2:
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "initial value")
+                self.emit("mov r9, 1", "has initial")
+            else:
+                self.emit("xor r8d, r8d")
+                self.emit("push r8")
+                self.emit("xor r9d, r9d", "no initial")
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "list")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "fn")
+            self.emit("pop rdx", "list")
+            self.emit("pop r8", "initial")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_functools_reduce")
+            self.emit("call _pyfasm_functools_reduce")
+            self.emit("add rsp, 32")
             return
 
         if func_name == "spawn_thread":

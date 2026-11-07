@@ -2938,6 +2938,270 @@ _pyfasm_heappop:
     pop     rbp
     ret
 
+math_gcd:
+gcd:
+_pyfasm_math_gcd:
+    ; RCX = a, RDX = b
+    mov     rax, rcx
+    test    rax, rax
+    jns     .gcd_chk_b
+    neg     rax
+.gcd_chk_b:
+    mov     rcx, rdx
+    test    rcx, rcx
+    jns     .gcd_loop
+    neg     rcx
+.gcd_loop:
+    test    rcx, rcx
+    jz      .gcd_done
+    xor     edx, edx
+    div     rcx                     ; rax = rax / rcx, rdx = rax % rcx
+    mov     rax, rcx                ; a = b
+    mov     rcx, rdx                ; b = remainder
+    jmp     .gcd_loop
+.gcd_done:
+    ret
+
+math_lcm:
+lcm:
+_pyfasm_math_lcm:
+    ; RCX = a, RDX = b
+    test    rcx, rcx
+    jz      .lcm_zero
+    test    rdx, rdx
+    jz      .lcm_zero
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    mov     rbx, rcx                ; a
+    mov     r12, rdx                ; b
+    call    _pyfasm_math_gcd        ; rax = gcd(a, b)
+    test    rax, rax
+    jz      .lcm_done
+    mov     r8, rax                 ; r8 = gcd
+    mov     rax, rbx
+    imul    rax, r12                ; a * b
+    test    rax, rax
+    jns     .lcm_div
+    neg     rax                     ; abs(a * b)
+.lcm_div:
+    xor     edx, edx
+    div     r8                      ; abs(a * b) / gcd
+.lcm_done:
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.lcm_zero:
+    xor     eax, eax
+    ret
+
+math_isqrt:
+isqrt:
+_pyfasm_math_isqrt:
+    ; RCX = n (non-negative int)
+    test    rcx, rcx
+    jns     .isqrt_start
+    xor     eax, eax
+    ret
+.isqrt_start:
+    test    rcx, rcx
+    jnz     .isqrt_non_zero
+    xor     eax, eax
+    ret
+.isqrt_non_zero:
+    mov     r8, rcx                 ; r8 = n
+    mov     r9, rcx                 ; x = n
+.isqrt_loop:
+    mov     rax, r8
+    xor     edx, edx
+    div     r9                      ; rax = n / x
+    add     rax, r9                 ; rax = x + n / x
+    shr     rax, 1                  ; next_x = (x + n / x) / 2
+    cmp     rax, r9
+    jge     .isqrt_ret              ; while next_x < x
+    mov     r9, rax                 ; x = next_x
+    jmp     .isqrt_loop
+.isqrt_ret:
+    mov     rax, r9
+    ret
+
+math_factorial:
+factorial:
+_pyfasm_math_factorial:
+    ; RCX = n
+    mov     rax, 1
+    test    rcx, rcx
+    jle     .fact_done
+.fact_loop:
+    imul    rax, rcx
+    dec     rcx
+    jnz     .fact_loop
+.fact_done:
+    ret
+
+itertools_chain:
+chain:
+_pyfasm_itertools_chain:
+    ; RCX = list a, RDX = list b
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = list b
+    xor     r14, r14                ; len_a = 0
+    xor     r15, r15                ; len_b = 0
+    test    r12, r12
+    jz      .chn_chk_b
+    mov     r14, [r12]
+.chn_chk_b:
+    test    r13, r13
+    jz      .chn_alloc
+    mov     r15, [r13]
+.chn_alloc:
+    mov     rcx, r14
+    add     rcx, r15                ; total len
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = new list
+    mov     rax, r14
+    add     rax, r15
+    mov     [rbx], rax              ; store total len
+    xor     rcx, rcx
+.chn_loop_a:
+    cmp     rcx, r14
+    jge     .chn_copy_b
+    mov     rdx, [r12 + rcx * 8 + 8]
+    mov     [rbx + rcx * 8 + 8], rdx
+    inc     rcx
+    jmp     .chn_loop_a
+.chn_copy_b:
+    xor     rdx, rdx
+.chn_loop_b:
+    cmp     rdx, r15
+    jge     .chn_done
+    mov     rax, [r13 + rdx * 8 + 8]
+    mov     r8, r14
+    add     r8, rdx
+    mov     [rbx + r8 * 8 + 8], rax
+    inc     rdx
+    jmp     .chn_loop_b
+.chn_done:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+itertools_accumulate:
+accumulate:
+_pyfasm_itertools_accumulate:
+    ; RCX = list
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 32
+    mov     r12, rcx
+    xor     r13, r13
+    test    r12, r12
+    jz      .acc_alloc
+    mov     r13, [r12]
+.acc_alloc:
+    mov     rcx, r13
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = res list
+    mov     [rbx], r13
+    test    r13, r13
+    jz      .acc_done
+    xor     r14, r14
+    xor     rcx, rcx
+.acc_loop:
+    cmp     rcx, r13
+    jge     .acc_done
+    mov     rdx, [r12 + rcx * 8 + 8]
+    add     r14, rdx
+    mov     [rbx + rcx * 8 + 8], r14
+    inc     rcx
+    jmp     .acc_loop
+.acc_done:
+    mov     rax, rbx
+    add     rsp, 32
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+functools_reduce:
+reduce:
+_pyfasm_functools_reduce:
+    ; RCX = function pointer, RDX = list, R8 = initial, R9 = has_initial
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = fn
+    mov     r13, rdx                ; r13 = list
+    xor     r14, r14
+    test    r13, r13
+    jz      .red_ret_zero
+    mov     r14, [r13]
+    test    r14, r14
+    jz      .red_ret_zero
+    test    r9, r9
+    jnz     .red_with_init
+    mov     r15, [r13 + 8]          ; acc = list[0]
+    mov     rbx, 1                  ; start at 1
+    jmp     .red_loop
+.red_with_init:
+    mov     r15, r8                 ; acc = initial
+    xor     rbx, rbx
+.red_loop:
+    cmp     rbx, r14
+    jge     .red_done
+    mov     rcx, r15                ; arg 0 = acc
+    mov     rdx, [r13 + rbx * 8 + 8] ; arg 1 = item
+    call    r12
+    mov     r15, rax                ; acc = result
+    inc     rbx
+    jmp     .red_loop
+.red_done:
+    mov     rax, r15
+    jmp     .red_exit
+.red_ret_zero:
+    xor     eax, eax
+.red_exit:
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+
 _pyfasm_load_ext_symbol:
     push    rbp
     mov     rbp, rsp
@@ -8770,6 +9034,270 @@ _pyfasm_heappop:
     mov     rsp, rbp
     pop     rbp
     ret
+
+math_gcd:
+gcd:
+_pyfasm_math_gcd:
+    ; RCX = a, RDX = b
+    mov     rax, rcx
+    test    rax, rax
+    jns     .gcd_chk_b
+    neg     rax
+.gcd_chk_b:
+    mov     rcx, rdx
+    test    rcx, rcx
+    jns     .gcd_loop
+    neg     rcx
+.gcd_loop:
+    test    rcx, rcx
+    jz      .gcd_done
+    xor     edx, edx
+    div     rcx                     ; rax = rax / rcx, rdx = rax % rcx
+    mov     rax, rcx                ; a = b
+    mov     rcx, rdx                ; b = remainder
+    jmp     .gcd_loop
+.gcd_done:
+    ret
+
+math_lcm:
+lcm:
+_pyfasm_math_lcm:
+    ; RCX = a, RDX = b
+    test    rcx, rcx
+    jz      .lcm_zero
+    test    rdx, rdx
+    jz      .lcm_zero
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    mov     rbx, rcx                ; a
+    mov     r12, rdx                ; b
+    call    _pyfasm_math_gcd        ; rax = gcd(a, b)
+    test    rax, rax
+    jz      .lcm_done
+    mov     r8, rax                 ; r8 = gcd
+    mov     rax, rbx
+    imul    rax, r12                ; a * b
+    test    rax, rax
+    jns     .lcm_div
+    neg     rax                     ; abs(a * b)
+.lcm_div:
+    xor     edx, edx
+    div     r8                      ; abs(a * b) / gcd
+.lcm_done:
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.lcm_zero:
+    xor     eax, eax
+    ret
+
+math_isqrt:
+isqrt:
+_pyfasm_math_isqrt:
+    ; RCX = n (non-negative int)
+    test    rcx, rcx
+    jns     .isqrt_start
+    xor     eax, eax
+    ret
+.isqrt_start:
+    test    rcx, rcx
+    jnz     .isqrt_non_zero
+    xor     eax, eax
+    ret
+.isqrt_non_zero:
+    mov     r8, rcx                 ; r8 = n
+    mov     r9, rcx                 ; x = n
+.isqrt_loop:
+    mov     rax, r8
+    xor     edx, edx
+    div     r9                      ; rax = n / x
+    add     rax, r9                 ; rax = x + n / x
+    shr     rax, 1                  ; next_x = (x + n / x) / 2
+    cmp     rax, r9
+    jge     .isqrt_ret              ; while next_x < x
+    mov     r9, rax                 ; x = next_x
+    jmp     .isqrt_loop
+.isqrt_ret:
+    mov     rax, r9
+    ret
+
+math_factorial:
+factorial:
+_pyfasm_math_factorial:
+    ; RCX = n
+    mov     rax, 1
+    test    rcx, rcx
+    jle     .fact_done
+.fact_loop:
+    imul    rax, rcx
+    dec     rcx
+    jnz     .fact_loop
+.fact_done:
+    ret
+
+itertools_chain:
+chain:
+_pyfasm_itertools_chain:
+    ; RCX = list a, RDX = list b
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = list b
+    xor     r14, r14                ; len_a = 0
+    xor     r15, r15                ; len_b = 0
+    test    r12, r12
+    jz      .chn_chk_b
+    mov     r14, [r12]
+.chn_chk_b:
+    test    r13, r13
+    jz      .chn_alloc
+    mov     r15, [r13]
+.chn_alloc:
+    mov     rcx, r14
+    add     rcx, r15                ; total len
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = new list
+    mov     rax, r14
+    add     rax, r15
+    mov     [rbx], rax              ; store total len
+    xor     rcx, rcx
+.chn_loop_a:
+    cmp     rcx, r14
+    jge     .chn_copy_b
+    mov     rdx, [r12 + rcx * 8 + 8]
+    mov     [rbx + rcx * 8 + 8], rdx
+    inc     rcx
+    jmp     .chn_loop_a
+.chn_copy_b:
+    xor     rdx, rdx
+.chn_loop_b:
+    cmp     rdx, r15
+    jge     .chn_done
+    mov     rax, [r13 + rdx * 8 + 8]
+    mov     r8, r14
+    add     r8, rdx
+    mov     [rbx + r8 * 8 + 8], rax
+    inc     rdx
+    jmp     .chn_loop_b
+.chn_done:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+itertools_accumulate:
+accumulate:
+_pyfasm_itertools_accumulate:
+    ; RCX = list
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 32
+    mov     r12, rcx
+    xor     r13, r13
+    test    r12, r12
+    jz      .acc_alloc
+    mov     r13, [r12]
+.acc_alloc:
+    mov     rcx, r13
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = res list
+    mov     [rbx], r13
+    test    r13, r13
+    jz      .acc_done
+    xor     r14, r14
+    xor     rcx, rcx
+.acc_loop:
+    cmp     rcx, r13
+    jge     .acc_done
+    mov     rdx, [r12 + rcx * 8 + 8]
+    add     r14, rdx
+    mov     [rbx + rcx * 8 + 8], r14
+    inc     rcx
+    jmp     .acc_loop
+.acc_done:
+    mov     rax, rbx
+    add     rsp, 32
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+functools_reduce:
+reduce:
+_pyfasm_functools_reduce:
+    ; RCX = function pointer, RDX = list, R8 = initial, R9 = has_initial
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = fn
+    mov     r13, rdx                ; r13 = list
+    xor     r14, r14
+    test    r13, r13
+    jz      .red_ret_zero
+    mov     r14, [r13]
+    test    r14, r14
+    jz      .red_ret_zero
+    test    r9, r9
+    jnz     .red_with_init
+    mov     r15, [r13 + 8]          ; acc = list[0]
+    mov     rbx, 1                  ; start at 1
+    jmp     .red_loop
+.red_with_init:
+    mov     r15, r8                 ; acc = initial
+    xor     rbx, rbx
+.red_loop:
+    cmp     rbx, r14
+    jge     .red_done
+    mov     rcx, r15                ; arg 0 = acc
+    mov     rdx, [r13 + rbx * 8 + 8] ; arg 1 = item
+    call    r12
+    mov     r15, rax                ; acc = result
+    inc     rbx
+    jmp     .red_loop
+.red_done:
+    mov     rax, r15
+    jmp     .red_exit
+.red_ret_zero:
+    xor     eax, eax
+.red_exit:
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 
 _pyfasm_load_ext_symbol:
     push    rbp
