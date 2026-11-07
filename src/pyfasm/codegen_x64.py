@@ -773,7 +773,7 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
-                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce"):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce", "set", "count", "math_gcd"):
                     continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
@@ -2284,6 +2284,12 @@ include 'functions.inc'
                         elif expr.attr in self.module.functions:
                             safe_fn = safe_asm_label(expr.attr)
                             self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.attr}")
+                            val_handled = True
+                        elif mod_name == "math" and expr.attr in ("gcd", "lcm", "isqrt", "factorial", "sin", "cos", "sqrt"):
+                            self.emit(f"lea rax, [_pyfasm_math_{expr.attr}]", f"address of math.{expr.attr}")
+                            val_handled = True
+                        elif expr.attr in ("gcd", "lcm", "isqrt", "factorial"):
+                            self.emit(f"lea rax, [_pyfasm_math_{expr.attr}]", f"address of {expr.attr}")
                             val_handled = True
                 if not val_handled:
                     self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
@@ -5001,6 +5007,38 @@ include 'functions.inc'
                 self.emit("call _pyfasm_free_memory")
             return
 
+        # Method .count(needle) on strings and lists
+        if attr_name == "count" and len(call.args) >= 1 and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "needle")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "haystack")
+            self.emit("pop rdx", "needle")
+            caller_type = self._infer_expr_type(call.func.value)
+            if caller_type.is_list():
+                self.emit("call _pyfasm_list_count")
+            else:
+                self.emit("call _pyfasm_str_count")
+            return
+
+        # Built-in set(...) constructor
+        if func_name == "set":
+            if not call.args:
+                self.emit("mov ecx, 16")
+                self.emit("call _pyfasm_set_create")
+                return
+            arg = call.args[0]
+            caller_type = self._infer_expr_type(arg)
+            self._generate_expr(arg)
+            self.emit("mov rcx, rax", "argument to set")
+            if caller_type.is_str():
+                self.emit("call _pyfasm_set_from_str")
+            elif caller_type.is_list():
+                self.emit("call _pyfasm_set_from_list")
+            else:
+                self.emit("call _pyfasm_set_from_iterable")
+            return
+
         if func_name == "map" and len(call.args) >= 2:
             self._generate_expr(call.args[0])
             self.emit("push rax", "func_ptr")
@@ -5199,15 +5237,49 @@ include 'functions.inc'
             self._generate_expr(call.args[0])
             return
 
-        # math.gcd(a, b)
-        if (func_name in ("gcd", "math_gcd") or (prefix == "math" and attr_name == "gcd")) and len(call.args) >= 2:
-            self._generate_expr(call.args[1])
-            self.emit("push rax")
-            self._generate_expr(call.args[0])
-            self.emit("mov rcx, rax")
-            self.emit("pop rdx")
-            self.emit("call _pyfasm_math_gcd")
-            return
+        # math.gcd(a, b) and multi-arg / starred gcd(*seq)
+        is_gcd_call = (func_name in ("gcd", "math_gcd") or (prefix == "math" and attr_name == "gcd"))
+        if not is_gcd_call and self.current_func and func_name:
+            for idx, f_arg in enumerate(self.current_func.args):
+                if f_arg.name == func_name:
+                    defaults = getattr(self.current_func, "defaults", [])
+                    num_defaults = len(defaults)
+                    num_no_defaults = len(self.current_func.args) - num_defaults
+                    d_idx = idx - num_no_defaults
+                    if 0 <= d_idx < num_defaults:
+                        d_val = defaults[d_idx]
+                        if (isinstance(d_val, ast.Attribute) and d_val.attr == "gcd") or (isinstance(d_val, ast.Name) and d_val.id in ("gcd", "math_gcd")):
+                            is_gcd_call = True
+                    break
+
+        if is_gcd_call:
+            if len(call.args) == 1 and isinstance(call.args[0], ast.Starred):
+                self._generate_expr(call.args[0].value)
+                self.emit("mov rcx, rax", "list of numbers for gcd")
+                self.emit("call _pyfasm_math_gcd_list")
+                return
+            elif len(call.args) == 1:
+                self._generate_expr(call.args[0])
+                lbl_pos = self.new_label("gcd_pos")
+                self.emit("test rax, rax")
+                self.emit(f"jns {lbl_pos}")
+                self.emit("neg rax", "math.gcd(x) = abs(x)")
+                self.emit_raw(f"{lbl_pos}:")
+                return
+            elif len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("push rax")
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax")
+                self.emit("pop rdx")
+                self.emit("call _pyfasm_math_gcd")
+                for extra_arg in call.args[2:]:
+                    self.emit("push rax")
+                    self._generate_expr(extra_arg)
+                    self.emit("mov rdx, rax")
+                    self.emit("pop rcx")
+                    self.emit("call _pyfasm_math_gcd")
+                return
 
         # math.lcm(a, b)
         if (func_name in ("lcm", "math_lcm") or (prefix == "math" and attr_name == "lcm")) and len(call.args) >= 2:

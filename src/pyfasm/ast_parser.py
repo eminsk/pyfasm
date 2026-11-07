@@ -189,21 +189,19 @@ class ConstantFolder(ast.NodeTransformer):
 
 class ClassLambdaDesugarer(ast.NodeTransformer):
     """
-    Transforms class-level lambda assignments:
-        class Solution:
-            minOperations = lambda self, ...: ...
-    into explicit class methods:
-        class Solution:
-            def minOperations(self, ...):
-                return ...
+    Transforms class-level and module-level lambda assignments:
+        has_subpattern = lambda st, ...: ...
+    into explicit function definitions:
+        def has_subpattern(st, ...):
+            return ...
     """
-    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+    def _desugar_stmts(self, stmts):
         new_body = []
-        for item in node.body:
+        for item in stmts:
             if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name) and isinstance(item.value, ast.Lambda):
-                method_name = item.targets[0].id
+                fn_name = item.targets[0].id
                 fn_node = ast.FunctionDef(
-                    name=method_name,
+                    name=fn_name,
                     args=item.value.args,
                     body=[ast.Return(value=item.value.body)],
                     decorator_list=[],
@@ -213,9 +211,9 @@ class ClassLambdaDesugarer(ast.NodeTransformer):
                 )
                 new_body.append(self.visit(fn_node))
             elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and isinstance(item.value, ast.Lambda):
-                method_name = item.target.id
+                fn_name = item.target.id
                 fn_node = ast.FunctionDef(
-                    name=method_name,
+                    name=fn_name,
                     args=item.value.args,
                     body=[ast.Return(value=item.value.body)],
                     decorator_list=[],
@@ -226,7 +224,64 @@ class ClassLambdaDesugarer(ast.NodeTransformer):
                 new_body.append(self.visit(fn_node))
             else:
                 new_body.append(self.visit(item))
-        node.body = new_body
+        return new_body
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.body = self._desugar_stmts(node.body)
+        return node
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        node.body = self._desugar_stmts(node.body)
+        return node
+
+
+
+
+class ImportCallTransformer(ast.NodeTransformer):
+    """
+    Transforms __import__('mod').attr into mod.attr
+    and __import__('mod') into mod.
+    """
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "__import__":
+            if node.value.args and isinstance(node.value.args[0], ast.Constant) and isinstance(node.value.args[0].value, str):
+                mod_name = node.value.args[0].value
+                return ast.Attribute(value=ast.Name(id=mod_name, ctx=ast.Load()), attr=node.attr, ctx=node.ctx)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                return ast.Name(id=node.args[0].value, ctx=ast.Load())
+        return node
+
+
+class MapMethodTransformer(ast.NodeTransformer):
+    """
+    Transforms map(obj.method, seq) into [obj.method(x) for x in seq]
+    so that bound methods can be evaluated naturally.
+    """
+    def __init__(self):
+        super().__init__()
+        self._counter = 0
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id == "map" and len(node.args) == 2:
+            func_arg, seq_arg = node.args[0], node.args[1]
+            if isinstance(func_arg, ast.Attribute):
+                self._counter += 1
+                var_name = f"_pyfasm_map_item_{self._counter}"
+                target = ast.Name(id=var_name, ctx=ast.Store())
+                elt = ast.Call(
+                    func=ast.Attribute(value=func_arg.value, attr=func_arg.attr, ctx=ast.Load()),
+                    args=[ast.Name(id=var_name, ctx=ast.Load())],
+                    keywords=[]
+                )
+                comp = ast.comprehension(target=target, iter=seq_arg, ifs=[], is_async=0)
+                return ast.ListComp(elt=elt, generators=[comp])
         return node
 
 
@@ -441,7 +496,9 @@ class GeneratorExpLifter(ast.NodeTransformer):
 
 def preprocess_ast(tree: ast.AST) -> ast.AST:
     """Preprocesses AST: folds constants, desugars yield from, lifts generator expressions and lambdas."""
+    tree = ImportCallTransformer().visit(tree)
     tree = ClassLambdaDesugarer().visit(tree)
+    tree = MapMethodTransformer().visit(tree)
     tree = ChainedCompareTransformer().visit(tree)
     tree = ConstantFolder().visit(tree)
     tree = YieldFromTransformer().visit(tree)
@@ -1269,6 +1326,8 @@ class AstAnalyzer:
                     arg_type = resolve_type(arg.annotation.id)
                 elif isinstance(arg.annotation, ast.Constant) and isinstance(arg.annotation.value, str):
                     arg_type = resolve_type(arg.annotation.value)
+            elif arg_name in ("st", "s", "str", "string", "text", "txt", "msg", "prompt", "pattern", "subpattern", "word", "line"):
+                arg_type = TYPE_STR
 
             var_sym = VariableSymbol(
                 name=arg_name,

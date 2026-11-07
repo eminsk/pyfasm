@@ -2350,6 +2350,341 @@ _pyfasm_set_remove:
 _pyfasm_set_len:
     jmp     _pyfasm_dict_len
 
+_pyfasm_str_count:
+    ; RCX = str (haystack), RDX = sub (needle, can be string pointer or single char)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    xor     r14, r14            ; count = 0
+    test    rcx, rcx
+    jz      .sc_done
+    test    rdx, rdx
+    jz      .sc_done
+    mov     rsi, rcx            ; rsi = haystack
+    mov     rdi, rdx            ; rdi = needle
+
+    ; Check if needle is a pointer (>= 65536) or single char (< 65536)
+    cmp     rdi, 65536
+    jae     .sc_needle_is_str
+
+    ; Needle is single char byte
+    movzx   ebx, dil
+    test    bl, bl
+    jz      .sc_done
+.sc_char_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sc_done
+    cmp     al, bl
+    jne     .sc_char_next
+    inc     r14
+.sc_char_next:
+    inc     rsi
+    jmp     .sc_char_loop
+
+.sc_needle_is_str:
+    ; Needle is a string pointer
+    mov     rcx, rdi
+    sub     rsp, 32
+    call    _pyfasm_str_len
+    add     rsp, 32
+    mov     r12, rax            ; r12 = needle len
+    test    r12, r12
+    jz      .sc_done
+
+    ; If needle len is 1, optimize to char loop
+    cmp     r12, 1
+    jne     .sc_str_loop
+    movzx   ebx, byte [rdi]
+    jmp     .sc_char_loop
+
+.sc_str_loop:
+    ; Needle len >= 2
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sc_done
+    ; Check if haystack[0..r12-1] matches needle[0..r12-1]
+    xor     rcx, rcx
+.sc_match_loop:
+    cmp     rcx, r12
+    jge     .sc_matched
+    mov     al, [rsi + rcx]
+    test    al, al
+    jz      .sc_done            ; reached end of haystack
+    cmp     al, [rdi + rcx]
+    jne     .sc_no_match
+    inc     rcx
+    jmp     .sc_match_loop
+
+.sc_matched:
+    inc     r14
+    add     rsi, r12            ; advance past non-overlapping match
+    jmp     .sc_str_loop
+
+.sc_no_match:
+    inc     rsi
+    jmp     .sc_str_loop
+
+.sc_done:
+    mov     rax, r14
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_list_count:
+    ; RCX = list_ptr, RDX = item
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+    xor     r13, r13            ; count = 0
+    test    rcx, rcx
+    jz      .lc_done
+    mov     rbx, rcx            ; list
+    mov     rsi, rdx            ; item
+    mov     rdi, [rbx]          ; length
+    xor     r12, r12            ; index = 0
+.lc_loop:
+    cmp     r12, rdi
+    jge     .lc_done
+    mov     rax, [rbx + r12 * 8 + 8]
+    cmp     rax, rsi
+    je      .lc_inc
+    ; If both are >= 65536, try str_cmp
+    cmp     rsi, 65536
+    jb      .lc_next
+    cmp     rax, 65536
+    jb      .lc_next
+    mov     rcx, rax
+    mov     rdx, rsi
+    sub     rsp, 32
+    call    _pyfasm_str_cmp
+    add     rsp, 32
+    test    eax, eax
+    jz      .lc_next
+.lc_inc:
+    inc     r13
+.lc_next:
+    inc     r12
+    jmp     .lc_loop
+.lc_done:
+    mov     rax, r13
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_str:
+    ; RCX = null-terminated string
+    ; Returns RAX = list_ptr of unique 1-character strings
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 320            ; 256 bytes for visited table + 32 shadow space + alignment
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .sfs_empty
+
+    mov     rsi, rcx            ; rsi = string ptr
+
+    ; Zero-out 256-byte visited array on stack
+    lea     rdi, [rsp + 32]
+    mov     ecx, 32             ; 32 * 8 = 256 bytes
+    xor     eax, eax
+    rep stosq
+
+    ; Allocate list for up to 256 elements: 256 * 8 + 16 = 2064 bytes
+    mov     ecx, 2064
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     rbx, rax            ; rbx = list_ptr
+    mov     qword [rbx], 0      ; length = 0
+
+.sfs_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sfs_done
+
+    lea     rdi, [rsp + 32]
+    cmp     byte [rdi + rax], 0
+    jne     .sfs_next
+
+    ; Mark as visited
+    mov     byte [rdi + rax], 1
+
+    ; Allocate 16-byte memory for 1-character string: [char, 0]
+    mov     r14, rax
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     byte [rax], r14b
+    mov     byte [rax + 1], 0
+
+    ; Append to list
+    mov     rcx, rbx            ; list
+    mov     rdx, rax            ; item (1-char string)
+    sub     rsp, 32
+    call    _pyfasm_list_append
+    add     rsp, 32
+
+.sfs_next:
+    inc     rsi
+    jmp     .sfs_loop
+
+.sfs_done:
+    mov     rax, rbx
+    jmp     .sfs_ret
+
+.sfs_empty:
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_list_create
+    add     rsp, 32
+.sfs_ret:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_list:
+    ; RCX = list_ptr [len, elt0, elt1, ...]
+    ; Returns RAX = new list_ptr with unique elements
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .sfl_empty
+
+    mov     rbx, rcx            ; rbx = source list
+    mov     r12, [rbx]          ; length
+    test    r12, r12
+    jz      .sfl_empty
+
+    ; Allocate new list
+    lea     rcx, [r12 * 8 + 16]
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     rdi, rax            ; rdi = new unique list
+    mov     qword [rdi], 0      ; length = 0
+
+    xor     r13, r13            ; src idx = 0
+.sfl_loop:
+    cmp     r13, r12
+    jge     .sfl_done
+    mov     rdx, [rbx + r13 * 8 + 8] ; candidate item
+    mov     rcx, rdi            ; new list
+    sub     rsp, 32
+    call    _pyfasm_list_contains
+    add     rsp, 32
+    test    eax, eax
+    jnz     .sfl_next           ; already in unique list
+
+    ; Append to new list
+    mov     rcx, rdi
+    mov     rdx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    _pyfasm_list_append
+    add     rsp, 32
+.sfl_next:
+    inc     r13
+    jmp     .sfl_loop
+
+.sfl_done:
+    mov     rax, rdi
+    jmp     .sfl_ret
+
+.sfl_empty:
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_list_create
+    add     rsp, 32
+.sfl_ret:
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_iterable:
+    ; RCX = str or list
+    test    rcx, rcx
+    jz      .sfi_empty
+    cmp     qword [rcx], 1000000
+    ja      _pyfasm_set_from_str
+    cmp     byte [rcx], 0
+    je      .sfi_empty
+    movzx   eax, byte [rcx]
+    cmp     al, 32
+    jb      _pyfasm_set_from_list
+    cmp     al, 126
+    ja      _pyfasm_set_from_list
+    movzx   edx, byte [rcx + 1]
+    test    dl, dl
+    jz      _pyfasm_set_from_str
+    cmp     dl, 32
+    jb      _pyfasm_set_from_list
+    cmp     dl, 126
+    ja      _pyfasm_set_from_list
+    jmp     _pyfasm_set_from_str
+
+.sfi_empty:
+    mov     ecx, 16
+    jmp     _pyfasm_list_create
+
 _pyfasm_list_contains:
     ; RCX = list_ptr, RDX = item
     push    rbp
@@ -3871,6 +4206,62 @@ _pyfasm_math_gcd:
     mov     rcx, rdx                ; b = remainder
     jmp     .gcd_loop
 .gcd_done:
+    ret
+
+_pyfasm_math_gcd_list:
+    ; RCX = list_ptr [len, elt0, elt1, ...]
+    ; Returns RAX = GCD of all elements
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .mgl_zero
+
+    mov     rbx, rcx
+    mov     rdi, [rbx]          ; length
+    test    rdi, rdi
+    jz      .mgl_zero
+
+    ; First element
+    mov     rax, [rbx + 8]
+    test    rax, rax
+    jns     .mgl_chk1
+    neg     rax
+.mgl_chk1:
+    mov     r12, 1              ; index = 1
+.mgl_loop:
+    cmp     r12, rdi
+    jge     .mgl_done
+
+    mov     rdx, [rbx + r12 * 8 + 8] ; b = elt[i]
+    mov     rcx, rax                 ; a = current gcd
+    sub     rsp, 32
+    call    _pyfasm_math_gcd         ; rax = gcd(a, b)
+    add     rsp, 32
+    inc     r12
+    jmp     .mgl_loop
+
+.mgl_done:
+    jmp     .mgl_ret
+
+.mgl_zero:
+    xor     eax, eax
+.mgl_ret:
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 math_lcm:
@@ -9821,6 +10212,341 @@ _pyfasm_set_remove:
 _pyfasm_set_len:
     jmp     _pyfasm_dict_len
 
+_pyfasm_str_count:
+    ; RCX = str (haystack), RDX = sub (needle, can be string pointer or single char)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    xor     r14, r14            ; count = 0
+    test    rcx, rcx
+    jz      .sc_done
+    test    rdx, rdx
+    jz      .sc_done
+    mov     rsi, rcx            ; rsi = haystack
+    mov     rdi, rdx            ; rdi = needle
+
+    ; Check if needle is a pointer (>= 65536) or single char (< 65536)
+    cmp     rdi, 65536
+    jae     .sc_needle_is_str
+
+    ; Needle is single char byte
+    movzx   ebx, dil
+    test    bl, bl
+    jz      .sc_done
+.sc_char_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sc_done
+    cmp     al, bl
+    jne     .sc_char_next
+    inc     r14
+.sc_char_next:
+    inc     rsi
+    jmp     .sc_char_loop
+
+.sc_needle_is_str:
+    ; Needle is a string pointer
+    mov     rcx, rdi
+    sub     rsp, 32
+    call    _pyfasm_str_len
+    add     rsp, 32
+    mov     r12, rax            ; r12 = needle len
+    test    r12, r12
+    jz      .sc_done
+
+    ; If needle len is 1, optimize to char loop
+    cmp     r12, 1
+    jne     .sc_str_loop
+    movzx   ebx, byte [rdi]
+    jmp     .sc_char_loop
+
+.sc_str_loop:
+    ; Needle len >= 2
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sc_done
+    ; Check if haystack[0..r12-1] matches needle[0..r12-1]
+    xor     rcx, rcx
+.sc_match_loop:
+    cmp     rcx, r12
+    jge     .sc_matched
+    mov     al, [rsi + rcx]
+    test    al, al
+    jz      .sc_done            ; reached end of haystack
+    cmp     al, [rdi + rcx]
+    jne     .sc_no_match
+    inc     rcx
+    jmp     .sc_match_loop
+
+.sc_matched:
+    inc     r14
+    add     rsi, r12            ; advance past non-overlapping match
+    jmp     .sc_str_loop
+
+.sc_no_match:
+    inc     rsi
+    jmp     .sc_str_loop
+
+.sc_done:
+    mov     rax, r14
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_list_count:
+    ; RCX = list_ptr, RDX = item
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+    xor     r13, r13            ; count = 0
+    test    rcx, rcx
+    jz      .lc_done
+    mov     rbx, rcx            ; list
+    mov     rsi, rdx            ; item
+    mov     rdi, [rbx]          ; length
+    xor     r12, r12            ; index = 0
+.lc_loop:
+    cmp     r12, rdi
+    jge     .lc_done
+    mov     rax, [rbx + r12 * 8 + 8]
+    cmp     rax, rsi
+    je      .lc_inc
+    ; If both are >= 65536, try str_cmp
+    cmp     rsi, 65536
+    jb      .lc_next
+    cmp     rax, 65536
+    jb      .lc_next
+    mov     rcx, rax
+    mov     rdx, rsi
+    sub     rsp, 32
+    call    _pyfasm_str_cmp
+    add     rsp, 32
+    test    eax, eax
+    jz      .lc_next
+.lc_inc:
+    inc     r13
+.lc_next:
+    inc     r12
+    jmp     .lc_loop
+.lc_done:
+    mov     rax, r13
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_str:
+    ; RCX = null-terminated string
+    ; Returns RAX = list_ptr of unique 1-character strings
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 320            ; 256 bytes for visited table + 32 shadow space + alignment
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .sfs_empty
+
+    mov     rsi, rcx            ; rsi = string ptr
+
+    ; Zero-out 256-byte visited array on stack
+    lea     rdi, [rsp + 32]
+    mov     ecx, 32             ; 32 * 8 = 256 bytes
+    xor     eax, eax
+    rep stosq
+
+    ; Allocate list for up to 256 elements: 256 * 8 + 16 = 2064 bytes
+    mov     ecx, 2064
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     rbx, rax            ; rbx = list_ptr
+    mov     qword [rbx], 0      ; length = 0
+
+.sfs_loop:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .sfs_done
+
+    lea     rdi, [rsp + 32]
+    cmp     byte [rdi + rax], 0
+    jne     .sfs_next
+
+    ; Mark as visited
+    mov     byte [rdi + rax], 1
+
+    ; Allocate 16-byte memory for 1-character string: [char, 0]
+    mov     r14, rax
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     byte [rax], r14b
+    mov     byte [rax + 1], 0
+
+    ; Append to list
+    mov     rcx, rbx            ; list
+    mov     rdx, rax            ; item (1-char string)
+    sub     rsp, 32
+    call    _pyfasm_list_append
+    add     rsp, 32
+
+.sfs_next:
+    inc     rsi
+    jmp     .sfs_loop
+
+.sfs_done:
+    mov     rax, rbx
+    jmp     .sfs_ret
+
+.sfs_empty:
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_list_create
+    add     rsp, 32
+.sfs_ret:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_list:
+    ; RCX = list_ptr [len, elt0, elt1, ...]
+    ; Returns RAX = new list_ptr with unique elements
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .sfl_empty
+
+    mov     rbx, rcx            ; rbx = source list
+    mov     r12, [rbx]          ; length
+    test    r12, r12
+    jz      .sfl_empty
+
+    ; Allocate new list
+    lea     rcx, [r12 * 8 + 16]
+    sub     rsp, 32
+    call    _pyfasm_alloc
+    add     rsp, 32
+    mov     rdi, rax            ; rdi = new unique list
+    mov     qword [rdi], 0      ; length = 0
+
+    xor     r13, r13            ; src idx = 0
+.sfl_loop:
+    cmp     r13, r12
+    jge     .sfl_done
+    mov     rdx, [rbx + r13 * 8 + 8] ; candidate item
+    mov     rcx, rdi            ; new list
+    sub     rsp, 32
+    call    _pyfasm_list_contains
+    add     rsp, 32
+    test    eax, eax
+    jnz     .sfl_next           ; already in unique list
+
+    ; Append to new list
+    mov     rcx, rdi
+    mov     rdx, [rbx + r13 * 8 + 8]
+    sub     rsp, 32
+    call    _pyfasm_list_append
+    add     rsp, 32
+.sfl_next:
+    inc     r13
+    jmp     .sfl_loop
+
+.sfl_done:
+    mov     rax, rdi
+    jmp     .sfl_ret
+
+.sfl_empty:
+    mov     ecx, 16
+    sub     rsp, 32
+    call    _pyfasm_list_create
+    add     rsp, 32
+.sfl_ret:
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_set_from_iterable:
+    ; RCX = str or list
+    test    rcx, rcx
+    jz      .sfi_empty
+    cmp     qword [rcx], 1000000
+    ja      _pyfasm_set_from_str
+    cmp     byte [rcx], 0
+    je      .sfi_empty
+    movzx   eax, byte [rcx]
+    cmp     al, 32
+    jb      _pyfasm_set_from_list
+    cmp     al, 126
+    ja      _pyfasm_set_from_list
+    movzx   edx, byte [rcx + 1]
+    test    dl, dl
+    jz      _pyfasm_set_from_str
+    cmp     dl, 32
+    jb      _pyfasm_set_from_list
+    cmp     dl, 126
+    ja      _pyfasm_set_from_list
+    jmp     _pyfasm_set_from_str
+
+.sfi_empty:
+    mov     ecx, 16
+    jmp     _pyfasm_list_create
+
 _pyfasm_list_contains:
     ; RCX = list_ptr, RDX = item
     push    rbp
@@ -11342,6 +12068,62 @@ _pyfasm_math_gcd:
     mov     rcx, rdx                ; b = remainder
     jmp     .gcd_loop
 .gcd_done:
+    ret
+
+_pyfasm_math_gcd_list:
+    ; RCX = list_ptr [len, elt0, elt1, ...]
+    ; Returns RAX = GCD of all elements
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+
+    test    rcx, rcx
+    jz      .mgl_zero
+
+    mov     rbx, rcx
+    mov     rdi, [rbx]          ; length
+    test    rdi, rdi
+    jz      .mgl_zero
+
+    ; First element
+    mov     rax, [rbx + 8]
+    test    rax, rax
+    jns     .mgl_chk1
+    neg     rax
+.mgl_chk1:
+    mov     r12, 1              ; index = 1
+.mgl_loop:
+    cmp     r12, rdi
+    jge     .mgl_done
+
+    mov     rdx, [rbx + r12 * 8 + 8] ; b = elt[i]
+    mov     rcx, rax                 ; a = current gcd
+    sub     rsp, 32
+    call    _pyfasm_math_gcd         ; rax = gcd(a, b)
+    add     rsp, 32
+    inc     r12
+    jmp     .mgl_loop
+
+.mgl_done:
+    jmp     .mgl_ret
+
+.mgl_zero:
+    xor     eax, eax
+.mgl_ret:
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 math_lcm:
