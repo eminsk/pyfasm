@@ -247,3 +247,65 @@ print("SUCCESS_ITERTOOLS_FUNCTOOLS")
         res = subprocess.run([exe], capture_output=True, text=True, timeout=10)
         assert res.returncode == 0, f"Runtime error: {res.stderr}"
         assert "SUCCESS_ITERTOOLS_FUNCTOOLS" in res.stdout
+
+
+def test_user_solution_minimum_max_value():
+    """Verifies competitive programming snippet with class-level lambda, generator expression, walrus, pow(0.5), next(gen, default), bit shifts, and assert."""
+    code = """
+class Solution:
+    minimumMaxValue = lambda self, n, index, value: (
+        -1
+        if value < 2
+        or value
+        - (
+            p := (
+                next(
+                    (
+                        d
+                        for d in range(3, int(value**0.5) + 1, 2)
+                        if not value % d
+                    ),
+                    value,
+                )
+                if value & 1
+                else 2
+            )
+        )
+        < (index << 1)
+        else value + (p + ((n - 2 - index) << 1) if index < n - 1 else 0)
+    )
+
+if __name__ == "__main__":
+    solver = Solution()
+    test_cases = [
+        (4, 2, 8, 10),
+        (2, 1, 3, -1),
+        (2, 0, 3, 6),
+        (2, 0, 1, -1),
+        (3, 2, 6, 6),
+        (4, 3, 9, 9),
+        (5, 3, 9, 12),
+    ]
+    count = 0
+    for n_val, idx_val, val, expected in test_cases:
+        result = solver.minimumMaxValue(n_val, idx_val, val)
+        assert result == expected
+        print("All test cases passed successfully.")
+        count = count + 1
+
+    print("All test cases passed successfully.")
+    assert count == 7
+    print("SUCCESS_USER_MINIMUM_MAX_VALUE")
+"""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "user_min_max.py"
+        src.write_text(code, encoding="utf-8")
+        compiler = PyFasmCompiler()
+        ok, exe, log = compiler.compile_file(str(src))
+        assert ok, f"Compilation failed: {log}"
+        res = subprocess.run([exe], capture_output=True, text=True, timeout=10)
+        assert res.returncode == 0, f"Runtime error: {res.stderr}"
+        assert "SUCCESS_USER_MINIMUM_MAX_VALUE" in res.stdout
+        lines = [l.strip() for l in res.stdout.strip().split("\n") if l.strip() == "All test cases passed successfully."]
+        assert len(lines) == 8, f"Expected 8 prints of success message, got {len(lines)}"
+

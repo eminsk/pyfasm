@@ -2356,7 +2356,7 @@ include 'functions.inc'
 
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
-            if (lt.is_float() or rt.is_float()) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv)):
+            if (lt.is_float() or rt.is_float()) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Pow)):
                 self._generate_expr(expr.left)
                 if not lt.is_float():
                     self.emit("cvtsi2sd xmm0, rax")
@@ -2378,6 +2378,40 @@ include 'functions.inc'
                     self.emit("mulsd xmm0, xmm1")
                 elif isinstance(expr.op, (ast.Div, ast.FloorDiv)):
                     self.emit("divsd xmm0, xmm1")
+                elif isinstance(expr.op, ast.Pow):
+                    lbl_pow_sqrt = self.new_label("pow_sqrt")
+                    lbl_pow_end = self.new_label("pow_end")
+                    lbl_pow_neg = self.new_label("pow_neg")
+                    lbl_pow_pos = self.new_label("pow_pos")
+                    lbl_pow_neg_loop = self.new_label("pow_neg_loop")
+                    # Check if exponent == 0.5 (0x3FE0000000000000)
+                    self.emit("mov r10, 0x3FE0000000000000")
+                    self.emit("cmp r11, r10")
+                    self.emit(f"je {lbl_pow_sqrt}")
+                    # General integer power on float base:
+                    self.emit("cvttsd2si rcx, xmm1")
+                    self.emit("movq xmm2, xmm0", "base")
+                    self.emit("mov rax, 0x3FF0000000000000", "1.0")
+                    self.emit("movq xmm0, rax")
+                    self.emit("test rcx, rcx")
+                    self.emit(f"js {lbl_pow_neg}")
+                    self.emit_raw(f"{lbl_pow_pos}:")
+                    self.emit("test rcx, rcx")
+                    self.emit(f"jz {lbl_pow_end}")
+                    self.emit("mulsd xmm0, xmm2")
+                    self.emit("dec rcx")
+                    self.emit(f"jmp {lbl_pow_pos}")
+                    self.emit_raw(f"{lbl_pow_neg}:")
+                    self.emit("neg rcx")
+                    self.emit_raw(f"{lbl_pow_neg_loop}:")
+                    self.emit("test rcx, rcx")
+                    self.emit(f"jz {lbl_pow_end}")
+                    self.emit("divsd xmm0, xmm2")
+                    self.emit("dec rcx")
+                    self.emit(f"jmp {lbl_pow_neg_loop}")
+                    self.emit_raw(f"{lbl_pow_sqrt}:")
+                    self.emit("sqrtsd xmm0, xmm0")
+                    self.emit_raw(f"{lbl_pow_end}:")
                 self.emit("movq rax, xmm0")
                 return
 
@@ -4397,12 +4431,34 @@ include 'functions.inc'
             return
 
         if func_name == "next" and call.args:
-            self._generate_expr(call.args[0])
-            self.emit("mov rcx, rax", "gen_ptr")
-            self.emit("sub rsp, 32", "shadow space for gen_next")
-            self.emit("call _pyfasm_gen_next")
-            self.emit("add rsp, 32", "restore shadow space")
-            return
+            if len(call.args) == 1:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "gen_ptr")
+                self.emit("sub rsp, 32", "shadow space for gen_next")
+                self.emit("call _pyfasm_gen_next")
+                self.emit("add rsp, 32", "restore shadow space")
+                return
+            else:
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "gen_ptr")
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "default_val")
+                self.emit("mov rcx, [rsp + 8]", "gen_ptr")
+                self.emit("sub rsp, 32", "shadow space for gen_next")
+                self.emit("call _pyfasm_gen_next")
+                self.emit("add rsp, 32", "restore shadow space")
+                lbl_check_exhausted = self.new_label("next_check_exhausted")
+                lbl_done = self.new_label("next_done")
+                self.emit("mov r10, [rsp + 8]", "gen_ptr")
+                self.emit("test r10, r10")
+                self.emit(f"jz {lbl_check_exhausted}")
+                self.emit("cmp qword [r10 + 16], 1", "check done flag")
+                self.emit(f"jne {lbl_done}")
+                self.emit_raw(f"{lbl_check_exhausted}:")
+                self.emit("mov rax, [rsp]", "use default value")
+                self.emit_raw(f"{lbl_done}:")
+                self.emit("add rsp, 16", "cleanup default_val + gen_ptr")
+                return
 
         # Built-in range(...) constructor as an expression
         if func_name == "range" and call.args:
