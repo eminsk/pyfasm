@@ -1290,7 +1290,7 @@ class AstAnalyzer:
                                 is_arg=False
                             )
                             offset += 8
-                        elif not local_vars[vname].is_arg and local_vars[vname].var_type == TYPE_INT and t_type != TYPE_INT:
+                        elif local_vars[vname].var_type == TYPE_INT and t_type != TYPE_INT:
                             local_vars[vname].var_type = t_type
                 elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id

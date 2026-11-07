@@ -4375,25 +4375,38 @@ include 'functions.inc'
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_print_str")
                 else:
-                    arg_type = self._infer_expr_type(arg)
-                    self._generate_expr(arg)
-                    if arg_type.is_str():
-                        self.emit("mov rcx, rax")
+                    if isinstance(arg, ast.Constant) and arg.value is None:
+                        self.emit("lea rcx, [none_str]")
                         self.emit("call _pyfasm_print_str")
-                    elif arg_type.is_float():
-                        self.emit("movq xmm0, rax")
-                        self.emit("call _pyfasm_print_float")
-                    elif arg_type.is_int() or arg_type.is_bool():
-                        self.emit("mov rcx, rax")
-                        self.emit("call _pyfasm_print_int")
                     else:
-                        self.emit("mov rcx, rax")
-                        # Use runtime auto-detect only for truly dynamic untyped containers
-                        if isinstance(arg, (ast.Call, ast.Subscript)):
-                            self.emit("call _pyfasm_print_auto")
-                        else:
+                        arg_type = self._infer_expr_type(arg)
+                        self._generate_expr(arg)
+                        if arg_type.is_str():
+                            self.emit("mov rcx, rax")
+                            self.emit("call _pyfasm_print_str")
+                        elif arg_type.is_float():
+                            self.emit("movq xmm0, rax")
+                            self.emit("call _pyfasm_print_float")
+                        elif arg_type.is_list() or arg_type.is_tuple():
+                            self.emit("mov rcx, rax")
+                            self.emit("call _pyfasm_print_list")
+                        elif arg_type.is_int() or arg_type.is_bool():
+                            self.emit("mov rcx, rax")
                             self.emit("call _pyfasm_print_int")
+                        else:
+                            self.emit("mov rcx, rax")
+                            self.emit("call _pyfasm_print_auto")
             self.emit("call _pyfasm_print_newline")
+            return
+
+        if func_name == "input":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "prompt string")
+                self.emit("call _pyfasm_print_str")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_input")
+            self.emit("call _pyfasm_input")
+            self.emit("add rsp, 32", "restore shadow space")
             return
 
         if func_name == "print_str":

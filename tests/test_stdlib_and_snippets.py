@@ -309,3 +309,44 @@ if __name__ == "__main__":
         lines = [l.strip() for l in res.stdout.strip().split("\n") if l.strip() == "All test cases passed successfully."]
         assert len(lines) == 8, f"Expected 8 prints of success message, got {len(lines)}"
 
+
+def test_user_strange_list_reassignment():
+    """Verifies default argument None re-assigned to list inside function and formatted via print."""
+    code = """
+def strange(a=None):
+    if a is None: a = []
+    a.append(len(a))
+    print(a)
+
+strange()
+print("SUCCESS_STRANGE")
+"""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "strange.py"
+        src.write_text(code, encoding="utf-8")
+        compiler = PyFasmCompiler()
+        ok, exe, log = compiler.compile_file(str(src))
+        assert ok, f"Compilation failed: {log}"
+        res = subprocess.run([exe], capture_output=True, text=True, timeout=10)
+        assert res.returncode == 0, f"Runtime error: {res.stderr}"
+        assert "[0]" in res.stdout
+        assert "SUCCESS_STRANGE" in res.stdout
+
+
+def test_user_input_built_in():
+    """Verifies built-in input() function with prompt and string concatenation."""
+    code = """
+a = input("press enter: ")
+print("hi world " + a)
+"""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "test_input.py"
+        src.write_text(code, encoding="utf-8")
+        compiler = PyFasmCompiler()
+        ok, exe, log = compiler.compile_file(str(src))
+        assert ok, f"Compilation failed: {log}"
+        res = subprocess.run([exe], input="antigravity\n", capture_output=True, text=True, timeout=10)
+        assert res.returncode == 0, f"Runtime error: {res.stderr}"
+        assert "hi world antigravity" in res.stdout
+
+

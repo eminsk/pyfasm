@@ -31,8 +31,11 @@ section '.data' data readable writeable
     crlf_str        db 13, 10, 0
     minus_str       db '-', 0
     dot_str         db '.', 0
+    none_str        db 'None', 0
     flt_1m          dq 1000000.0
     flt_zero        dq 0.0
+    align 8
+    inp_buf         rb 4096
 
     ; --- Native Win32 GUI Runtime Data ---
     _pyfasm_wnd_class   db 'PyFasmWindowClass', 0
@@ -3298,9 +3301,19 @@ _pyfasm_int_to_str:
 
 _pyfasm_print_auto:
     ; RCX = value (could be int or string pointer)
-    ; Auto-detects type at runtime: < 65536 = integer, >= 65536 = string pointer
     cmp     rcx, 65536
     jb      _pyfasm_print_int
+    movzx   eax, byte [rcx]
+    cmp     al, 9
+    je      _pyfasm_print_str
+    cmp     al, 10
+    je      _pyfasm_print_str
+    cmp     al, 13
+    je      _pyfasm_print_str
+    cmp     al, 32
+    jb      _pyfasm_print_int
+    cmp     al, 126
+    ja      _pyfasm_print_int
     jmp     _pyfasm_print_str
 
 _pyfasm_print_int:
@@ -3350,6 +3363,139 @@ _pyfasm_print_int:
     call    _pyfasm_print_str
 
     lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_print_list:
+    ; RCX = list pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jnz     .pl_not_null
+    mov     rcx, 91 ; open bracket
+    call    _pyfasm_print_char
+    mov     rcx, 93 ; close bracket
+    call    _pyfasm_print_char
+    jmp     .pl_ret
+
+.pl_not_null:
+    mov     rcx, 91 ; open bracket
+    call    _pyfasm_print_char
+    mov     r12, [rbx] ; length
+    xor     r13, r13   ; index = 0
+
+.pl_loop:
+    cmp     r13, r12
+    jge     .pl_end
+    test    r13, r13
+    jz      .pl_elem
+    mov     rcx, 44 ; comma
+    call    _pyfasm_print_char
+    mov     rcx, 32 ; space
+    call    _pyfasm_print_char
+
+.pl_elem:
+    mov     rcx, [rbx + r13 * 8 + 8] ; element
+    call    _pyfasm_print_auto
+    inc     r13
+    jmp     .pl_loop
+
+.pl_end:
+    mov     rcx, 93 ; close bracket
+    call    _pyfasm_print_char
+
+.pl_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_input:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rcx, [hStdIn]
+    test    rcx, rcx
+    jnz     .inp_read
+    mov     ecx, -10                ; STD_INPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdIn], rax
+    mov     rcx, rax
+
+.inp_read:
+    lea     rdx, [inp_buf]
+    mov     r8d, 4095
+    lea     r9, [bytesRead]
+    mov     dword [bytesRead], 0
+    mov     qword [rsp + 32], 0
+    call    [ReadFile]
+    test    eax, eax
+    jz      .inp_empty
+    mov     eax, dword [bytesRead]
+    test    eax, eax
+    jz      .inp_empty
+    mov     edi, eax
+    lea     rsi, [inp_buf]
+    mov     byte [rsi + rdi], 0
+
+.inp_strip:
+    test    rdi, rdi
+    jz      .inp_alloc
+    movzx   eax, byte [rsi + rdi - 1]
+    cmp     al, 10                  ; LF
+    je      .inp_dec
+    cmp     al, 13                  ; CR
+    je      .inp_dec
+    jmp     .inp_alloc
+.inp_dec:
+    dec     rdi
+    mov     byte [rsi + rdi], 0
+    jmp     .inp_strip
+
+.inp_alloc:
+    lea     rcx, [rdi + 1]
+    mov     rbx, rdi
+    call    _pyfasm_alloc
+    mov     r12, rax
+    mov     rdi, r12
+    lea     rsi, [inp_buf]
+    mov     rcx, rbx
+    rep     movsb
+    mov     byte [rdi], 0
+    mov     rax, r12
+    jmp     .inp_ret
+
+.inp_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+
+.inp_ret:
+    lea     rsp, [rbp - 32]
+    pop     r12
     pop     rdi
     pop     rsi
     pop     rbx
@@ -7364,8 +7510,11 @@ section '.data' data readable writeable
     crlf_str        db 13, 10, 0
     minus_str       db '-', 0
     dot_str         db '.', 0
+    none_str        db 'None', 0
     flt_1m          dq 1000000.0
     flt_zero        dq 0.0
+    align 8
+    inp_buf         rb 4096
     align 8
     _pyfasm_int_buf rb 32
 """
@@ -9684,9 +9833,19 @@ _pyfasm_int_to_str:
 
 _pyfasm_print_auto:
     ; RCX = value (could be int or string pointer)
-    ; Auto-detects type at runtime: < 65536 = integer, >= 65536 = string pointer
     cmp     rcx, 65536
     jb      _pyfasm_print_int
+    movzx   eax, byte [rcx]
+    cmp     al, 9
+    je      _pyfasm_print_str
+    cmp     al, 10
+    je      _pyfasm_print_str
+    cmp     al, 13
+    je      _pyfasm_print_str
+    cmp     al, 32
+    jb      _pyfasm_print_int
+    cmp     al, 126
+    ja      _pyfasm_print_int
     jmp     _pyfasm_print_str
 
 _pyfasm_print_int:
@@ -9736,6 +9895,139 @@ _pyfasm_print_int:
     call    _pyfasm_print_str
 
     lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_print_list:
+    ; RCX = list pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jnz     .pl_not_null
+    mov     rcx, 91 ; open bracket
+    call    _pyfasm_print_char
+    mov     rcx, 93 ; close bracket
+    call    _pyfasm_print_char
+    jmp     .pl_ret
+
+.pl_not_null:
+    mov     rcx, 91 ; open bracket
+    call    _pyfasm_print_char
+    mov     r12, [rbx] ; length
+    xor     r13, r13   ; index = 0
+
+.pl_loop:
+    cmp     r13, r12
+    jge     .pl_end
+    test    r13, r13
+    jz      .pl_elem
+    mov     rcx, 44 ; comma
+    call    _pyfasm_print_char
+    mov     rcx, 32 ; space
+    call    _pyfasm_print_char
+
+.pl_elem:
+    mov     rcx, [rbx + r13 * 8 + 8] ; element
+    call    _pyfasm_print_auto
+    inc     r13
+    jmp     .pl_loop
+
+.pl_end:
+    mov     rcx, 93 ; close bracket
+    call    _pyfasm_print_char
+
+.pl_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_input:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rcx, [hStdIn]
+    test    rcx, rcx
+    jnz     .inp_read
+    mov     ecx, -10                ; STD_INPUT_HANDLE
+    call    [GetStdHandle]
+    mov     [hStdIn], rax
+    mov     rcx, rax
+
+.inp_read:
+    lea     rdx, [inp_buf]
+    mov     r8d, 4095
+    lea     r9, [bytesRead]
+    mov     dword [bytesRead], 0
+    mov     qword [rsp + 32], 0
+    call    [ReadFile]
+    test    eax, eax
+    jz      .inp_empty
+    mov     eax, dword [bytesRead]
+    test    eax, eax
+    jz      .inp_empty
+    mov     edi, eax
+    lea     rsi, [inp_buf]
+    mov     byte [rsi + rdi], 0
+
+.inp_strip:
+    test    rdi, rdi
+    jz      .inp_alloc
+    movzx   eax, byte [rsi + rdi - 1]
+    cmp     al, 10                  ; LF
+    je      .inp_dec
+    cmp     al, 13                  ; CR
+    je      .inp_dec
+    jmp     .inp_alloc
+.inp_dec:
+    dec     rdi
+    mov     byte [rsi + rdi], 0
+    jmp     .inp_strip
+
+.inp_alloc:
+    lea     rcx, [rdi + 1]
+    mov     rbx, rdi
+    call    _pyfasm_alloc
+    mov     r12, rax
+    mov     rdi, r12
+    lea     rsi, [inp_buf]
+    mov     rcx, rbx
+    rep     movsb
+    mov     byte [rdi], 0
+    mov     rax, r12
+    jmp     .inp_ret
+
+.inp_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+
+.inp_ret:
+    lea     rsp, [rbp - 32]
+    pop     r12
     pop     rdi
     pop     rsi
     pop     rbx
