@@ -473,6 +473,56 @@ class X64CodeGen:
         self.emit("call _pyfasm_create_button")
         self.emit("add rsp, 64")
 
+    def _generate_checkbox_control(self, call: ast.Call, target_name: str) -> None:
+        chk_text = self._get_kwarg_string_val(call, "text")
+        if not chk_text and call.args:
+            first_arg = call.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                chk_text = first_arg.value
+            elif len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
+                chk_text = call.args[1].value
+        if not chk_text:
+            chk_text = "Checkbutton"
+
+        cb_symbol = None
+        cmd_node = self._extract_kwarg(call, "command")
+        if cmd_node:
+            if isinstance(cmd_node, ast.Attribute):
+                attr = cmd_node.attr
+                current_cls = getattr(self.current_func, "class_name", None)
+                cand = f"{current_cls}_{attr}" if current_cls else attr
+                if cand in self.module.functions:
+                    cb_symbol = cand
+                elif attr in self.module.functions:
+                    cb_symbol = attr
+                else:
+                    for fn_key in self.module.functions:
+                        if fn_key.endswith(f"_{attr}"):
+                            cb_symbol = fn_key
+                            break
+            elif isinstance(cmd_node, ast.Name):
+                if cmd_node.id in self.module.functions:
+                    cb_symbol = cmd_node.id
+
+        chk_id = self.gui_control_id
+        self.gui_control_id += 1
+
+        w, h = 220, 30
+        self._emit_string_pointer("rcx", chk_text)
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
+        self.emit(f"mov r9, {w}")
+        self.emit("sub rsp, 64")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {chk_id}")
+        if cb_symbol:
+            self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
+            self.emit("mov [rsp + 48], rax")
+        else:
+            self.emit("mov qword [rsp + 48], 0")
+        self.emit("call _pyfasm_create_checkbox")
+        self.emit("add rsp, 64")
+
     def _generate_edit_control(self, call: ast.Call, target_name: str) -> None:
         edit_text = self._get_kwarg_string_val(call, "placeholder_text") or self._get_kwarg_string_val(call, "text") or ""
         edit_id = self.gui_edit_id
@@ -3834,11 +3884,20 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return
 
-        if func_name in ("alert", "message_box"):
-            arg_regs = ["rcx", "rdx"]
-            for idx, arg in enumerate(call.args[:2]):
-                self._generate_expr(arg)
-                self.emit(f"mov {arg_regs[idx]}, rax")
+        if func_name in ("alert", "message_box") or prefix in ("messagebox", "msgbox") or attr_name in ("showinfo", "showerror", "showwarning"):
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "message text")
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "title text")
+                self.emit("pop rdx", "message text")
+            elif call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "message text")
+                self._emit_string_pointer("rcx", "Notice")
+            else:
+                self.emit("xor ecx, ecx")
+                self.emit("xor edx, edx")
             self.emit("sub rsp, 32")
             self.emit("call _pyfasm_message_box")
             self.emit("add rsp, 32")
@@ -4048,10 +4107,136 @@ include 'functions.inc'
                 self.emit("xor eax, eax")
                 return
 
-            # 4. Widget layout / visual configuration directives (safe no-op)
+            # 4. Widget configuration (configure / config)
+            if attr_name in ("configure", "config"):
+                text_kw = None
+                for kw in getattr(call, "keywords", []):
+                    if kw.arg == "text":
+                        text_kw = kw.value
+                        break
+                if text_kw:
+                    self._generate_expr(text_kw)
+                    self.emit("push rax", "new text value")
+                    if isinstance(call.func, ast.Attribute):
+                        self._generate_expr(call.func.value)
+                        self.emit("mov rcx, rax", "target control HWND")
+                    else:
+                        self.emit("xor ecx, ecx", "default control HWND")
+                    self.emit("pop rdx", "new text value")
+                    self.emit("sub rsp, 32")
+                    self.emit("call _pyfasm_set_text")
+                    self.emit("add rsp, 32")
+                    return
+                self.emit("xor eax, eax", f"safe no-op for GUI configuration '{attr_name}'")
+                return
+
+            # Canvas 2D Drawing Primitives
+            if attr_name == "create_line" and len(call.args) >= 4:
+                self._generate_expr(call.args[3])
+                self.emit("push rax", "y2")
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "x2")
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "y1")
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "x1")
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "canvas HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("pop rdx", "x1")
+                self.emit("pop r8", "y1")
+                self.emit("pop r9", "x2")
+                self.emit("sub rsp, 48")
+                self.emit("pop rax", "y2")
+                self.emit("mov [rsp + 32], rax")
+                self.emit("call _pyfasm_canvas_create_line")
+                self.emit("add rsp, 48")
+                return
+
+            if attr_name == "create_rectangle" and len(call.args) >= 4:
+                self._generate_expr(call.args[3])
+                self.emit("push rax", "y2")
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "x2")
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "y1")
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "x1")
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "canvas HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("pop rdx", "x1")
+                self.emit("pop r8", "y1")
+                self.emit("pop r9", "x2")
+                self.emit("sub rsp, 48")
+                self.emit("pop rax", "y2")
+                self.emit("mov [rsp + 32], rax")
+                self.emit("call _pyfasm_canvas_create_rectangle")
+                self.emit("add rsp, 48")
+                return
+
+            if attr_name == "create_oval" and len(call.args) >= 4:
+                self._generate_expr(call.args[3])
+                self.emit("push rax", "y2")
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "x2")
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "y1")
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "x1")
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "canvas HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("pop rdx", "x1")
+                self.emit("pop r8", "y1")
+                self.emit("pop r9", "x2")
+                self.emit("sub rsp, 48")
+                self.emit("pop rax", "y2")
+                self.emit("mov [rsp + 32], rax")
+                self.emit("call _pyfasm_canvas_create_oval")
+                self.emit("add rsp, 48")
+                return
+
+            if attr_name == "create_text" and len(call.args) >= 2:
+                text_val = None
+                for kw in getattr(call, "keywords", []):
+                    if kw.arg == "text":
+                        text_val = kw.value
+                        break
+                if not text_val and len(call.args) >= 3:
+                    text_val = call.args[2]
+                if text_val:
+                    self._generate_expr(text_val)
+                    self.emit("push rax", "text_ptr")
+                else:
+                    self.emit("push 0")
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "y")
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "x")
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "canvas HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("pop rdx", "x")
+                self.emit("pop r8", "y")
+                self.emit("pop r9", "text_ptr")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_canvas_create_text")
+                self.emit("add rsp, 32")
+                return
+
+            # 5. Widget layout / visual configuration directives (safe no-op)
             if attr_name in ("pack", "grid", "place", "pack_propagate", "grid_propagate",
                              "grid_columnconfigure", "grid_rowconfigure", "focus_set", "select_range",
-                             "configure", "update_idletasks", "iconbitmap", "wm_iconphoto",
+                             "update_idletasks", "iconbitmap", "wm_iconphoto",
                              "set_appearance_mode", "set_default_color_theme", "set_widget_scaling",
                              "bind", "bind_all", "protocol", "title", "geometry", "minsize", "maxsize",
                              "resizable", "withdraw", "deiconify", "lift", "focus", "after", "destroy",
@@ -4064,7 +4249,7 @@ include 'functions.inc'
                 self.emit("xor eax, eax", f"safe no-op for GUI configuration '{attr_name}'")
                 return
 
-            # 5. Hotkeys (keyboard.hook / keyboard.add_hotkey)
+            # 6. Hotkeys (keyboard.hook / keyboard.add_hotkey)
             if any(k in func_dump_lower or k in call_name_lower for k in ("hook", "add_hotkey")):
                 self.emit("mov rcx, 1", "hotkey id 1")
                 self.emit("mov rdx, 19", "VK_PAUSE")
@@ -4075,28 +4260,33 @@ include 'functions.inc'
                 self.emit("xor eax, eax")
                 return
 
-            # 6. Buttons
+            # 7. Checkbuttons / Checkboxes
+            if any(k in call_name_lower for k in ("checkbutton", "ctkcheckbox", "checkbox")) or ("checkbox" in func_dump_lower or "checkbutton" in func_dump_lower):
+                self._generate_checkbox_control(call, call_name_lower)
+                return
+
+            # 8. Buttons
             if any(k in call_name_lower for k in ("ctkbutton", "pushbutton", "button")) or ("button" in func_dump_lower and "dict" not in func_dump_lower):
                 self._generate_button_control(call, call_name_lower)
                 return
 
-            # 7. Text entries / edit boxes
+            # 9. Text entries / edit boxes
             if any(k in call_name_lower for k in ("ctkentry", "lineedit", "textinput", "entry")) or ("entry" in func_dump_lower and "dict" not in func_dump_lower):
                 self._generate_edit_control(call, call_name_lower)
                 return
 
-            # 8. Static labels
+            # 10. Static labels
             if any(k in call_name_lower for k in ("ctklabel", "qlabel", "statictext", "label")) or "label" in func_dump_lower:
                 self._generate_label_control(call, call_name_lower)
                 return
 
-            # 9. Scrollable frame / list / tabview
+            # 11. Scrollable frame / list / tabview
             if any(k in call_name_lower for k in ("ctkscrollableframe", "scrollableframe", "ctktabview", "tabview", "listbox", "qlistwidget", "listview")) or any(k in func_dump_lower for k in ("scrollableframe", "tabview", "listbox")):
                 self._generate_listbox_control(call, call_name_lower)
                 return
 
-            # 10. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox)
-            if any(k == call_name_lower or k in call_name_lower.split(".") for k in ("ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton", "ctktextbox", "textbox")):
+            # 12. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox)
+            if any(k == call_name_lower or k in call_name_lower.split(".") for k in ("ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton", "ctktextbox", "textbox", "canvas", "ctkcanvas", "tkcanvas")):
                 if "gui" in self.features or "tray" in self.features or getattr(self.module, "is_gui_app", False):
                     self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
                 else:

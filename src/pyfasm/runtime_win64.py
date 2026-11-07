@@ -4873,8 +4873,7 @@ _pyfasm_create_button:
     ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn
     push    rbp
     mov     rbp, rsp
-    push    rbx
-    sub     rsp, 120
+    sub     rsp, 144
     and     rsp, -16
     mov     [rsp + 96], rcx
     mov     [rsp + 104], rdx
@@ -4892,14 +4891,14 @@ _pyfasm_create_button:
     mov     rax, 1000
     add     rax, [_pyfasm_ctrl_count]
 .btn_id_ok:
-    mov     [rsp + 56], rax
+    mov     [rsp + 112], rax
     mov     rax, [rbp + 64]
-    mov     [rsp + 48], rax
+    mov     [rsp + 120], rax
 
     call    _pyfasm_ensure_window
 
     ; Check if Search or Clear button already created
-    cmp     qword [rsp + 56], 1001      ; Search Button ID
+    cmp     qword [rsp + 112], 1001      ; Search Button ID
     jne     .chk_clear_id
     cmp     qword [_pyfasm_h_search_btn], 0
     jz      .do_create_btn
@@ -4909,7 +4908,7 @@ _pyfasm_create_button:
     ret
 
 .chk_clear_id:
-    cmp     qword [rsp + 56], 1002      ; Clear Button ID
+    cmp     qword [rsp + 112], 1002      ; Clear Button ID
     jne     .do_create_btn
     cmp     qword [_pyfasm_h_clear_btn], 0
     jz      .do_create_btn
@@ -4948,11 +4947,11 @@ _pyfasm_create_button:
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
-    mov     r12, [rsp + 64]
-    mov     [rsp + 56], r12
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
-    mov     rax, [rsp + 56]
+    mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
@@ -4961,6 +4960,108 @@ _pyfasm_create_button:
     mov     [_pyfasm_last_btn_hwnd], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
+
+    ; Register button callback if provided
+    mov     r9, [rsp + 120]
+    test    r9, r9
+    jz      .skip_btn_cb_reg
+    mov     rcx, [_pyfasm_ctrl_count]
+    cmp     rcx, 128
+    jge     .skip_btn_cb_reg
+    mov     r8, [rsp + 112]
+    mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
+    mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
+    inc     qword [_pyfasm_ctrl_count]
+.skip_btn_cb_reg:
+
+    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_checkbox:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 144
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .chk_h_ok
+    mov     rax, 30
+.chk_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .chk_id_ok
+    mov     rax, 2000
+    add     rax, [_pyfasm_ctrl_count]
+.chk_id_ok:
+    mov     [rsp + 112], rax
+    mov     rax, [rbp + 64]
+    mov     [rsp + 120], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     rcx, [rsp + 96]
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
+    mov     r10, [rsp + 104]
+    test    r10, r10
+    jnz     .chk_x_ok
+    mov     r10, [_pyfasm_layout_curr_x]
+.chk_x_ok:
+    mov     r11, [rsp + 80]
+    test    r11, r11
+    jnz     .chk_y_ok
+    mov     r11, [_pyfasm_layout_curr_y]
+    add     qword [_pyfasm_layout_curr_y], 36
+.chk_y_ok:
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .chk_w_ok
+    mov     rax, 220
+.chk_w_ok:
+
+    xor     ecx, ecx
+    lea     rdx, [szButtonClassW]
+    lea     r8, [_pyfasm_wide_buf]
+    mov     r9d, 50010003h          ; WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
+    mov     rax, [_pyfasm_h_wnd]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 112]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     [_pyfasm_last_btn_hwnd], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    ; Register checkbox callback if provided
+    mov     r9, [rsp + 120]
+    test    r9, r9
+    jz      .skip_chk_cb_reg
+    mov     rcx, [_pyfasm_ctrl_count]
+    cmp     rcx, 128
+    jge     .skip_chk_cb_reg
+    mov     r8, [rsp + 112]
+    mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
+    mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
+    inc     qword [_pyfasm_ctrl_count]
+.skip_chk_cb_reg:
 
     mov     rax, [_pyfasm_last_btn_hwnd]
     mov     rsp, rbp
@@ -5088,6 +5189,185 @@ _pyfasm_set_text:
     mov     rcx, rsi
     lea     rdx, [_pyfasm_wide_buf]
     call    [SetWindowTextW]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_create_line:
+    ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 96
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .ccl_h_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.ccl_h_ok:
+    mov     [rsp + 64], rcx     ; hwnd
+    mov     [rsp + 72], rdx     ; x1
+    mov     [rsp + 80], r8      ; y1
+    mov     [rsp + 88], r9      ; x2
+
+    mov     rcx, [rsp + 64]
+    call    [GetDC]
+    test    rax, rax
+    jz      .ccl_ret
+    mov     [rsp + 56], rax     ; hdc
+
+    ; MoveToEx(hdc, x1, y1, NULL)
+    mov     rcx, [rsp + 56]
+    mov     rdx, [rsp + 72]
+    mov     r8, [rsp + 80]
+    xor     r9, r9
+    call    [MoveToEx]
+
+    ; LineTo(hdc, x2, y2)
+    mov     rcx, [rsp + 56]
+    mov     rdx, [rsp + 88]
+    mov     r8, [rbp + 48]
+    call    [LineTo]
+
+    ; ReleaseDC(hwnd, hdc)
+    mov     rcx, [rsp + 64]
+    mov     rdx, [rsp + 56]
+    call    [ReleaseDC]
+
+.ccl_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_create_rectangle:
+    ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 96
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .ccr_h_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.ccr_h_ok:
+    mov     [rsp + 64], rcx     ; hwnd
+    mov     [rsp + 72], rdx     ; x1
+    mov     [rsp + 80], r8      ; y1
+    mov     [rsp + 88], r9      ; x2
+
+    mov     rcx, [rsp + 64]
+    call    [GetDC]
+    test    rax, rax
+    jz      .ccr_ret
+    mov     [rsp + 56], rax     ; hdc
+
+    ; Rectangle(hdc, left, top, right, bottom)
+    mov     rcx, [rsp + 56]
+    mov     rdx, [rsp + 72]
+    mov     r8, [rsp + 80]
+    mov     r9, [rsp + 88]
+    mov     rax, [rbp + 48]
+    mov     [rsp + 32], rax
+    call    [Rectangle]
+
+    ; ReleaseDC(hwnd, hdc)
+    mov     rcx, [rsp + 64]
+    mov     rdx, [rsp + 56]
+    call    [ReleaseDC]
+
+.ccr_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_create_oval:
+    ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 96
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .cco_h_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.cco_h_ok:
+    mov     [rsp + 64], rcx     ; hwnd
+    mov     [rsp + 72], rdx     ; x1
+    mov     [rsp + 80], r8      ; y1
+    mov     [rsp + 88], r9      ; x2
+
+    mov     rcx, [rsp + 64]
+    call    [GetDC]
+    test    rax, rax
+    jz      .cco_ret
+    mov     [rsp + 56], rax     ; hdc
+
+    ; Ellipse(hdc, left, top, right, bottom)
+    mov     rcx, [rsp + 56]
+    mov     rdx, [rsp + 72]
+    mov     r8, [rsp + 80]
+    mov     r9, [rsp + 88]
+    mov     rax, [rbp + 48]
+    mov     [rsp + 32], rax
+    call    [Ellipse]
+
+    ; ReleaseDC(hwnd, hdc)
+    mov     rcx, [rsp + 64]
+    mov     rdx, [rsp + 56]
+    call    [ReleaseDC]
+
+.cco_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_create_text:
+    ; RCX = hwnd, RDX = x, R8 = y, R9 = utf8_str_ptr
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 96
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .cct_h_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.cct_h_ok:
+    mov     [rsp + 64], rcx     ; hwnd
+    mov     [rsp + 72], rdx     ; x
+    mov     [rsp + 80], r8      ; y
+
+    ; Convert UTF-8 text to wide
+    mov     rcx, r9
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+    mov     [rsp + 88], rax     ; char count
+
+    mov     rcx, [rsp + 64]
+    call    [GetDC]
+    test    rax, rax
+    jz      .cct_ret
+    mov     [rsp + 56], rax     ; hdc
+
+    ; Set background mode transparent (1)
+    mov     rcx, [rsp + 56]
+    mov     edx, 1              ; TRANSPARENT
+    call    [SetBkMode]
+
+    ; TextOutW(hdc, x, y, wide_buf, len)
+    mov     rcx, [rsp + 56]
+    mov     rdx, [rsp + 72]
+    mov     r8, [rsp + 80]
+    lea     r9, [_pyfasm_wide_buf]
+    mov     rax, [rsp + 88]
+    mov     [rsp + 32], rax
+    call    [TextOutW]
+
+    ; ReleaseDC(hwnd, hdc)
+    mov     rcx, [rsp + 64]
+    mov     rdx, [rsp + 56]
+    call    [ReleaseDC]
+
+.cct_ret:
+    xor     eax, eax
     mov     rsp, rbp
     pop     rbp
     ret
@@ -6642,16 +6922,36 @@ _pyfasm_tray_wnd_proc:
     ret
 
 _pyfasm_message_box:
-    ; RCX = text, RDX = title
+    ; RCX = title, RDX = message
     push    rbp
     mov     rbp, rsp
+    push    rsi
+    push    rdi
     sub     rsp, 48
     and     rsp, -16
-    mov     r8, rdx                 ; title in r8
-    mov     rdx, rcx                ; text in rdx
+    mov     rsi, rcx
+    mov     rdi, rdx
+
+    ; Convert message (RDX) to wide buffer
+    mov     rcx, rdi
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
+    ; Convert title (RCX) to wide buffer
+    mov     rcx, rsi
+    lea     rdx, [_pyfasm_edit_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+
     xor     ecx, ecx                ; hWnd = 0
+    lea     rdx, [_pyfasm_wide_buf] ; lpText
+    lea     r8, [_pyfasm_edit_buf]  ; lpCaption
     xor     r9d, r9d                ; uType = MB_OK (0)
     call    [MessageBoxW]
+
+    pop     rdi
+    pop     rsi
     mov     rsp, rbp
     pop     rbp
     ret
@@ -7009,7 +7309,9 @@ section '.idata' import data readable writeable
            TrackPopupMenu, 'TrackPopupMenu', \\
            DestroyMenu, 'DestroyMenu', \\
            GetCursorPos, 'GetCursorPos', \\
-           ActivateKeyboardLayout, 'ActivateKeyboardLayout'
+           ActivateKeyboardLayout, 'ActivateKeyboardLayout', \\
+           GetDC, 'GetDC', \\
+           ReleaseDC, 'ReleaseDC'
 
     import gdi32, \\
            CreateSolidBrush, 'CreateSolidBrush', \\
@@ -7021,7 +7323,12 @@ section '.idata' import data readable writeable
            CreateFontW, 'CreateFontW', \\
            DeleteObject, 'DeleteObject', \\
            SelectObject, 'SelectObject', \\
-           GetStockObject, 'GetStockObject'
+           GetStockObject, 'GetStockObject', \\
+           MoveToEx, 'MoveToEx', \\
+           LineTo, 'LineTo', \\
+           Rectangle, 'Rectangle', \\
+           Ellipse, 'Ellipse', \\
+           TextOutW, 'TextOutW'
 
     import shell32, \\
            Shell_NotifyIconW, 'Shell_NotifyIconW', \\
