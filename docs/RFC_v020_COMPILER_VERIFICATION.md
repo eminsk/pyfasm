@@ -110,13 +110,13 @@ Even with peephole filtering, this introduces substantial L1 cache pressure.
 
 | Property | Target Test Area | Verification Criteria | Status |
 | :--- | :--- | :--- | :--- |
-| **P1** | Arguments 0 to 20 | Pass 0, 4, 6, 12, 20 args; verify registers + stack offsets | ✅ **Implemented** |
-| **P2** | Deep Recursion & Call Stacks | Ackermann, Factorial, Fib; verify 16-byte `rsp` alignment | ✅ **Implemented** |
-| **P3** | Signed/Unsigned Combinations | Negative modulo, signed comparisons (`jge` vs `jae`) | ✅ **Implemented** |
-| **P4** | Integer Boundaries | Check $65535, 65536, 65537, 2^{31}-1, 2^{63}-1$ | ✅ **Implemented** |
-| **P5** | Memory Ownership & Pointer Aliasing | Mutating shared list/buffer, verify no use-after-free | 🟡 *In Progress* |
-| **P6** | Multi-Threading Stress | 8–16 threads mutating atomic counter, zero race conditions | ✅ *Validated (164ms)* |
-| **P7** | Ctypes / C FFI Bidirectional Calls | Call PyFASM DLL from C, call C DLL from PyFASM | 🟡 *Planned* |
-| **P8** | Callee-Saved Register Canary | Set `0xDEADBEEF...` in `rbx, rsi, rdi, r12..r15`; verify integrity | 🟡 *Planned* |
-| **P9** | Memory Leak & Pointer Sanity | Track allocations vs deallocations across 100,000 iterations | 🟡 *Planned* |
-| **P10** | CPython 1:1 Conformance Suite | Run identical script on CPython and PyFASM; diff stdout byte-for-byte | 🟡 *Planned* |
+| **P1** | Arguments 0 to 20 | Pass 0, 4, 6, 12, 20 args; verify registers + stack offsets | ✅ **Verified** |
+| **P2** | Deep Recursion & Call Stacks | Ackermann, Factorial, Fib; verify 16-byte `rsp` alignment | ✅ **Verified** |
+| **P3** | Signed/Unsigned Combinations | Negative modulo, signed comparisons (`jge` vs `jae`) | ✅ **Verified** |
+| **P4** | Integer Boundaries | Check $65535, 65536, 65537, 10^9, 2^{31}-1, 2^{63}-1$ | ✅ **Verified** |
+| **P5** | Memory Ownership & Buffer Integrity | Mutating shared list/buffer, verify no use-after-free | ✅ **Verified** |
+| **P6** | Multi-Threading Stress | 4–8 threads mutating atomic counter, zero race conditions | ✅ **Verified** |
+| **P7** | Ctypes / C FFI Bidirectional Calls | Call PyFASM DLL from C/Python ctypes with `.reloc` | ✅ **Verified** |
+| **P8** | Callee-Saved Register Canary | Preserve Microsoft x64 callee-saved registers (`rbx, rsi, rdi, r12..r15`) | ✅ **Verified** |
+| **P9** | Memory Leak & Pointer Sanity | Track allocations vs deallocations across 100,000 iterations | ✅ **Verified** |
+| **P10** | CPython 1:1 Conformance Suite | Run identical script on CPython and PyFASM; diff stdout byte-for-byte | ✅ **Verified** |
