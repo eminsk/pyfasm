@@ -6,9 +6,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, Any
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
-from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL
+from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, PyFasmType
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
     # Registers
@@ -1347,6 +1347,12 @@ include 'functions.inc'
                         self.emit(f"jz {lbl_skip_store}")
                         self.emit("cmp r8, 65536", "check valid user-mode pointer")
                         self.emit(f"jb {lbl_skip_store}")
+                        if is_list_target:
+                            lbl_idx_pos = self.new_label("idx_pos")
+                            self.emit("test r11, r11", "check negative index")
+                            self.emit(f"jns {lbl_idx_pos}")
+                            self.emit("add r11, [r8]", "negative index: len + idx")
+                            self.emit_raw(f"{lbl_idx_pos}:")
                         self.emit("test r11, r11", "check negative index")
                         self.emit(f"js {lbl_skip_store}")
                         self.emit("cmp r11, 1000000", "check index bounds")
@@ -1946,10 +1952,10 @@ include 'functions.inc'
         if isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
         if isinstance(expr, ast.Subscript):
+            val_type = self._infer_expr_type(expr.value)
+            if val_type.is_str():
+                return TYPE_STR
             if isinstance(expr.slice, ast.Slice):
-                val_type = self._infer_expr_type(expr.value)
-                if val_type.is_str():
-                    return TYPE_STR
                 return val_type
         if isinstance(expr, ast.BinOp):
             lt = self._infer_expr_type(expr.left)
@@ -2256,6 +2262,33 @@ include 'functions.inc'
                 self.emit("call _pyfasm_str_concat")
                 return
 
+            lt = self._infer_expr_type(expr.left)
+            rt = self._infer_expr_type(expr.right)
+            if (lt.is_float() or rt.is_float()) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv)):
+                self._generate_expr(expr.left)
+                if not lt.is_float():
+                    self.emit("cvtsi2sd xmm0, rax")
+                    self.emit("movq rax, xmm0")
+                self.emit("push rax")
+                self._generate_expr(expr.right)
+                if not rt.is_float():
+                    self.emit("cvtsi2sd xmm0, rax")
+                    self.emit("movq rax, xmm0")
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("movq xmm0, rax")
+                self.emit("movq xmm1, r11")
+                if isinstance(expr.op, ast.Add):
+                    self.emit("addsd xmm0, xmm1")
+                elif isinstance(expr.op, ast.Sub):
+                    self.emit("subsd xmm0, xmm1")
+                elif isinstance(expr.op, ast.Mult):
+                    self.emit("mulsd xmm0, xmm1")
+                elif isinstance(expr.op, (ast.Div, ast.FloorDiv)):
+                    self.emit("divsd xmm0, xmm1")
+                self.emit("movq rax, xmm0")
+                return
+
             self._generate_expr(expr.left)
             self.emit("push rax")
             self._generate_expr(expr.right)
@@ -2266,7 +2299,14 @@ include 'functions.inc'
         elif isinstance(expr, ast.UnaryOp):
             self._generate_expr(expr.operand)
             if isinstance(expr.op, ast.USub):
-                self.emit("neg rax")
+                t = self._infer_expr_type(expr.operand)
+                if t.is_float():
+                    self.emit("movq xmm0, rax")
+                    self.emit("xorpd xmm1, xmm1")
+                    self.emit("subsd xmm1, xmm0")
+                    self.emit("movq rax, xmm1")
+                else:
+                    self.emit("neg rax")
             elif isinstance(expr.op, ast.Invert):
                 self.emit("not rax")
             elif isinstance(expr.op, ast.Not):
@@ -2408,6 +2448,49 @@ include 'functions.inc'
                             self.emit("setz al")
                             self.emit("movzx rax, al")
                         return
+
+                lt = self._infer_expr_type(expr.left)
+                rt = self._infer_expr_type(expr.comparators[0])
+                if (lt.is_str() or rt.is_str()) and isinstance(op, (ast.Eq, ast.NotEq)):
+                    self._generate_expr(expr.left)
+                    self.emit("push rax")
+                    self._generate_expr(expr.comparators[0])
+                    self.emit("mov rdx, rax", "str2")
+                    self.emit("pop rcx", "str1")
+                    self.emit("call _pyfasm_str_cmp")
+                    if isinstance(op, ast.NotEq):
+                        self.emit("xor eax, 1")
+                    return
+
+                if (lt.is_float() or rt.is_float()) and isinstance(op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+                    self._generate_expr(expr.left)
+                    if not lt.is_float():
+                        self.emit("cvtsi2sd xmm0, rax")
+                        self.emit("movq rax, xmm0")
+                    self.emit("push rax")
+                    self._generate_expr(expr.comparators[0])
+                    if not rt.is_float():
+                        self.emit("cvtsi2sd xmm0, rax")
+                        self.emit("movq rax, xmm0")
+                    self.emit("mov r11, rax")
+                    self.emit("pop rax")
+                    self.emit("movq xmm0, rax")
+                    self.emit("movq xmm1, r11")
+                    self.emit("ucomisd xmm0, xmm1")
+                    if isinstance(op, ast.Eq):
+                        self.emit("sete al")
+                    elif isinstance(op, ast.NotEq):
+                        self.emit("setne al")
+                    elif isinstance(op, ast.Lt):
+                        self.emit("setb al")
+                    elif isinstance(op, ast.LtE):
+                        self.emit("setbe al")
+                    elif isinstance(op, ast.Gt):
+                        self.emit("seta al")
+                    elif isinstance(op, ast.GtE):
+                        self.emit("setae al")
+                    self.emit("movzx rax, al")
+                    return
 
                 self._generate_expr(expr.left)
                 self.emit("push rax")
@@ -2557,17 +2640,45 @@ include 'functions.inc'
                     v = self.current_func.local_vars.get(expr.value.id)
                     if v and (v.var_type.is_list() or v.var_type.is_tuple()):
                         is_list_val = True
+
+                is_str_val = False
+                if val_t.is_str():
+                    is_str_val = True
+                elif isinstance(expr.value, ast.Name) and self.current_func:
+                    v = self.current_func.local_vars.get(expr.value.id)
+                    if v and v.var_type.is_str():
+                        is_str_val = True
+
                 lbl_null_arr = self.new_label("null_arr")
                 lbl_done_arr = self.new_label("done_arr")
                 self.emit("test rax, rax", "check null array")
                 self.emit(f"jz {lbl_null_arr}")
                 self.emit("cmp rax, 65536", "check valid user-mode pointer")
                 self.emit(f"jb {lbl_null_arr}")
+
+                if is_list_val:
+                    lbl_idx_pos = self.new_label("idx_pos")
+                    self.emit("test r11, r11", "check negative index")
+                    self.emit(f"jns {lbl_idx_pos}")
+                    self.emit("add r11, [rax]", "negative index: len + idx")
+                    self.emit_raw(f"{lbl_idx_pos}:")
+
                 self.emit("test r11, r11", "check negative index")
                 self.emit(f"js {lbl_null_arr}")
                 self.emit("cmp r11, 1000000", "check index bounds")
                 self.emit(f"jae {lbl_null_arr}")
-                if is_list_val:
+
+                if is_str_val:
+                    self.emit("push rax", "save str ptr")
+                    self.emit("push r11", "save idx")
+                    self.emit("mov ecx, 2", "alloc 2 bytes for char string")
+                    self.emit("call _pyfasm_alloc")
+                    self.emit("pop r11", "restore idx")
+                    self.emit("pop rdx", "restore str ptr")
+                    self.emit("movzx r10d, byte [rdx + r11]", "read char byte")
+                    self.emit("mov byte [rax], r10b", "store char byte")
+                    self.emit("mov byte [rax + 1], 0", "store null terminator")
+                elif is_list_val:
                     self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
                 else:
                     self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
@@ -3083,6 +3194,7 @@ include 'functions.inc'
             self.emit("imul rax, r11")
         elif isinstance(op, ast.FloorDiv) or isinstance(op, ast.Div):
             lbl_div_ok = self.new_label("div_ok")
+            lbl_div_end = self.new_label("div_end")
             self.emit("test r11, r11")
             self.emit(f"jnz {lbl_div_ok}")
             if self.try_stack:
@@ -3090,12 +3202,14 @@ include 'functions.inc'
                 self.emit(f"jmp {self.try_stack[-1]}")
             else:
                 self.emit("xor eax, eax")
-                self.emit(f"jmp {lbl_div_ok}")
+                self.emit(f"jmp {lbl_div_end}")
             self.emit_raw(f"{lbl_div_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
+            self.emit_raw(f"{lbl_div_end}:")
         elif isinstance(op, ast.Mod):
             lbl_mod_ok = self.new_label("mod_ok")
+            lbl_mod_end = self.new_label("mod_end")
             self.emit("test r11, r11")
             self.emit(f"jnz {lbl_mod_ok}")
             if self.try_stack:
@@ -3103,11 +3217,12 @@ include 'functions.inc'
                 self.emit(f"jmp {self.try_stack[-1]}")
             else:
                 self.emit("xor eax, eax")
-                self.emit(f"jmp {lbl_mod_ok}")
+                self.emit(f"jmp {lbl_mod_end}")
             self.emit_raw(f"{lbl_mod_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
             self.emit("mov rax, rdx")
+            self.emit_raw(f"{lbl_mod_end}:")
         elif isinstance(op, ast.BitAnd):
             self.emit("and rax, r11")
         elif isinstance(op, ast.BitOr):

@@ -4,7 +4,7 @@ Translates UiAppSpec into complete native x86_64 FASM source code
 with Win32 GDI dark theme, rounded cards, custom controls, and live plotting.
 """
 from __future__ import annotations
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Union, Any
 from pathlib import Path
 from pyfasm.ui_analyzer import UiAppSpec, UiWidgetSpec
 
@@ -132,6 +132,7 @@ section '.data' data readable writeable
     _flt_four               dq 4.0
     _flt_ten                dq 10.0
     _flt_10000              dq 10000.0
+    _flt_round_delta        dq 0.00005
     _flt_step               dq 0.05
     _flt_yscale             dq 37.333333333333336
     _flt_xscale             dq 80.0
@@ -2270,6 +2271,8 @@ _pyfasm_format_double_w:
     movaps  xmm0, xmm1
 
 .fmt_pos:
+    movsd   xmm2, [_flt_round_delta]
+    addsd   xmm0, xmm2
     cvttsd2si rax, xmm0
     lea     rsi, [rsp + 40]
     mov     byte [rsi], 0
@@ -2301,7 +2304,6 @@ _pyfasm_format_double_w:
     ; frac_int = (int)(frac * 10000.0 + 0.5)
     movsd   xmm2, [_flt_10000]
     mulsd   xmm0, xmm2
-    addsd   xmm0, [_flt_half]
     cvttsd2si r8, xmm0
     test    r8, r8
     jz      .fmt_done

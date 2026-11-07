@@ -430,6 +430,7 @@ _pyfasm_print_float:
     subsd   xmm1, xmm0
     movaps  xmm0, xmm1
 .flt_pos:
+    movsd   [rsp + 32], xmm0
     cvttsd2si rax, xmm0
     mov     [rsp + 40], rax
     mov     rcx, rax
@@ -437,6 +438,7 @@ _pyfasm_print_float:
     lea     rcx, [dot_str]
     call    _pyfasm_print_str
 
+    movsd   xmm0, [rsp + 32]
     cvtsi2sd xmm1, [rsp + 40]
     subsd   xmm0, xmm1
     mulsd   xmm0, [flt_1m]
@@ -6614,6 +6616,7 @@ _pyfasm_print_float:
     subsd   xmm1, xmm0
     movaps  xmm0, xmm1
 .flt_pos:
+    movsd   [rsp + 32], xmm0
     cvttsd2si rax, xmm0
     mov     [rsp + 40], rax
     mov     rcx, rax
@@ -6621,6 +6624,7 @@ _pyfasm_print_float:
     lea     rcx, [dot_str]
     call    _pyfasm_print_str
 
+    movsd   xmm0, [rsp + 32]
     cvtsi2sd xmm1, [rsp + 40]
     subsd   xmm0, xmm1
     mulsd   xmm0, [flt_1m]
