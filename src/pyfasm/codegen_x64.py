@@ -723,6 +723,8 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop"):
+                    continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
                 if sym == "str":
@@ -1691,13 +1693,19 @@ include 'functions.inc'
             if var:
                 self.emit(f"mov [rbp - {var.stack_offset}], {value_reg}", f"assign {var.name}")
         elif isinstance(target_node, (ast.Tuple, ast.List)):
-            self.emit(f"mov r10, {value_reg}", "container item to unpack")
+            if value_reg != "r10":
+                self.emit(f"mov r10, {value_reg}", "container item to unpack")
             for idx, elt in enumerate(target_node.elts):
                 if isinstance(elt, ast.Name):
                     e_var = self.current_func.local_vars.get(elt.id) if self.current_func else None
                     if e_var:
                         self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", f"unpack {elt.id}")
                         self.emit(f"mov [rbp - {e_var.stack_offset}], rax")
+                elif isinstance(elt, (ast.Tuple, ast.List)):
+                    self.emit("push r10")
+                    self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", "load inner container")
+                    self._assign_target(elt, "rax")
+                    self.emit("pop r10")
 
     def _generate_for_container(self, stmt: ast.For) -> None:
         buf_var = self.current_func.local_vars.get(f"_pyfasm_for_buf_{id(stmt)}") if self.current_func else None
@@ -2771,7 +2779,7 @@ include 'functions.inc'
 
         elif isinstance(expr, ast.List):
             num_elts = len(expr.elts)
-            alloc_bytes = max(16, (num_elts + 2) * 8)
+            alloc_bytes = max(512, (num_elts + 32) * 8)
             self.emit(f"mov ecx, {alloc_bytes}", f"allocate list of {num_elts} items")
             self.emit("call _pyfasm_alloc")
             self.emit("mov r8, rax", "list base pointer")
@@ -3538,6 +3546,21 @@ include 'functions.inc'
             self._generate_expr(call.func.value)
             self.emit("mov rcx, rax", "dict_ptr")
             self.emit(f"call _pyfasm_dict_{attr_name}")
+            return
+
+        # List insert: s.insert(idx, val)
+        if attr_name == "insert" and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save item to insert")
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "save insertion index")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "pass list pointer")
+            self.emit("pop rdx", "pass insertion index")
+            self.emit("pop r8", "pass item to insert")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_list_insert")
+            self.emit("call _pyfasm_list_insert")
+            self.emit("add rsp, 32", "restore shadow space")
             return
 
         # List append
@@ -4535,6 +4558,77 @@ include 'functions.inc'
             self.emit("mov rcx, rax", "seq_ptr")
             self.emit("pop rdx", "func_ptr")
             self.emit("call _pyfasm_filter")
+            return
+
+        # Built-in zip(a, b)
+        if func_name == "zip" and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save list b")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list a")
+            self.emit("pop rdx", "pass list b")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_zip")
+            self.emit("call _pyfasm_zip")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # Built-in enumerate(a, [start])
+        if func_name == "enumerate" and len(call.args) >= 1:
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "save start index")
+            else:
+                self.emit("xor eax, eax")
+                self.emit("push rax", "default start index 0")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list a")
+            self.emit("pop rdx", "pass start index")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_enumerate")
+            self.emit("call _pyfasm_enumerate")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # Standard library bisect / bisect_right(a, x)
+        if (func_name in ("bisect", "bisect_right") or (prefix == "bisect" and attr_name in ("bisect", "bisect_right"))) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save search item")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list a")
+            self.emit("pop rdx", "pass search item")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_bisect_right")
+            self.emit("call _pyfasm_bisect_right")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        if (func_name == "bisect_left" or (prefix == "bisect" and attr_name == "bisect_left")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save search item")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list a")
+            self.emit("pop rdx", "pass search item")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_bisect_left")
+            self.emit("call _pyfasm_bisect_left")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # Standard library heapq: heappush(heap, item), heappop(heap)
+        if (func_name == "heappush" or (prefix == "heapq" and attr_name == "heappush")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save item to push")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass heap pointer")
+            self.emit("pop rdx", "pass item to push")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_heappush")
+            self.emit("call _pyfasm_heappush")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        if (func_name == "heappop" or (prefix == "heapq" and attr_name == "heappop")) and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass heap pointer")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_heappop")
+            self.emit("call _pyfasm_heappop")
+            self.emit("add rsp, 32", "restore shadow space")
             return
 
         if func_name == "spawn_thread":

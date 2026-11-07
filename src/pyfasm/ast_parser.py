@@ -187,6 +187,69 @@ class ConstantFolder(ast.NodeTransformer):
         return node
 
 
+class ClassLambdaDesugarer(ast.NodeTransformer):
+    """
+    Transforms class-level lambda assignments:
+        class Solution:
+            minOperations = lambda self, ...: ...
+    into explicit class methods:
+        class Solution:
+            def minOperations(self, ...):
+                return ...
+    """
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        new_body = []
+        for item in node.body:
+            if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name) and isinstance(item.value, ast.Lambda):
+                method_name = item.targets[0].id
+                fn_node = ast.FunctionDef(
+                    name=method_name,
+                    args=item.value.args,
+                    body=[ast.Return(value=item.value.body)],
+                    decorator_list=[],
+                    returns=None,
+                    lineno=getattr(item, "lineno", 1),
+                    col_offset=getattr(item, "col_offset", 0)
+                )
+                new_body.append(self.visit(fn_node))
+            else:
+                new_body.append(self.visit(item))
+        node.body = new_body
+        return node
+
+
+class ChainedCompareTransformer(ast.NodeTransformer):
+    """
+    Transforms chained comparisons like:
+        idx == i == x - 1
+    into:
+        (idx == i) and (i == x - 1)
+    """
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.ops) <= 1:
+            return node
+
+        comparisons = []
+        curr_left = node.left
+        for op, comp in zip(node.ops, node.comparators):
+            comparisons.append(ast.Compare(
+                left=curr_left,
+                ops=[op],
+                comparators=[comp],
+                lineno=getattr(node, "lineno", 1),
+                col_offset=getattr(node, "col_offset", 0)
+            ))
+            curr_left = comp
+
+        return ast.BoolOp(
+            op=ast.And(),
+            values=comparisons,
+            lineno=getattr(node, "lineno", 1),
+            col_offset=getattr(node, "col_offset", 0)
+        )
+
+
 class LambdaLifter(ast.NodeTransformer):
     """Lifts anonymous lambda expressions into module-level FunctionDef nodes."""
 
@@ -264,7 +327,8 @@ class GeneratorExpLifter(ast.NodeTransformer):
         "range", "len", "print", "int", "str", "float", "bool",
         "abs", "min", "max", "sum", "list", "dict", "set", "tuple",
         "next", "iter", "open", "round", "pow", "ord", "chr", "input",
-        "any", "all", "map", "filter", "zip", "enumerate"
+        "any", "all", "map", "filter", "zip", "enumerate",
+        "bisect", "bisect_right", "bisect_left", "heappush", "heappop"
     }
 
     def __init__(self):
@@ -293,6 +357,12 @@ class GeneratorExpLifter(ast.NodeTransformer):
             for sub in ast.walk(comp.target):
                 if isinstance(sub, ast.Name):
                     targets.add(sub.id)
+            for sub in ast.walk(comp):
+                if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                    targets.add(sub.target.id)
+        for sub in ast.walk(node.elt):
+            if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                targets.add(sub.target.id)
 
         # Free names: check elt, ifs, and secondary iters (idx > 0)
         free_names_set = set()
@@ -358,6 +428,8 @@ class GeneratorExpLifter(ast.NodeTransformer):
 
 def preprocess_ast(tree: ast.AST) -> ast.AST:
     """Preprocesses AST: folds constants, desugars yield from, lifts generator expressions and lambdas."""
+    tree = ClassLambdaDesugarer().visit(tree)
+    tree = ChainedCompareTransformer().visit(tree)
     tree = ConstantFolder().visit(tree)
     tree = YieldFromTransformer().visit(tree)
     gen_lifter = GeneratorExpLifter()
@@ -1248,9 +1320,9 @@ class AstAnalyzer:
                             )
                             offset += 8
                     elif isinstance(sub_node.target, (ast.Tuple, ast.List)):
-                        for elt in sub_node.target.elts:
-                            if isinstance(elt, ast.Name):
-                                vname = elt.id
+                        for sub_elt in ast.walk(sub_node.target):
+                            if isinstance(sub_elt, ast.Name):
+                                vname = sub_elt.id
                                 if vname not in global_names and vname not in local_vars:
                                     local_vars[vname] = VariableSymbol(
                                         name=vname,
@@ -1307,18 +1379,17 @@ class AstAnalyzer:
                         offset += 8
                 elif isinstance(sub_node, (ast.ListComp, ast.DictComp, ast.SetComp)):
                     for gen in sub_node.generators:
-                        if isinstance(gen.target, ast.Name):
-                            vname = gen.target.id
-                            if vname in global_names:
-                                continue
-                            if vname not in local_vars:
-                                local_vars[vname] = VariableSymbol(
-                                    name=vname,
-                                    var_type=TYPE_INT,
-                                    stack_offset=offset,
-                                    is_arg=False
-                                )
-                                offset += 8
+                        for sub_t in ast.walk(gen.target):
+                            if isinstance(sub_t, ast.Name) and sub_t.id not in global_names:
+                                vname = sub_t.id
+                                if vname not in local_vars:
+                                    local_vars[vname] = VariableSymbol(
+                                        name=vname,
+                                        var_type=TYPE_INT,
+                                        stack_offset=offset,
+                                        is_arg=False
+                                    )
+                                    offset += 8
                 elif isinstance(sub_node, ast.Match):
                     for case in sub_node.cases:
                         if isinstance(case.pattern, ast.MatchAs) and case.pattern.name:

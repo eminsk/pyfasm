@@ -2618,6 +2618,326 @@ _pyfasm_list_append:
     mov     rax, rcx
     ret
 
+_pyfasm_list_insert:
+    ; RCX = list pointer
+    ; RDX = insertion index (signed 64-bit int)
+    ; R8  = value to insert
+    test    rcx, rcx
+    jz      .pli_ret
+    mov     rax, [rcx]              ; current length
+    ; Clamp index: if rdx < 0: rdx = max(0, rdx + rax)
+    test    rdx, rdx
+    jge     .pli_check_high
+    add     rdx, rax
+    test    rdx, rdx
+    jge     .pli_shift_prep
+    xor     edx, edx
+    jmp     .pli_shift_prep
+.pli_check_high:
+    cmp     rdx, rax
+    jle     .pli_shift_prep
+    mov     rdx, rax                ; clamp to current length
+.pli_shift_prep:
+    mov     r11, rax                ; r11 = current length
+.pli_shift_loop:
+    cmp     r11, rdx
+    jle     .pli_do_insert
+    mov     r10, [rcx + r11 * 8]    ; element at index r11 - 1
+    mov     [rcx + (r11 + 1) * 8], r10 ; shift right by 1 slot
+    dec     r11
+    jmp     .pli_shift_loop
+.pli_do_insert:
+    mov     [rcx + (rdx + 1) * 8], r8
+    inc     qword [rcx]             ; length++
+.pli_ret:
+    xor     eax, eax                ; list.insert returns None
+    ret
+
+bisect:
+bisect_right:
+_pyfasm_bisect:
+_pyfasm_bisect_right:
+    ; RCX = list pointer
+    ; RDX = target value x
+    test    rcx, rcx
+    jnz     .bsr_start
+    xor     eax, eax
+    ret
+.bsr_start:
+    xor     r8, r8                  ; lo = 0
+    mov     r9, [rcx]               ; hi = len(arr)
+.bsr_loop:
+    cmp     r8, r9
+    jge     .bsr_done
+    mov     rax, r8
+    add     rax, r9
+    sar     rax, 1                  ; mid = (lo + hi) / 2
+    mov     r10, [rcx + rax * 8 + 8] ; arr[mid]
+    cmp     rdx, r10
+    jl      .bsr_hi                 ; if x < arr[mid]: hi = mid
+    lea     r8, [rax + 1]           ; else: lo = mid + 1
+    jmp     .bsr_loop
+.bsr_hi:
+    mov     r9, rax
+    jmp     .bsr_loop
+.bsr_done:
+    mov     rax, r8                 ; return lo
+    ret
+
+bisect_left:
+_pyfasm_bisect_left:
+    ; RCX = list pointer
+    ; RDX = target value x
+    test    rcx, rcx
+    jnz     .bsl_start
+    xor     eax, eax
+    ret
+.bsl_start:
+    xor     r8, r8                  ; lo = 0
+    mov     r9, [rcx]               ; hi = len(arr)
+.bsl_loop:
+    cmp     r8, r9
+    jge     .bsl_done
+    mov     rax, r8
+    add     rax, r9
+    sar     rax, 1                  ; mid = (lo + hi) / 2
+    mov     r10, [rcx + rax * 8 + 8] ; arr[mid]
+    cmp     r10, rdx
+    jl      .bsl_lo                 ; if arr[mid] < x: lo = mid + 1
+    mov     r9, rax                 ; else: hi = mid
+    jmp     .bsl_loop
+.bsl_lo:
+    lea     r8, [rax + 1]
+    jmp     .bsl_loop
+.bsl_done:
+    mov     rax, r8                 ; return lo
+    ret
+
+zip:
+_pyfasm_zip:
+    ; RCX = list a, RDX = list b
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = list b
+    xor     r14, r14                ; min_len = 0
+    test    r12, r12
+    jz      .zip_alloc_empty
+    test    r13, r13
+    jz      .zip_alloc_empty
+    mov     rax, [r12]
+    mov     rdx, [r13]
+    cmp     rax, rdx
+    cmovle  r14, rax
+    cmovg   r14, rdx
+.zip_alloc_empty:
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = result list
+    mov     [rbx], r14              ; store length
+    test    r14, r14
+    jz      .zip_ret
+
+    xor     r15, r15                ; i = 0
+.zip_loop:
+    cmp     r15, r14
+    jge     .zip_ret
+    ; Allocate 2-tuple: 24 bytes
+    mov     ecx, 24
+    call    _pyfasm_alloc
+    mov     qword [rax], 2          ; tuple len = 2
+    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     [rax + 8], rdx
+    mov     rdx, [r13 + r15 * 8 + 8] ; b[i]
+    mov     [rax + 16], rdx
+    mov     [rbx + r15 * 8 + 8], rax ; store tuple in result list
+    inc     r15
+    jmp     .zip_loop
+
+.zip_ret:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+enumerate:
+_pyfasm_enumerate:
+    ; RCX = list a, RDX = start index
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = start index
+    xor     r14, r14                ; len = 0
+    test    r12, r12
+    jz      .enum_alloc_empty
+    mov     r14, [r12]
+.enum_alloc_empty:
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax
+    mov     [rbx], r14
+    test    r14, r14
+    jz      .enum_ret
+
+    xor     r15, r15                ; i = 0
+.enum_loop:
+    cmp     r15, r14
+    jge     .enum_ret
+    ; Allocate 2-tuple: 24 bytes
+    mov     ecx, 24
+    call    _pyfasm_alloc
+    mov     qword [rax], 2
+    mov     rdx, r15
+    add     rdx, r13                ; i + start
+    mov     [rax + 8], rdx
+    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     [rax + 16], rdx
+    mov     [rbx + r15 * 8 + 8], rax
+    inc     r15
+    jmp     .enum_loop
+
+.enum_ret:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+heappush:
+_pyfasm_heappush:
+    ; RCX = heap list pointer, RDX = item
+    test    rcx, rcx
+    jz      .hp_ret
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    sub     rsp, 32
+    mov     rbx, rcx                ; rbx = heap
+    mov     r12, rdx                ; r12 = item
+    ; Append item to end
+    mov     rcx, rbx
+    mov     rdx, r12
+    call    _pyfasm_list_append
+    ; pos = len - 1
+    mov     rax, [rbx]
+    dec     rax                     ; rax = pos
+.hp_siftup:
+    test    rax, rax
+    jle     .hp_done                ; while pos > 0
+    mov     rdx, rax
+    dec     rdx
+    sar     rdx, 1                  ; parent = (pos - 1) / 2
+    mov     r8, [rbx + rdx * 8 + 8] ; heap[parent]
+    mov     r9, [rbx + rax * 8 + 8] ; heap[pos]
+    cmp     r9, r8
+    jge     .hp_done                ; if heap[pos] >= heap[parent]: done
+    ; swap heap[pos] and heap[parent]
+    mov     [rbx + rax * 8 + 8], r8
+    mov     [rbx + rdx * 8 + 8], r9
+    mov     rax, rdx                ; pos = parent
+    jmp     .hp_siftup
+.hp_done:
+    add     rsp, 32
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+.hp_ret:
+    xor     eax, eax
+    ret
+
+heappop:
+_pyfasm_heappop:
+    ; RCX = heap list pointer
+    test    rcx, rcx
+    jnz     .hpo_chk_len
+    xor     eax, eax
+    ret
+.hpo_chk_len:
+    mov     rax, [rcx]
+    test    rax, rax
+    jnz     .hpo_start
+    xor     eax, eax
+    ret
+.hpo_start:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 32
+    mov     rbx, rcx                ; rbx = heap
+    mov     r12, [rbx + 8]          ; return item = heap[0]
+    mov     rax, [rbx]
+    dec     rax                     ; last_pos = len - 1
+    mov     [rbx], rax              ; len--
+    test    rax, rax
+    jz      .hpo_done               ; if was 1 item, now 0
+    ; move last item to root: heap[0] = heap[last_pos]
+    mov     rdx, [rbx + (rax + 1) * 8]
+    mov     [rbx + 8], rdx
+    xor     r13, r13                ; pos = 0
+    mov     r14, rax                ; count = len
+.hpo_siftdown:
+    mov     rax, r13
+    shl     rax, 1
+    inc     rax                     ; child = 2 * pos + 1
+    cmp     rax, r14
+    jge     .hpo_done               ; if child >= count: break
+    mov     rdx, rax
+    inc     rdx                     ; right = child + 1
+    cmp     rdx, r14
+    jge     .hpo_cmp_child
+    mov     r8, [rbx + rax * 8 + 8] ; heap[child]
+    mov     r9, [rbx + rdx * 8 + 8] ; heap[right]
+    cmp     r9, r8
+    cmovl   rax, rdx                ; if heap[right] < heap[child]: child = right
+.hpo_cmp_child:
+    mov     r8, [rbx + r13 * 8 + 8] ; heap[pos]
+    mov     r9, [rbx + rax * 8 + 8] ; heap[child]
+    cmp     r8, r9
+    jle     .hpo_done               ; if heap[pos] <= heap[child]: break
+    ; swap heap[pos] and heap[child]
+    mov     [rbx + r13 * 8 + 8], r9
+    mov     [rbx + rax * 8 + 8], r8
+    mov     r13, rax                ; pos = child
+    jmp     .hpo_siftdown
+.hpo_done:
+    mov     rax, r12                ; return popped root
+    add     rsp, 32
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_load_ext_symbol:
     push    rbp
     mov     rbp, rsp
@@ -8129,6 +8449,326 @@ _pyfasm_list_append:
     inc     qword [rcx]
 .la_ret:
     mov     rax, rcx
+    ret
+
+_pyfasm_list_insert:
+    ; RCX = list pointer
+    ; RDX = insertion index (signed 64-bit int)
+    ; R8  = value to insert
+    test    rcx, rcx
+    jz      .pli_ret
+    mov     rax, [rcx]              ; current length
+    ; Clamp index: if rdx < 0: rdx = max(0, rdx + rax)
+    test    rdx, rdx
+    jge     .pli_check_high
+    add     rdx, rax
+    test    rdx, rdx
+    jge     .pli_shift_prep
+    xor     edx, edx
+    jmp     .pli_shift_prep
+.pli_check_high:
+    cmp     rdx, rax
+    jle     .pli_shift_prep
+    mov     rdx, rax                ; clamp to current length
+.pli_shift_prep:
+    mov     r11, rax                ; r11 = current length
+.pli_shift_loop:
+    cmp     r11, rdx
+    jle     .pli_do_insert
+    mov     r10, [rcx + r11 * 8]    ; element at index r11 - 1
+    mov     [rcx + (r11 + 1) * 8], r10 ; shift right by 1 slot
+    dec     r11
+    jmp     .pli_shift_loop
+.pli_do_insert:
+    mov     [rcx + (rdx + 1) * 8], r8
+    inc     qword [rcx]             ; length++
+.pli_ret:
+    xor     eax, eax                ; list.insert returns None
+    ret
+
+bisect:
+bisect_right:
+_pyfasm_bisect:
+_pyfasm_bisect_right:
+    ; RCX = list pointer
+    ; RDX = target value x
+    test    rcx, rcx
+    jnz     .bsr_start
+    xor     eax, eax
+    ret
+.bsr_start:
+    xor     r8, r8                  ; lo = 0
+    mov     r9, [rcx]               ; hi = len(arr)
+.bsr_loop:
+    cmp     r8, r9
+    jge     .bsr_done
+    mov     rax, r8
+    add     rax, r9
+    sar     rax, 1                  ; mid = (lo + hi) / 2
+    mov     r10, [rcx + rax * 8 + 8] ; arr[mid]
+    cmp     rdx, r10
+    jl      .bsr_hi                 ; if x < arr[mid]: hi = mid
+    lea     r8, [rax + 1]           ; else: lo = mid + 1
+    jmp     .bsr_loop
+.bsr_hi:
+    mov     r9, rax
+    jmp     .bsr_loop
+.bsr_done:
+    mov     rax, r8                 ; return lo
+    ret
+
+bisect_left:
+_pyfasm_bisect_left:
+    ; RCX = list pointer
+    ; RDX = target value x
+    test    rcx, rcx
+    jnz     .bsl_start
+    xor     eax, eax
+    ret
+.bsl_start:
+    xor     r8, r8                  ; lo = 0
+    mov     r9, [rcx]               ; hi = len(arr)
+.bsl_loop:
+    cmp     r8, r9
+    jge     .bsl_done
+    mov     rax, r8
+    add     rax, r9
+    sar     rax, 1                  ; mid = (lo + hi) / 2
+    mov     r10, [rcx + rax * 8 + 8] ; arr[mid]
+    cmp     r10, rdx
+    jl      .bsl_lo                 ; if arr[mid] < x: lo = mid + 1
+    mov     r9, rax                 ; else: hi = mid
+    jmp     .bsl_loop
+.bsl_lo:
+    lea     r8, [rax + 1]
+    jmp     .bsl_loop
+.bsl_done:
+    mov     rax, r8                 ; return lo
+    ret
+
+zip:
+_pyfasm_zip:
+    ; RCX = list a, RDX = list b
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = list b
+    xor     r14, r14                ; min_len = 0
+    test    r12, r12
+    jz      .zip_alloc_empty
+    test    r13, r13
+    jz      .zip_alloc_empty
+    mov     rax, [r12]
+    mov     rdx, [r13]
+    cmp     rax, rdx
+    cmovle  r14, rax
+    cmovg   r14, rdx
+.zip_alloc_empty:
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = result list
+    mov     [rbx], r14              ; store length
+    test    r14, r14
+    jz      .zip_ret
+
+    xor     r15, r15                ; i = 0
+.zip_loop:
+    cmp     r15, r14
+    jge     .zip_ret
+    ; Allocate 2-tuple: 24 bytes
+    mov     ecx, 24
+    call    _pyfasm_alloc
+    mov     qword [rax], 2          ; tuple len = 2
+    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     [rax + 8], rdx
+    mov     rdx, [r13 + r15 * 8 + 8] ; b[i]
+    mov     [rax + 16], rdx
+    mov     [rbx + r15 * 8 + 8], rax ; store tuple in result list
+    inc     r15
+    jmp     .zip_loop
+
+.zip_ret:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+enumerate:
+_pyfasm_enumerate:
+    ; RCX = list a, RDX = start index
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 40
+    mov     r12, rcx                ; r12 = list a
+    mov     r13, rdx                ; r13 = start index
+    xor     r14, r14                ; len = 0
+    test    r12, r12
+    jz      .enum_alloc_empty
+    mov     r14, [r12]
+.enum_alloc_empty:
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax
+    mov     [rbx], r14
+    test    r14, r14
+    jz      .enum_ret
+
+    xor     r15, r15                ; i = 0
+.enum_loop:
+    cmp     r15, r14
+    jge     .enum_ret
+    ; Allocate 2-tuple: 24 bytes
+    mov     ecx, 24
+    call    _pyfasm_alloc
+    mov     qword [rax], 2
+    mov     rdx, r15
+    add     rdx, r13                ; i + start
+    mov     [rax + 8], rdx
+    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     [rax + 16], rdx
+    mov     [rbx + r15 * 8 + 8], rax
+    inc     r15
+    jmp     .enum_loop
+
+.enum_ret:
+    mov     rax, rbx
+    add     rsp, 40
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+heappush:
+_pyfasm_heappush:
+    ; RCX = heap list pointer, RDX = item
+    test    rcx, rcx
+    jz      .hp_ret
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    sub     rsp, 32
+    mov     rbx, rcx                ; rbx = heap
+    mov     r12, rdx                ; r12 = item
+    ; Append item to end
+    mov     rcx, rbx
+    mov     rdx, r12
+    call    _pyfasm_list_append
+    ; pos = len - 1
+    mov     rax, [rbx]
+    dec     rax                     ; rax = pos
+.hp_siftup:
+    test    rax, rax
+    jle     .hp_done                ; while pos > 0
+    mov     rdx, rax
+    dec     rdx
+    sar     rdx, 1                  ; parent = (pos - 1) / 2
+    mov     r8, [rbx + rdx * 8 + 8] ; heap[parent]
+    mov     r9, [rbx + rax * 8 + 8] ; heap[pos]
+    cmp     r9, r8
+    jge     .hp_done                ; if heap[pos] >= heap[parent]: done
+    ; swap heap[pos] and heap[parent]
+    mov     [rbx + rax * 8 + 8], r8
+    mov     [rbx + rdx * 8 + 8], r9
+    mov     rax, rdx                ; pos = parent
+    jmp     .hp_siftup
+.hp_done:
+    add     rsp, 32
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+.hp_ret:
+    xor     eax, eax
+    ret
+
+heappop:
+_pyfasm_heappop:
+    ; RCX = heap list pointer
+    test    rcx, rcx
+    jnz     .hpo_chk_len
+    xor     eax, eax
+    ret
+.hpo_chk_len:
+    mov     rax, [rcx]
+    test    rax, rax
+    jnz     .hpo_start
+    xor     eax, eax
+    ret
+.hpo_start:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 32
+    mov     rbx, rcx                ; rbx = heap
+    mov     r12, [rbx + 8]          ; return item = heap[0]
+    mov     rax, [rbx]
+    dec     rax                     ; last_pos = len - 1
+    mov     [rbx], rax              ; len--
+    test    rax, rax
+    jz      .hpo_done               ; if was 1 item, now 0
+    ; move last item to root: heap[0] = heap[last_pos]
+    mov     rdx, [rbx + (rax + 1) * 8]
+    mov     [rbx + 8], rdx
+    xor     r13, r13                ; pos = 0
+    mov     r14, rax                ; count = len
+.hpo_siftdown:
+    mov     rax, r13
+    shl     rax, 1
+    inc     rax                     ; child = 2 * pos + 1
+    cmp     rax, r14
+    jge     .hpo_done               ; if child >= count: break
+    mov     rdx, rax
+    inc     rdx                     ; right = child + 1
+    cmp     rdx, r14
+    jge     .hpo_cmp_child
+    mov     r8, [rbx + rax * 8 + 8] ; heap[child]
+    mov     r9, [rbx + rdx * 8 + 8] ; heap[right]
+    cmp     r9, r8
+    cmovl   rax, rdx                ; if heap[right] < heap[child]: child = right
+.hpo_cmp_child:
+    mov     r8, [rbx + r13 * 8 + 8] ; heap[pos]
+    mov     r9, [rbx + rax * 8 + 8] ; heap[child]
+    cmp     r8, r9
+    jle     .hpo_done               ; if heap[pos] <= heap[child]: break
+    ; swap heap[pos] and heap[child]
+    mov     [rbx + r13 * 8 + 8], r9
+    mov     [rbx + rax * 8 + 8], r8
+    mov     r13, rax                ; pos = child
+    jmp     .hpo_siftdown
+.hpo_done:
+    mov     rax, r12                ; return popped root
+    add     rsp, 32
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_load_ext_symbol:
