@@ -1,15 +1,21 @@
 """
 Assembly Peephole Optimizer for PyFASM.
 Implements multi-pass instruction pipeline optimizations inspired by pyast64 and minijit.
-Eliminates redundant stack push/pop sequences, self-moves, and dead code.
+Eliminates redundant stack push/pop sequences, self-moves, and dead code with strict
+thread-safety and memory ordering guards.
 """
 from __future__ import annotations
 import re
-from typing import List
+from typing import List, Set
+
+X64_64BIT_REGS: Set[str] = {
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+}
 
 
 class PeepholeOptimizer:
-    """Optimizes emitted x86-64 FASM assembly text."""
+    """Optimizes emitted x86-64 FASM assembly text with thread-safe guards."""
 
     def __init__(self):
         self.passes_run = 0
@@ -34,7 +40,13 @@ class PeepholeOptimizer:
             stripped = line.strip()
 
             # Pass through labels, comments, directives, empty lines
-            if not stripped or stripped.startswith(";") or stripped.endswith(":") or stripped.startswith("format") or stripped.startswith("section"):
+            if not stripped or stripped.startswith(";") or stripped.endswith(":") or stripped.startswith("format") or stripped.startswith("section") or stripped.startswith("entry"):
+                result.append(line)
+                i += 1
+                continue
+
+            # Thread safety barrier: lock prefixes, memory fences, bus-locked atomic operations
+            if any(stripped.lower().startswith(b) for b in ("lock ", "mfence", "sfence", "lfence", "pause")):
                 result.append(line)
                 i += 1
                 continue
@@ -51,9 +63,12 @@ class PeepholeOptimizer:
             args = [a.strip() for a in args_str.split(",")] if args_str else []
 
             # 1. Eliminate redundant self-moves: mov reg, reg
+            # CRITICAL ABI/Thread Guard: Only valid for full 64-bit registers!
+            # 32-bit `mov eax, eax` zeroes upper 32 bits and MUST be preserved!
             if op == "mov" and len(args) == 2 and args[0].lower() == args[1].lower():
-                i += 1
-                continue
+                if args[0].lower() in X64_64BIT_REGS:
+                    i += 1
+                    continue
 
             # 2. Eliminate redundant add/sub by 0
             if op in ("add", "sub") and len(args) == 2 and args[1] in ("0", "0h", "$0"):
@@ -69,13 +84,16 @@ class PeepholeOptimizer:
                 next_line = lines[next_idx]
                 next_stripped = next_line.strip()
 
+                # If next line is a memory barrier, do not optimize across it!
+                if any(next_stripped.lower().startswith(b) for b in ("lock ", "mfence", "sfence", "lfence", "pause")):
+                    result.append(line)
+                    i += 1
+                    continue
+
                 # 3. Eliminate redundant jmp to next immediate label:
-                # jmp .L1
-                # .L1: -> jmp eliminated
                 if op in ("jmp", "jmp short") and len(args) == 1:
                     target_label = args[0]
                     if next_stripped == f"{target_label}:":
-                        # Skip jmp, advance to next line
                         i = next_idx
                         continue
 
@@ -102,15 +120,18 @@ class PeepholeOptimizer:
 
                     # 5. Eliminate redundant write then immediate read from stack:
                     # mov [rbp - X], rax
-                    # mov rax, [rbp - X] -> second is redundant!
+                    # mov rax, [rbp - X] -> second is redundant ONLY for private local stack frames!
                     if op == "mov" and next_op == "mov" and len(args) == 2 and len(next_args) == 2:
                         dst1, src1 = args[0].lower(), args[1].lower()
                         dst2, src2 = next_args[0].lower(), next_args[1].lower()
                         if dst1 == src2 and src1 == dst2:
-                            # Keep first mov, skip second
-                            result.append(line)
-                            i = next_idx + 1
-                            continue
+                            # Thread Safety: ONLY eliminate for thread-private stack variables:
+                            # [rbp - ...] or [rsp + ...].
+                            # NEVER eliminate for heap memory ([rcx]), globals ([rel ...]), or shared memory!
+                            if dst1.startswith("[rbp -") or dst1.startswith("[rsp +"):
+                                result.append(line)
+                                i = next_idx + 1
+                                continue
 
             result.append(line)
             i += 1

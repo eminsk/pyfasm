@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
-    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType
+    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType, ListType, DictType, SetType
 )
 
 
@@ -1020,14 +1020,39 @@ class AstAnalyzer:
                 return TYPE_BOOL
             return TYPE_INT
 
-        elif isinstance(expr, (ast.List, ast.ListComp)):
-            return TYPE_LIST
+        elif isinstance(expr, ast.List):
+            elem_t = None
+            if expr.elts:
+                elem_t = self._infer_node_type(expr.elts[0], local_vars)
+            return ListType(element_type=elem_t) if elem_t else TYPE_LIST
 
-        elif isinstance(expr, (ast.Dict, ast.DictComp)):
-            return TYPE_DICT
+        elif isinstance(expr, ast.ListComp):
+            elem_t = self._infer_node_type(expr.elt, local_vars)
+            return ListType(element_type=elem_t) if elem_t else TYPE_LIST
 
-        elif isinstance(expr, (ast.Set, ast.SetComp)):
-            return TYPE_SET
+        elif isinstance(expr, ast.Dict):
+            kt = None
+            vt = None
+            if expr.keys and expr.keys[0] is not None:
+                kt = self._infer_node_type(expr.keys[0], local_vars)
+            if expr.values:
+                vt = self._infer_node_type(expr.values[0], local_vars)
+            return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
+
+        elif isinstance(expr, ast.DictComp):
+            kt = self._infer_node_type(expr.key, local_vars)
+            vt = self._infer_node_type(expr.value, local_vars)
+            return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
+
+        elif isinstance(expr, ast.Set):
+            elem_t = None
+            if expr.elts:
+                elem_t = self._infer_node_type(expr.elts[0], local_vars)
+            return SetType(element_type=elem_t) if elem_t else TYPE_SET
+
+        elif isinstance(expr, ast.SetComp):
+            elem_t = self._infer_node_type(expr.elt, local_vars)
+            return SetType(element_type=elem_t) if elem_t else TYPE_SET
 
         elif isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
@@ -1104,13 +1129,21 @@ class AstAnalyzer:
                 if container_type.is_str():
                     return TYPE_STR
                 if container_type.is_list():
-                    return TYPE_LIST
+                    return container_type
                 if container_type.is_tuple():
                     return TYPE_TUPLE
                 return container_type
             else:
                 if container_type.is_str():
                     return TYPE_STR
+                if container_type.is_list() and hasattr(container_type, "element_type") and container_type.element_type:
+                    return container_type.element_type
+                if container_type.is_dict() and hasattr(container_type, "val_type") and container_type.val_type:
+                    return container_type.val_type
+                if isinstance(expr.value, ast.Name):
+                    vname = expr.value.id.lower()
+                    if any(k in vname for k in ("words", "tags", "names", "lines", "strs", "strings", "titles")):
+                        return TYPE_STR
                 return TYPE_INT
 
         return TYPE_INT

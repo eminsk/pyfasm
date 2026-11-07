@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import List, Dict, Optional, Tuple, Set, Any
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
-from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, PyFasmType
+from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, TYPE_PTR, PyFasmType, ListType, DictType, SetType
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
     # Registers
@@ -869,6 +869,8 @@ include 'functions.inc'
         raw_parts = [header, data, entry, funcs, runtime, imports]
         if rsrc:
             raw_parts.append(rsrc)
+        if self.target == "dll":
+            raw_parts.append("section '.reloc' fixups data discardable\n")
         raw = "\n".join(raw_parts)
         from pyfasm.optimizer import optimize_fasm_code
         return optimize_fasm_code(raw)
@@ -1937,18 +1939,40 @@ include 'functions.inc'
                 return TYPE_STR
             if any(k in expr.id.lower() for k in ("dict", "map", "table", "cache", "lookup", "modules", "headers", "params", "environ", "registry", "vars")):
                 return TYPE_DICT
-        if isinstance(expr, (ast.List, ast.ListComp)):
-            return TYPE_LIST
+        if isinstance(expr, ast.List):
+            elem_t = None
+            if expr.elts:
+                elem_t = self._infer_expr_type(expr.elts[0])
+            return ListType(element_type=elem_t) if elem_t else TYPE_LIST
+        if isinstance(expr, ast.ListComp):
+            elem_t = self._infer_expr_type(expr.elt)
+            return ListType(element_type=elem_t) if elem_t else TYPE_LIST
         if isinstance(expr, ast.IfExp):
             return self._infer_expr_type(expr.body)
         if isinstance(expr, ast.NamedExpr):
             return self._infer_expr_type(expr.value)
         if isinstance(expr, ast.BoolOp):
             return TYPE_BOOL
-        if isinstance(expr, (ast.Dict, ast.DictComp)):
-            return TYPE_DICT
-        if isinstance(expr, (ast.Set, ast.SetComp)):
-            return TYPE_SET
+        if isinstance(expr, ast.Dict):
+            kt = None
+            vt = None
+            if expr.keys and expr.keys[0] is not None:
+                kt = self._infer_expr_type(expr.keys[0])
+            if expr.values:
+                vt = self._infer_expr_type(expr.values[0])
+            return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
+        if isinstance(expr, ast.DictComp):
+            kt = self._infer_expr_type(expr.key)
+            vt = self._infer_expr_type(expr.value)
+            return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
+        if isinstance(expr, ast.Set):
+            elem_t = None
+            if expr.elts:
+                elem_t = self._infer_expr_type(expr.elts[0])
+            return SetType(element_type=elem_t) if elem_t else TYPE_SET
+        if isinstance(expr, ast.SetComp):
+            elem_t = self._infer_expr_type(expr.elt)
+            return SetType(element_type=elem_t) if elem_t else TYPE_SET
         if isinstance(expr, ast.Tuple):
             return TYPE_TUPLE
         if isinstance(expr, ast.Subscript):
@@ -1957,6 +1981,15 @@ include 'functions.inc'
                 return TYPE_STR
             if isinstance(expr.slice, ast.Slice):
                 return val_type
+            if val_type.is_list() and hasattr(val_type, "element_type") and val_type.element_type:
+                return val_type.element_type
+            if val_type.is_dict() and hasattr(val_type, "val_type") and val_type.val_type:
+                return val_type.val_type
+            if isinstance(expr.value, ast.Name):
+                vname = expr.value.id.lower()
+                if any(k in vname for k in ("words", "tags", "names", "lines", "strs", "strings", "titles")):
+                    return TYPE_STR
+            return TYPE_INT
         if isinstance(expr, ast.BinOp):
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
@@ -1992,6 +2025,7 @@ include 'functions.inc'
                     obj_type = self._infer_expr_type(expr.func.value)
                     if obj_type.is_dict() and len(expr.args) >= 2:
                         return self._infer_expr_type(expr.args[1])
+                    return TYPE_PTR
                 if attr == "choice":
                     return TYPE_STR
                 if attr in ("lower", "upper", "strip", "replace", "format"):
@@ -4102,9 +4136,12 @@ include 'functions.inc'
                     elif arg_type.is_float():
                         self.emit("movq xmm0, rax")
                         self.emit("call _pyfasm_print_float")
+                    elif arg_type.is_int() or arg_type.is_bool():
+                        self.emit("mov rcx, rax")
+                        self.emit("call _pyfasm_print_int")
                     else:
                         self.emit("mov rcx, rax")
-                        # Use runtime auto-detect for dynamic types (call results, subscripts)
+                        # Use runtime auto-detect only for truly dynamic untyped containers
                         if isinstance(arg, (ast.Call, ast.Subscript)):
                             self.emit("call _pyfasm_print_auto")
                         else:
