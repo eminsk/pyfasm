@@ -773,7 +773,7 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
-                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce"):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce"):
                     continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
@@ -1391,17 +1391,20 @@ include 'functions.inc'
                         self.emit("mov r8, rax", "array base pointer")
                         self.emit("pop r11", "index")
                         self.emit("pop rax", "value")
-                        is_list_target = False
+                        is_ptr_target = False
                         if isinstance(target.value, ast.Name) and self.current_func:
                             v = self.current_func.local_vars.get(target.value.id)
-                            if v and (v.var_type.is_list() or v.var_type.is_tuple()):
-                                is_list_target = True
+                            if v and (v.var_type == TYPE_PTR or any(k in v.name.lower() for k in ("mem", "ptr", "buffer"))):
+                                is_ptr_target = True
+                        elif self._infer_expr_type(target.value) == TYPE_PTR:
+                            is_ptr_target = True
+
                         lbl_skip_store = self.new_label("skip_arr_store")
                         self.emit("test r8, r8", "check null array")
                         self.emit(f"jz {lbl_skip_store}")
                         self.emit("cmp r8, 65536", "check valid user-mode pointer")
                         self.emit(f"jb {lbl_skip_store}")
-                        if is_list_target:
+                        if not is_ptr_target:
                             lbl_idx_pos = self.new_label("idx_pos")
                             self.emit("test r11, r11", "check negative index")
                             self.emit(f"jns {lbl_idx_pos}")
@@ -1411,10 +1414,10 @@ include 'functions.inc'
                         self.emit(f"js {lbl_skip_store}")
                         self.emit("cmp r11, 1000000", "check index bounds")
                         self.emit(f"jae {lbl_skip_store}")
-                        if is_list_target:
-                            self.emit("mov [r8 + (r11 + 1) * 8], rax", "store list[idx] = val")
+                        if is_ptr_target:
+                            self.emit("mov [r8 + r11 * 8], rax", "store mem[idx] = val")
                         else:
-                            self.emit("mov [r8 + r11 * 8], rax", "store arr[idx] = val")
+                            self.emit("mov [r8 + (r11 + 1) * 8], rax", "store list[idx] = val")
                         self.emit_raw(f"{lbl_skip_store}:")
                 elif isinstance(target, ast.Attribute):
                     # Check if target is a module global attribute (e.g. config.TIMEOUT = 100 or typing._check_generic = ...)
@@ -1562,8 +1565,19 @@ include 'functions.inc'
             l_end = self.new_label("if_end")
 
             self._generate_expr(stmt.test)  # test result in RAX
+            is_seq = False
+            vt = self._infer_expr_type(stmt.test)
+            if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
+                is_seq = True
+            elif isinstance(stmt.test, ast.Name) and self.current_func:
+                v = self.current_func.local_vars.get(stmt.test.id)
+                if v and (v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set()):
+                    is_seq = True
             self.emit("test rax, rax")
             self.emit(f"jz {l_else}")
+            if is_seq:
+                self.emit("cmp qword [rax], 0", "check empty container")
+                self.emit(f"jz {l_else}")
 
             # Then body
             for s in stmt.body:
@@ -1708,6 +1722,7 @@ include 'functions.inc'
                     self._emit_func_exit()
                 else:
                     self.emit("mov ecx, eax")
+                    self.emit("sub rsp, 40")
                     self.emit("call [ExitProcess]")
 
         elif isinstance(stmt, ast.Assert):
@@ -1724,6 +1739,7 @@ include 'functions.inc'
                     self._emit_func_exit()
                 else:
                     self.emit("mov ecx, 1", "AssertionError exit code 1")
+                    self.emit("sub rsp, 40")
                     self.emit("call [ExitProcess]")
             self.emit_raw(f"{lbl_ok}:")
 
@@ -1742,15 +1758,22 @@ include 'functions.inc'
             var = self.current_func.local_vars.get(target_node.id) if self.current_func else None
             if var:
                 self.emit(f"mov [rbp - {var.stack_offset}], {value_reg}", f"assign {var.name}")
+            elif target_node.id in self.module.global_vars:
+                self.emit(f"mov [_pyfasm_global_{target_node.id}], {value_reg}", f"assign global {target_node.id}")
         elif isinstance(target_node, (ast.Tuple, ast.List)):
             if value_reg != "r10":
                 self.emit(f"mov r10, {value_reg}", "container item to unpack")
             for idx, elt in enumerate(target_node.elts):
                 if isinstance(elt, ast.Name):
+                    if elt.id == "_":
+                        continue
                     e_var = self.current_func.local_vars.get(elt.id) if self.current_func else None
                     if e_var:
                         self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", f"unpack {elt.id}")
                         self.emit(f"mov [rbp - {e_var.stack_offset}], rax")
+                    elif elt.id in self.module.global_vars:
+                        self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", f"unpack global {elt.id}")
+                        self.emit(f"mov [_pyfasm_global_{elt.id}], rax")
                 elif isinstance(elt, (ast.Tuple, ast.List)):
                     self.emit("push r10")
                     self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", "load inner container")
@@ -2010,6 +2033,8 @@ include 'functions.inc'
         if isinstance(expr, ast.NamedExpr):
             return self._infer_expr_type(expr.value)
         if isinstance(expr, ast.BoolOp):
+            if expr.values:
+                return self._infer_expr_type(expr.values[-1])
             return TYPE_BOOL
         if isinstance(expr, ast.Dict):
             kt = None
@@ -2047,10 +2072,18 @@ include 'functions.inc'
                 vname = expr.value.id.lower()
                 if any(k in vname for k in ("words", "tags", "names", "lines", "strs", "strings", "titles")):
                     return TYPE_STR
+                if any(k in vname for k in ("matrix", "mat", "grid", "board", "table", "rows", "cols")) or expr.value.id in ("A", "B", "C", "D", "M"):
+                    return ListType(element_type=TYPE_INT)
             return TYPE_INT
         if isinstance(expr, ast.BinOp):
+            if isinstance(expr.op, ast.MatMult):
+                return ListType(element_type=TYPE_LIST)
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
+            if isinstance(expr.op, ast.Mult) and (lt.is_list() or rt.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple))):
+                return lt if (lt.is_list() or lt.is_tuple() or isinstance(expr.left, (ast.List, ast.Tuple))) else rt
+            if isinstance(expr.op, ast.Add) and (lt.is_list() or rt.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple))):
+                return lt if (lt.is_list() or lt.is_tuple() or isinstance(expr.left, (ast.List, ast.Tuple))) else rt
             if lt.is_str() or rt.is_str():
                 return TYPE_STR
             if lt.is_float() or rt.is_float():
@@ -2060,13 +2093,15 @@ include 'functions.inc'
         if isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fn_id = expr.func.id
-                if fn_id in ("str", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct"):
+                if fn_id in ("str", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct", "get_simd_isa"):
                     return TYPE_STR
                 if fn_id in ("float",):
                     return TYPE_FLOAT
-                if fn_id in ("bool", "isinstance", "any", "all"):
+                if fn_id in ("bool", "isinstance", "any", "all", "isdigit", "isascii"):
                     return TYPE_BOOL
-                if fn_id in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted"):
+                if fn_id in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                    if fn_id in ("matmul",):
+                        return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
                 if fn_id in ("dict",):
                     return TYPE_DICT
@@ -2076,6 +2111,16 @@ include 'functions.inc'
                     return self.module.functions[fn_id].return_type
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
+                if attr in ("matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise", "split", "findall"):
+                    if attr in ("matmul",):
+                        return ListType(element_type=TYPE_LIST)
+                    return TYPE_LIST
+                if attr in ("isdigit", "isascii"):
+                    return TYPE_BOOL
+                if attr in ("bit_length", "count", "find", "index"):
+                    return TYPE_INT
+                if attr in ("get_simd_isa",):
+                    return TYPE_STR
                 if attr == "loads":
                     if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
                         return TYPE_DICT
@@ -2356,6 +2401,34 @@ include 'functions.inc'
 
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
+
+            # List repetition (Mult) or concatenation (Add)
+            is_left_list = lt.is_list() or lt.is_tuple() or isinstance(expr.left, (ast.List, ast.Tuple))
+            is_right_list = rt.is_list() or rt.is_tuple() or isinstance(expr.right, (ast.List, ast.Tuple))
+            if isinstance(expr.op, ast.Mult) and (is_left_list or is_right_list):
+                if is_left_list:
+                    self._generate_expr(expr.left)
+                    self.emit("push rax", "list_ptr")
+                    self._generate_expr(expr.right)
+                    self.emit("mov rdx, rax", "count")
+                    self.emit("pop rcx", "list_ptr")
+                else:
+                    self._generate_expr(expr.right)
+                    self.emit("push rax", "list_ptr")
+                    self._generate_expr(expr.left)
+                    self.emit("mov rdx, rax", "count")
+                    self.emit("pop rcx", "list_ptr")
+                self.emit("call _pyfasm_list_repeat")
+                return
+
+            if isinstance(expr.op, ast.Add) and (is_left_list or is_right_list):
+                self._generate_expr(expr.left)
+                self.emit("push rax", "list1")
+                self._generate_expr(expr.right)
+                self.emit("mov rdx, rax", "list2")
+                self.emit("pop rcx", "list1")
+                self.emit("call _pyfasm_list_concat")
+                return
             if (lt.is_float() or rt.is_float()) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Pow)):
                 self._generate_expr(expr.left)
                 if not lt.is_float():
@@ -2446,22 +2519,64 @@ include 'functions.inc'
                 for idx, val in enumerate(expr.values):
                     self._generate_expr(val)
                     if idx < len(expr.values) - 1:
+                        is_seq = False
+                        vt = self._infer_expr_type(val)
+                        if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
+                            is_seq = True
+                        elif isinstance(val, ast.Name) and self.current_func:
+                            v = self.current_func.local_vars.get(val.id)
+                            if v and (v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set()):
+                                is_seq = True
                         self.emit("test rax, rax")
                         self.emit(f"jz {lbl_end}")
+                        if is_seq:
+                            lbl_cont = self.new_label("seq_nonempty")
+                            self.emit("cmp qword [rax], 0", "check empty container")
+                            self.emit(f"jnz {lbl_cont}")
+                            self.emit("xor eax, eax")
+                            self.emit(f"jmp {lbl_end}")
+                            self.emit_raw(f"{lbl_cont}:")
             elif isinstance(expr.op, ast.Or):
                 for idx, val in enumerate(expr.values):
                     self._generate_expr(val)
                     if idx < len(expr.values) - 1:
-                        self.emit("test rax, rax")
-                        self.emit(f"jnz {lbl_end}")
+                        is_seq = False
+                        vt = self._infer_expr_type(val)
+                        if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
+                            is_seq = True
+                        elif isinstance(val, ast.Name) and self.current_func:
+                            v = self.current_func.local_vars.get(val.id)
+                            if v and (v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set()):
+                                is_seq = True
+                        if is_seq:
+                            lbl_next = self.new_label("boolop_next")
+                            self.emit("test rax, rax")
+                            self.emit(f"jz {lbl_next}")
+                            self.emit("cmp qword [rax], 0", "check non-empty container")
+                            self.emit(f"jnz {lbl_end}")
+                            self.emit_raw(f"{lbl_next}:")
+                        else:
+                            self.emit("test rax, rax")
+                            self.emit(f"jnz {lbl_end}")
             self.emit_raw(f"{lbl_end}:")
 
         elif isinstance(expr, ast.IfExp):
             lbl_else = self.new_label("ifexp_else")
             lbl_done = self.new_label("ifexp_done")
             self._generate_expr(expr.test)
+            is_seq = False
+            vt = self._infer_expr_type(expr.test)
+            if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
+                is_seq = True
+            elif isinstance(expr.test, ast.Name) and self.current_func:
+                v = self.current_func.local_vars.get(expr.test.id)
+                if v and (v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set()):
+                    is_seq = True
             self.emit("test rax, rax")
             self.emit(f"jz {lbl_else}")
+            if is_seq:
+                self.emit("cmp qword [rax], 0", "check empty container")
+                self.emit(f"jz {lbl_else}")
             self._generate_expr(expr.body)
             self.emit(f"jmp {lbl_done}")
             self.emit_raw(f"{lbl_else}:")
@@ -2584,6 +2699,30 @@ include 'functions.inc'
                     self.emit("mov rdx, rax", "str2")
                     self.emit("pop rcx", "str1")
                     self.emit("call _pyfasm_str_cmp")
+                    if isinstance(op, ast.NotEq):
+                        self.emit("xor eax, 1")
+                    return
+
+                is_left_seq = lt.is_list() or lt.is_tuple() or isinstance(expr.left, (ast.List, ast.Tuple))
+                is_right_seq = rt.is_list() or rt.is_tuple() or isinstance(expr.comparators[0], (ast.List, ast.Tuple))
+                if (is_left_seq or is_right_seq) and isinstance(op, (ast.Eq, ast.NotEq)):
+                    is_2d = False
+                    if hasattr(lt, "element_type") and lt.element_type and (lt.element_type.is_list() or lt.element_type.is_tuple()):
+                        is_2d = True
+                    if hasattr(rt, "element_type") and rt.element_type and (rt.element_type.is_list() or rt.element_type.is_tuple()):
+                        is_2d = True
+                    if isinstance(expr.comparators[0], ast.List) and expr.comparators[0].elts and isinstance(expr.comparators[0].elts[0], (ast.List, ast.Tuple)):
+                        is_2d = True
+                    if isinstance(expr.left, ast.List) and expr.left.elts and isinstance(expr.left.elts[0], (ast.List, ast.Tuple)):
+                        is_2d = True
+
+                    self._generate_expr(expr.left)
+                    self.emit("push rax")
+                    self._generate_expr(expr.comparators[0])
+                    self.emit("mov rdx, rax", "list2")
+                    self.emit("pop rcx", "list1")
+                    cmp_fn = "_pyfasm_list2d_eq" if is_2d else "_pyfasm_list_eq"
+                    self.emit(f"call {cmp_fn}")
                     if isinstance(op, ast.NotEq):
                         self.emit("xor eax, 1")
                     return
@@ -2775,6 +2914,16 @@ include 'functions.inc'
                     if v and v.var_type.is_str():
                         is_str_val = True
 
+                is_ptr_val = False
+                if val_t == TYPE_PTR:
+                    is_ptr_val = True
+                elif isinstance(expr.value, ast.Name) and self.current_func:
+                    v = self.current_func.local_vars.get(expr.value.id)
+                    if v and (v.var_type == TYPE_PTR or any(k in v.name.lower() for k in ("mem", "ptr", "buffer"))):
+                        is_ptr_val = True
+                elif isinstance(expr.value, ast.Call) and isinstance(expr.value.func, ast.Name) and expr.value.func.id in ("alloc_memory", "malloc"):
+                    is_ptr_val = True
+
                 lbl_null_arr = self.new_label("null_arr")
                 lbl_done_arr = self.new_label("done_arr")
                 self.emit("test rax, rax", "check null array")
@@ -2782,7 +2931,7 @@ include 'functions.inc'
                 self.emit("cmp rax, 65536", "check valid user-mode pointer")
                 self.emit(f"jb {lbl_null_arr}")
 
-                if is_list_val:
+                if not is_str_val and not is_ptr_val:
                     lbl_idx_pos = self.new_label("idx_pos")
                     self.emit("test r11, r11", "check negative index")
                     self.emit(f"jns {lbl_idx_pos}")
@@ -2804,10 +2953,10 @@ include 'functions.inc'
                     self.emit("movzx r10d, byte [rdx + r11]", "read char byte")
                     self.emit("mov byte [rax], r10b", "store char byte")
                     self.emit("mov byte [rax + 1], 0", "store null terminator")
-                elif is_list_val:
-                    self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
+                elif is_ptr_val:
+                    self.emit("mov rax, [rax + r11 * 8]", "load mem[idx]")
                 else:
-                    self.emit("mov rax, [rax + r11 * 8]", "load arr[idx]")
+                    self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
                 self.emit(f"jmp {lbl_done_arr}")
                 self.emit_raw(f"{lbl_null_arr}:")
                 self.emit("xor eax, eax", "null array default")
@@ -2990,8 +3139,7 @@ include 'functions.inc'
                 self.emit(f"jge {lbl_end}")
 
                 self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[idx]")
-                if target_var:
-                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+                self._assign_target(gen.target, "rax")
 
                 lbl_skip = self.new_label("comp_c_skip")
                 for if_expr in gen.ifs:
@@ -3104,8 +3252,7 @@ include 'functions.inc'
                 self.emit(f"jge {lbl_end}")
 
                 self.emit("mov rax, [rbx + rcx * 8 + 8]", "load container[idx]")
-                if target_var:
-                    self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"assign {target_var.name}")
+                self._assign_target(gen.target, "rax")
 
                 lbl_skip = self.new_label("dict_comp_c_skip")
                 for if_expr in gen.ifs:
@@ -3318,6 +3465,12 @@ include 'functions.inc'
             self.emit("sub rax, r11")
         elif isinstance(op, ast.Mult):
             self.emit("imul rax, r11")
+        elif isinstance(op, ast.MatMult):
+            self.emit("mov rcx, rax", "left matrix")
+            self.emit("mov rdx, r11", "right matrix")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_nanogemm_matmul")
+            self.emit("add rsp, 32")
         elif isinstance(op, ast.FloorDiv) or isinstance(op, ast.Div):
             lbl_div_ok = self.new_label("div_ok")
             lbl_div_end = self.new_label("div_end")
@@ -3417,7 +3570,11 @@ include 'functions.inc'
                 func_name = call.func.id
             elif isinstance(call.func, ast.Attribute):
                 attr_name = call.func.attr
-                if isinstance(call.func.value, ast.Name):
+                if isinstance(call.func.value, ast.Call) and isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "__import__":
+                    if call.func.value.args and isinstance(call.func.value.args[0], ast.Constant) and isinstance(call.func.value.args[0].value, str):
+                        prefix = call.func.value.args[0].value
+                        func_name = f"{prefix}_{attr_name}"
+                elif isinstance(call.func.value, ast.Name):
                     prefix = call.func.value.id
                     if prefix in ("self", "this"):
                         current_cls = getattr(self.current_func, "class_name", None)
@@ -3684,6 +3841,49 @@ include 'functions.inc'
                 self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
                 self.emit("call _pyfasm_list_pop")
                 return
+
+        # List / Container __setitem__(idx, val)
+        if attr_name == "__setitem__" and len(call.args) >= 2 and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "val")
+            self._generate_expr(call.args[0])
+            self.emit("push rax", "idx")
+            self._generate_expr(call.func.value)
+            self.emit("mov r8, rax", "container_ptr")
+            self.emit("pop rdx", "idx")
+            self.emit("pop rax", "val")
+            self.emit("mov [r8 + rdx * 8 + 8], rax", "store list[idx] = val")
+            self.emit("xor eax, eax", "return None")
+            return
+
+        # int.bit_length()
+        if attr_name == "bit_length" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            lbl_uid = getattr(self, "_lbl_cnt", 0) + 1
+            setattr(self, "_lbl_cnt", lbl_uid)
+            self.emit("test rax, rax")
+            self.emit(f"jz .bl_zero_{lbl_uid}")
+            self.emit("bsr rax, rax", "bit scan reverse")
+            self.emit("inc rax")
+            self.emit(f"jmp .bl_done_{lbl_uid}")
+            self.emit(f".bl_zero_{lbl_uid}:")
+            self.emit("xor eax, eax")
+            self.emit(f".bl_done_{lbl_uid}:")
+            return
+
+        # str.isdigit()
+        if attr_name == "isdigit" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "str_ptr")
+            self.emit("call _pyfasm_str_isdigit")
+            return
+
+        # str.isascii()
+        if attr_name == "isascii" and isinstance(call.func, ast.Attribute):
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "str_ptr")
+            self.emit("call _pyfasm_str_isascii")
+            return
 
         # File methods: f.write(content), f.read(), f.close()
         if attr_name == "write" and call.args and isinstance(call.func, ast.Attribute):
@@ -4051,7 +4251,7 @@ include 'functions.inc'
                 else:
                     self.emit("xor eax, eax")
                 return
-            elif np_m in ("empty", "zeros", "ones"):
+            elif np_m in ("empty",):
                 self.emit("mov ecx, 32")
                 self.emit("call _pyfasm_list_create")
                 return
@@ -4730,29 +4930,29 @@ include 'functions.inc'
                     self.emit("add rsp, 32")
                     return
 
-                is_list_or_tuple = False
                 is_dict_arg = False
+                is_str_arg = False
                 arg0_type = self._infer_expr_type(arg0)
-                if arg0_type.is_list() or arg0_type.is_tuple():
-                    is_list_or_tuple = True
+                if arg0_type.is_str():
+                    is_str_arg = True
                 elif arg0_type.is_dict() or arg0_type.is_set():
                     is_dict_arg = True
                 elif isinstance(arg0, ast.Name) and self.current_func:
                     var = self.current_func.local_vars.get(arg0.id)
                     if var:
-                        if var.var_type.is_list() or var.var_type.is_tuple():
-                            is_list_or_tuple = True
+                        if var.var_type.is_str():
+                            is_str_arg = True
                         elif var.var_type.is_dict() or var.var_type.is_set():
                             is_dict_arg = True
                 self._generate_expr(arg0)
-                if is_list_or_tuple:
-                    self.emit("mov rax, [rax]", "load length from header")
+                if is_str_arg:
+                    self.emit("mov rcx, rax")
+                    self.emit("call _pyfasm_str_len")
                 elif is_dict_arg:
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_dict_len")
                 else:
-                    self.emit("mov rcx, rax")
-                    self.emit("call _pyfasm_str_len")
+                    self.emit("mov rax, [rax]", "load length from header")
             return
 
         if func_name == "file_write":
@@ -4847,24 +5047,36 @@ include 'functions.inc'
             self.emit("add rsp, 32", "restore shadow space")
             return
 
-        # Standard library bisect / bisect_right(a, x)
+        # Standard library bisect / bisect_right(a, x, [lo=0])
         if (func_name in ("bisect", "bisect_right") or (prefix == "bisect" and attr_name in ("bisect", "bisect_right"))) and len(call.args) >= 2:
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "lo")
+            else:
+                self.emit("push 0", "default lo = 0")
             self._generate_expr(call.args[1])
             self.emit("push rax", "save search item")
             self._generate_expr(call.args[0])
             self.emit("mov rcx, rax", "pass list a")
             self.emit("pop rdx", "pass search item")
+            self.emit("pop r8", "pass lo")
             self.emit("sub rsp, 32", "shadow space for _pyfasm_bisect_right")
             self.emit("call _pyfasm_bisect_right")
             self.emit("add rsp, 32", "restore shadow space")
             return
 
         if (func_name == "bisect_left" or (prefix == "bisect" and attr_name == "bisect_left")) and len(call.args) >= 2:
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+                self.emit("push rax", "lo")
+            else:
+                self.emit("push 0", "default lo = 0")
             self._generate_expr(call.args[1])
             self.emit("push rax", "save search item")
             self._generate_expr(call.args[0])
             self.emit("mov rcx, rax", "pass list a")
             self.emit("pop rdx", "pass search item")
+            self.emit("pop r8", "pass lo")
             self.emit("sub rsp, 32", "shadow space for _pyfasm_bisect_left")
             self.emit("call _pyfasm_bisect_left")
             self.emit("add rsp, 32", "restore shadow space")
@@ -4888,6 +5100,103 @@ include 'functions.inc'
             self.emit("sub rsp, 32", "shadow space for _pyfasm_heappop")
             self.emit("call _pyfasm_heappop")
             self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # heapq.heapreplace(heap, item)
+        if (func_name in ("heapreplace", "heapq_heapreplace") or (prefix == "heapq" and attr_name == "heapreplace")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "save new item")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass heap pointer")
+            self.emit("pop rdx", "pass new item")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_heapreplace")
+            self.emit("call _pyfasm_heapreplace")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # heapq.heapify(heap)
+        if (func_name in ("heapify", "heapq_heapify") or (prefix == "heapq" and attr_name == "heapify")) and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass heap pointer")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_heapify")
+            self.emit("call _pyfasm_heapify")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        # Built-in sorted(iterable) or list.sort()
+        if func_name == "sorted" and len(call.args) >= 1:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list to sort")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_sorted")
+            self.emit("call _pyfasm_sorted")
+            self.emit("add rsp, 32", "restore shadow space")
+            return
+
+        if (func_name == "sort" or attr_name == "sort") and (isinstance(call.func, ast.Attribute) or len(call.args) >= 1):
+            if isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.func.value)
+            else:
+                self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "pass list to sort")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_list_sort")
+            self.emit("call _pyfasm_list_sort")
+            self.emit("add rsp, 32", "restore shadow space")
+            self.emit("xor eax, eax", "sort() returns None")
+            return
+
+        # NanoGEMM / NumPy matmul and dot product
+        if (func_name in ("matmul", "nanogemm_matmul", "np_matmul", "np_dot") or (prefix in ("nanogemm", "np", "numpy") and attr_name in ("matmul", "dot"))) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "right matrix/vector")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "left matrix/vector")
+            self.emit("pop rdx", "right matrix/vector")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_nanogemm_matmul")
+            self.emit("add rsp, 32")
+            return
+
+        if (func_name in ("get_simd_isa", "nanogemm_simd_isa") or (prefix == "nanogemm" and attr_name == "get_simd_isa")):
+            self.emit("call _pyfasm_nanogemm_simd_isa")
+            return
+
+        # NumPy zeros: np.zeros(shape)
+        if (func_name == "zeros" or (prefix in ("np", "numpy") and attr_name == "zeros")) and call.args:
+            if isinstance(call.args[0], (ast.Tuple, ast.List)) and len(call.args[0].elts) == 2:
+                self._generate_expr(call.args[0].elts[1])
+                self.emit("push rax", "cols")
+                self._generate_expr(call.args[0].elts[0])
+                self.emit("mov rcx, rax", "rows")
+                self.emit("pop rdx", "cols")
+            else:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "n")
+                self.emit("xor edx, edx", "1D zeros")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_np_zeros")
+            self.emit("add rsp, 32")
+            return
+
+        # NumPy ones: np.ones(shape)
+        if (func_name == "ones" or (prefix in ("np", "numpy") and attr_name == "ones")) and call.args:
+            if isinstance(call.args[0], (ast.Tuple, ast.List)) and len(call.args[0].elts) == 2:
+                self._generate_expr(call.args[0].elts[1])
+                self.emit("push rax", "cols")
+                self._generate_expr(call.args[0].elts[0])
+                self.emit("mov rcx, rax", "rows")
+                self.emit("pop rdx", "cols")
+            else:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "n")
+                self.emit("xor edx, edx", "1D ones")
+            self.emit("sub rsp, 32")
+            self.emit("call _pyfasm_np_ones")
+            self.emit("add rsp, 32")
+            return
+
+        # NumPy array / asarray: np.array(x)
+        if (func_name in ("array", "asarray") or (prefix in ("np", "numpy") and attr_name in ("array", "asarray"))) and call.args:
+            self._generate_expr(call.args[0])
             return
 
         # math.gcd(a, b)

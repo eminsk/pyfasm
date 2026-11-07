@@ -212,6 +212,18 @@ class ClassLambdaDesugarer(ast.NodeTransformer):
                     col_offset=getattr(item, "col_offset", 0)
                 )
                 new_body.append(self.visit(fn_node))
+            elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and isinstance(item.value, ast.Lambda):
+                method_name = item.target.id
+                fn_node = ast.FunctionDef(
+                    name=method_name,
+                    args=item.value.args,
+                    body=[ast.Return(value=item.value.body)],
+                    decorator_list=[],
+                    returns=item.annotation,
+                    lineno=getattr(item, "lineno", 1),
+                    col_offset=getattr(item, "col_offset", 0)
+                )
+                new_body.append(self.visit(fn_node))
             else:
                 new_body.append(self.visit(item))
         node.body = new_body
@@ -532,6 +544,7 @@ class AstAnalyzer:
 
     def parse_source(self, source_code: str) -> ParsedModule:
         """Parses a raw Python source code string into a ParsedModule."""
+        source_code = source_code.lstrip("\ufeff")
         tree = ast.parse(source_code)
         tree = preprocess_ast(tree)
         module = ParsedModule()
@@ -592,7 +605,7 @@ class AstAnalyzer:
             "numpy", "scipy", "matplotlib", "torch", "cv2", "pandas",
             "cryptography", "win32api", "win32gui", "pythoncom", "ctypes",
             "customtkinter", "tkinter", "ttkbootstrap", "pil", "pillow",
-            "pyfasm", "pyfasm64",
+            "pyfasm", "pyfasm64", "nanogemm",
         ):
             return True
         if path.is_dir():
@@ -631,7 +644,7 @@ class AstAnalyzer:
 
         try:
             from pyfasm.ui_analyzer import analyze_ui_structure
-            entry_tree = ast.parse(entry_path.read_text(encoding="utf-8-sig"))
+            entry_tree = ast.parse(entry_path.read_text(encoding="utf-8-sig").lstrip("\ufeff"))
             module.ui_spec = analyze_ui_structure(entry_tree)
             if not module.ui_spec and hasattr(self, "_visited_files"):
                 for v_path in self._visited_files:
@@ -639,7 +652,7 @@ class AstAnalyzer:
                     if ".venv" in v_str or "site-packages" in v_str:
                         continue
                     try:
-                        v_tree = ast.parse(v_path.read_text(encoding="utf-8-sig"))
+                        v_tree = ast.parse(v_path.read_text(encoding="utf-8-sig").lstrip("\ufeff"))
                         cand_spec = analyze_ui_structure(v_tree)
                         if cand_spec and (cand_spec.widgets or cand_spec.window_title != "PyFASM Application"):
                             module.ui_spec = cand_spec
@@ -718,10 +731,13 @@ class AstAnalyzer:
             return
 
         try:
-            source_code = real_path.read_text(encoding="utf-8-sig")
+            source_code = real_path.read_text(encoding="utf-8-sig").lstrip("\ufeff")
             tree = ast.parse(source_code)
             tree = preprocess_ast(tree)
-        except Exception:
+        except Exception as e:
+            if is_entry:
+                import sys
+                print(f"[PyFASM ERROR] Failed to parse {real_path}: {e}", file=sys.stderr)
             return
 
         # 1. Collect imports, string & float constants across the AST
@@ -1134,13 +1150,15 @@ class AstAnalyzer:
             return TYPE_STR
 
         elif isinstance(expr, ast.BinOp):
+            if isinstance(expr.op, ast.MatMult):
+                return ListType(element_type=TYPE_LIST)
             left_t = self._infer_node_type(expr.left, local_vars)
             right_t = self._infer_node_type(expr.right, local_vars)
             if left_t.is_float() or right_t.is_float():
                 return TYPE_FLOAT
             if left_t.is_str() or right_t.is_str():
                 return TYPE_STR
-            if left_t.is_list():
+            if left_t.is_list() or right_t.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple)):
                 return TYPE_LIST
             return TYPE_INT
 
@@ -1161,15 +1179,17 @@ class AstAnalyzer:
         elif isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fid = expr.func.id
-                if fid in ("str", "chr", "hex", "bin", "file_read"):
+                if fid in ("str", "chr", "hex", "bin", "file_read", "get_simd_isa"):
                     return TYPE_STR
-                elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open"):
+                elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open", "bit_length"):
                     return TYPE_INT
                 elif fid in ("float", "pow"):
                     return TYPE_FLOAT
-                elif fid in ("bool", "isinstance", "issubclass"):
+                elif fid in ("bool", "isinstance", "issubclass", "isdigit", "isascii"):
                     return TYPE_BOOL
-                elif fid in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted"):
+                elif fid in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                    if fid in ("matmul",):
+                        return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
                 elif fid in ("dict",):
                     return TYPE_DICT
@@ -1179,12 +1199,16 @@ class AstAnalyzer:
                     return TYPE_TUPLE
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice"):
+                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice", "get_simd_isa"):
                     return TYPE_STR
-                elif attr in ("keys", "values", "items", "chain", "accumulate"):
+                elif attr in ("keys", "values", "items", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                    if attr in ("matmul",):
+                        return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
-                elif attr in ("count", "find", "index"):
+                elif attr in ("count", "find", "index", "bit_length"):
                     return TYPE_INT
+                elif attr in ("isdigit", "isascii"):
+                    return TYPE_BOOL
                 elif attr == "loads":
                     # json.loads() returns dict
                     if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
@@ -1209,8 +1233,10 @@ class AstAnalyzer:
             else:
                 if container_type.is_str():
                     return TYPE_STR
-                if container_type.is_list() and hasattr(container_type, "element_type") and container_type.element_type:
-                    return container_type.element_type
+                if container_type.is_list():
+                    if hasattr(container_type, "element_type") and container_type.element_type:
+                        return container_type.element_type
+                    return TYPE_LIST
                 if container_type.is_dict() and hasattr(container_type, "val_type") and container_type.val_type:
                     return container_type.val_type
                 if isinstance(expr.value, ast.Name):
@@ -1435,7 +1461,7 @@ class AstAnalyzer:
                             vname = usage_node.func.value.id
                             if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
                                 local_vars[vname].var_type = TYPE_LIST
-                    elif isinstance(usage_node.func, ast.Name) and usage_node.func.id == "len":
+                    elif isinstance(usage_node.func, ast.Name) and usage_node.func.id in ("len", "heappop", "heappush", "heapreplace", "heapify"):
                         if usage_node.args and isinstance(usage_node.args[0], ast.Name):
                             vname = usage_node.args[0].id
                             if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
