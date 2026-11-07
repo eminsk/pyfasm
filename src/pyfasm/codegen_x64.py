@@ -950,7 +950,7 @@ include 'functions.inc'
                 self.emit(f"mov [rbp - {arg.stack_offset}], {arg_regs[idx]}", f"arg {arg.name}")
             else:
                 # 5th+ arg is on caller stack at [rbp + 16 + (idx-4)*8]
-                caller_offset = 16 + (idx - 4) * 8
+                caller_offset = 48 + (idx - 4) * 8
                 self.emit(f"mov rax, [rbp + {caller_offset}]")
                 self.emit(f"mov [rbp - {arg.stack_offset}], rax", f"arg {arg.name}")
 
@@ -1008,7 +1008,7 @@ include 'functions.inc'
                 self.emit(f"mov rax, [rbp - {(idx + 1) * 8}]")
                 self.emit(f"mov [r8 + {32 + arg.stack_offset}], rax", f"store arg {arg.name}")
             else:
-                caller_offset = 16 + (idx - 4) * 8
+                caller_offset = 48 + (idx - 4) * 8
                 self.emit(f"mov rax, [rbp + {caller_offset}]")
                 self.emit(f"mov [r8 + {32 + arg.stack_offset}], rax", f"store stack arg {arg.name}")
 
