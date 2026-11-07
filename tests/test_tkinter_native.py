@@ -3,6 +3,7 @@ Tests for Native Tkinter and Canvas FASM Codegen & Assembly.
 Verifies that pure Python Tkinter code compiles directly into native Win32/GDI
 assembly and PE64 machine code without Python VM, Tcl/Tk DLLs, or external interpreters.
 """
+import sys
 import ast
 import tempfile
 from pathlib import Path
@@ -10,6 +11,9 @@ import pytest
 from pyfasm.ast_parser import AstAnalyzer
 from pyfasm.codegen_x64 import X64CodeGen
 from pyfasm.compiler import PyFasmCompiler
+
+if sys.platform != "win32":
+    pytest.skip("Win64 native tests require Windows environment", allow_module_level=True)
 
 
 def test_tkinter_widgets_and_config_asm_generation():

@@ -1,8 +1,12 @@
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
 import pytest
 from pyfasm import PyFasmCompiler
+
+if sys.platform != "win32":
+    pytest.skip("Win64 native tests require Windows environment", allow_module_level=True)
 
 
 def test_user_solution_min_operations():

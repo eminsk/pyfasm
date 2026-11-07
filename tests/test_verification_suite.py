@@ -1,8 +1,12 @@
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
 import pytest
 from pyfasm.compiler import PyFasmCompiler
+
+if sys.platform != "win32":
+    pytest.skip("Win64 ABI verification suite requires Windows environment", allow_module_level=True)
 
 
 def run_pyfasm_code(code: str) -> subprocess.CompletedProcess:
