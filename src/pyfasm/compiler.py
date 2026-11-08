@@ -4,6 +4,7 @@ Compiler API orchestrating parsing, multi-module dependency resolution, code gen
 from __future__ import annotations
 import os
 import sys
+import shutil
 from pathlib import Path
 from typing import Tuple, Optional, List
 from pyfasm.ast_parser import AstAnalyzer, ParsedModule
@@ -136,6 +137,11 @@ class PyFasmCompiler:
         # Modular Assembly Generation: Create clean 'asm/' directory in project folder
         asm_dir = project_dir / "asm"
         asm_dir.mkdir(parents=True, exist_ok=True)
+        if icon_path and Path(icon_path).exists():
+            try:
+                shutil.copyfile(icon_path, asm_dir / "icon.ico")
+            except Exception:
+                pass
         for fname, m_content in modular_files.items():
             fpath = asm_dir / fname
             if isinstance(m_content, bytes):

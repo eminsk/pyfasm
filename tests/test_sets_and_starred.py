@@ -1,3 +1,5 @@
+import sys
+import pytest
 import subprocess
 from pathlib import Path
 from pyfasm.compiler import PyFasmCompiler
@@ -135,6 +137,7 @@ def main() -> int:
     assert "4 not in arr: YES" in res.stdout
 
 
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="match statement requires Python 3.10+ AST parser")
 def test_match_case_and_globals(tmp_path: Path):
     source = """
 counter = 100

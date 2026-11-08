@@ -9,6 +9,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
+_AST_MATCH = getattr(ast, 'Match', ())
+_AST_MATCH_AS = getattr(ast, 'MatchAs', ())
+_AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
+_AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
     TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType, ListType, DictType, SetType
@@ -1476,9 +1480,9 @@ class AstAnalyzer:
                                         is_arg=False
                                     )
                                     offset += 8
-                elif isinstance(sub_node, ast.Match):
+                elif isinstance(sub_node, _AST_MATCH):
                     for case in sub_node.cases:
-                        if isinstance(case.pattern, ast.MatchAs) and case.pattern.name:
+                        if isinstance(case.pattern, _AST_MATCH_AS) and case.pattern.name:
                             vname = case.pattern.name
                             if vname != "_" and vname not in global_names and vname not in local_vars:
                                 local_vars[vname] = VariableSymbol(

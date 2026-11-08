@@ -7,6 +7,10 @@ import ast
 from pathlib import Path
 import re
 from typing import List, Dict, Optional, Tuple, Set, Any
+_AST_MATCH = getattr(ast, 'Match', ())
+_AST_MATCH_AS = getattr(ast, 'MatchAs', ())
+_AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
+_AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, TYPE_PTR, PyFasmType, ListType, DictType, SetType
 
@@ -815,7 +819,7 @@ directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
 resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
 resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
 
-icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
+icon _pyfasm_main_icon, _pyfasm_icon_data, 'icon.ico'
 """
         return ""
 
@@ -1734,7 +1738,7 @@ include 'functions.inc'
                 self.emit("mov rax, 1", "AssertionError")
                 self.emit(f"jmp {self.try_stack[-1]}")
             else:
-                if self.current_func:
+                if self.current_func and self.current_func.name != "main":
                     self.emit("xor eax, eax", "assertion failure in function returns 0")
                     self._emit_func_exit()
                 else:
@@ -1750,7 +1754,7 @@ include 'functions.inc'
                     if var:
                         self.emit(f"mov qword [rbp - {var.stack_offset}], 0", f"del {var.name}")
 
-        elif isinstance(stmt, ast.Match):
+        elif isinstance(stmt, _AST_MATCH):
             self._generate_match(stmt)
 
     def _assign_target(self, target_node: ast.AST, value_reg: str = "rax") -> None:
@@ -3399,7 +3403,7 @@ include 'functions.inc'
 
         self.emit("pop rax", "return set_ptr in RAX")
 
-    def _generate_match(self, stmt: ast.Match) -> None:
+    def _generate_match(self, stmt: Any) -> None:
         self._generate_expr(stmt.subject)
         self.emit("push rax", "save match subject on stack")
         lbl_match_end = self.new_label("match_end")
@@ -3425,8 +3429,8 @@ include 'functions.inc'
         self.emit_raw(f"{lbl_match_end}:")
         self.emit("add rsp, 8", "cleanup match subject from stack")
 
-    def _generate_case_pattern_test(self, pattern: ast.pattern, lbl_success: str, lbl_failure: str) -> None:
-        if isinstance(pattern, ast.MatchValue):
+    def _generate_case_pattern_test(self, pattern: Any, lbl_success: str, lbl_failure: str) -> None:
+        if isinstance(pattern, _AST_MATCH_VALUE):
             self._generate_expr(pattern.value)
             self.emit("mov rdx, rax")
             self.emit("mov rcx, [rsp]", "subject")
@@ -3441,7 +3445,7 @@ include 'functions.inc'
             self.emit(f"jnz {lbl_success}")
             self.emit(f"jmp {lbl_failure}")
 
-        elif isinstance(pattern, ast.MatchAs):
+        elif isinstance(pattern, _AST_MATCH_AS):
             if pattern.name is None or pattern.name == "_":
                 self.emit(f"jmp {lbl_success}")
             else:
@@ -3454,7 +3458,7 @@ include 'functions.inc'
                         self.emit(f"mov [_pyfasm_global_{pattern.name}], rax", f"capture global {pattern.name}")
                 self.emit(f"jmp {lbl_success}")
 
-        elif isinstance(pattern, ast.MatchOr):
+        elif isinstance(pattern, _AST_MATCH_OR):
             for subpat in pattern.patterns:
                 sub_next = self.new_label("or_next")
                 self._generate_case_pattern_test(subpat, lbl_success, sub_next)
@@ -5328,20 +5332,20 @@ include 'functions.inc'
 
         # functools.reduce(fn, seq, [initial])
         if (func_name in ("reduce", "functools_reduce") or (prefix == "functools" and attr_name == "reduce")) and len(call.args) >= 2:
-            if len(call.args) >= 3:
+            has_init = 1 if len(call.args) >= 3 else 0
+            if has_init:
                 self._generate_expr(call.args[2])
                 self.emit("push rax", "initial value")
-                self.emit("mov r9, 1", "has initial")
             else:
-                self.emit("xor r8d, r8d")
-                self.emit("push r8")
-                self.emit("xor r9d, r9d", "no initial")
+                self.emit("xor eax, eax")
+                self.emit("push rax", "dummy initial value")
             self._generate_expr(call.args[1])
             self.emit("push rax", "list")
             self._generate_expr(call.args[0])
             self.emit("mov rcx, rax", "fn")
             self.emit("pop rdx", "list")
             self.emit("pop r8", "initial")
+            self.emit(f"mov r9d, {has_init}", "has initial flag")
             self.emit("sub rsp, 32", "shadow space for _pyfasm_functools_reduce")
             self.emit("call _pyfasm_functools_reduce")
             self.emit("add rsp, 32")

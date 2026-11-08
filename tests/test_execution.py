@@ -201,7 +201,8 @@ def get_magic_number() -> int:
     assert res2 == 777
 
     # Unload DLL to prevent address base lock in Windows process memory
-    ctypes.windll.kernel32.FreeLibrary(lib._handle)
+    if hasattr(lib, '_handle') and isinstance(lib._handle, int):
+        ctypes.windll.kernel32.FreeLibrary(lib._handle)
 
 
 def test_bundler_creates_native_launcher(tmp_path: Path):

@@ -271,7 +271,8 @@ def native_compute(x: int, y: int, z: int) -> int:
     assert res_compute == 90
 
     # Unload DLL so tmp_path can clean up safely
-    ctypes.windll.kernel32.FreeLibrary(lib._handle)
+    if hasattr(lib, '_handle') and isinstance(lib._handle, int):
+        ctypes.windll.kernel32.FreeLibrary(lib._handle)
 
 
 def test_verification_multithreaded_concurrency():

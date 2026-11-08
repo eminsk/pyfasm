@@ -522,14 +522,17 @@ def test_icon_pe_resource_compilation(tmp_path: Path):
     import shutil
     import sys
 
-    # Copy real icon if available or create minimal valid 16x16 .ico
-    real_ico = Path("C:/proekts/0122/icon.ico")
+    import struct
+    w, h = 16, 16
+    bpp = 32
+    dib_header = struct.pack('<IIIHHIIIIII', 40, w, h * 2, 1, bpp, 0, w * h * 4 + w * h // 8, 0, 0, 0, 0)
+    pixels = b'\x00\x00\xFF\xFF' * (w * h)
+    mask = b'\x00' * (w * h // 8)
+    bmp_data = dib_header + pixels + mask
+    ico_header = struct.pack('<HHH', 0, 1, 1)
+    ico_entry = struct.pack('<BBBBHHII', w, h, 0, 0, 1, bpp, len(bmp_data), 6 + 16)
     target_ico = tmp_path / "icon.ico"
-    if real_ico.exists():
-        shutil.copyfile(real_ico, target_ico)
-    else:
-        # Minimal valid 16x16 32-bpp icon header + BMP image data
-        target_ico.write_bytes(b"\x00\x00\x01\x00\x01\x00\x10\x10\x00\x00\x01\x00 \x00\x68\x04\x00\x00\x16\x00\x00\x00" + b"\x00" * 1128)
+    target_ico.write_bytes(ico_header + ico_entry + bmp_data)
 
     source = """
 def main():
