@@ -35,7 +35,7 @@ pyfasm64 = "pyfasm.cli:main"
 pyfasm = "pyfasm.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/eminsk/pyfasm"
+Homepage = "https://eminsk.github.io/#pyfasm"
 Repository = "https://github.com/eminsk/pyfasm"
 Issues = "https://github.com/eminsk/pyfasm/issues"
 
