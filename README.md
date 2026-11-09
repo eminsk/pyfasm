@@ -14,6 +14,7 @@
 [![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
 [![Targets: Windows | Linux | macOS | DLL](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20DLL-purple.svg?style=flat)]()
 [![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64%20v1.73.36-red.svg?style=flat)](https://flatassembler.net)
+[![FASM Forum](https://img.shields.io/badge/FASM%20Board-Official%20Topic-blue.svg)](https://board.flatassembler.net/topic.php?t=24431)
 [![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
 [![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
@@ -23,6 +24,7 @@
 > ### 🤝 Community, Issues & Support
 > - 🐛 **Found a bug, compiler issue, or edge case?** Please [Open an Issue](https://github.com/eminsk/pyfasm/issues) — bug reports and platform patches are tracked and resolved quickly!
 > - 💬 **Questions, cross-compilation ideas, or new architectures?** Join our [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
+> - 🏛️ **Official Community Topic:** [Flat Assembler Board (board.flatassembler.net)](https://board.flatassembler.net/topic.php?t=24431)
 > - ⭐ **Find PyFASM64 useful?** Give it a star on GitHub — it helps more developers discover the compiler!
 > - 📖 **Documentation:** Read online on GitHub, or use the CLI: `pyfasm docs` (English) or `pyfasm docs --ru` (Russian).
 > - ☕ **Support development (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
