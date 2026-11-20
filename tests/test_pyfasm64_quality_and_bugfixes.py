@@ -440,3 +440,63 @@ def main() -> int:
     assert lines[0] == "0123456789"
     assert lines[1] == "19"
 
+
+
+def _make_ico(sizes):
+    import struct as _struct
+    images = []
+    for w in sizes:
+        bpp = 32
+        dib = _struct.pack('<IIIHHIIIIII', 40, w, w * 2, 1, bpp, 0, w * w * 4 + w * w // 8, 0, 0, 0, 0)
+        images.append((w, bpp, dib + bytes([w & 0xFF]) * (w * w * 4) + b'\x00' * (w * w // 8)))
+    header = _struct.pack('<HHH', 0, 1, len(images))
+    offset = 6 + 16 * len(images)
+    entries, blobs = b"", b""
+    for w, bpp, blob in images:
+        entries += _struct.pack('<BBBBHHII', w & 0xFF, w & 0xFF, 0, 0, 1, bpp, len(blob), offset + len(blobs))
+        blobs += blob
+    return header + entries + blobs
+
+
+def test_icon_resource_inline_multi_image_and_invalid_input(tmp_path: Path):
+    from pyfasm.icon_resource import build_icon_rsrc_section, parse_ico
+
+    ico = _make_ico([16, 32])
+    imgs = parse_ico(ico)
+    assert [(i[0], i[5]) for i in imgs] == [(16, 32), (32, 32)]
+
+    rsrc = build_icon_rsrc_section(ico)
+    assert "resource _pyfasm_icons, 1, 0, _pyfasm_icon_data_1, 2, 0, _pyfasm_icon_data_2" in rsrc
+    assert "_pyfasm_main_icon dd RVA _pyfasm_icon_group_hdr, 34, 0, 0" in rsrc
+    assert "file " not in rsrc
+
+    # Invalid / missing inputs never produce a broken .rsrc section
+    assert build_icon_rsrc_section(b"\x89PNG not an ico") == ""
+    assert build_icon_rsrc_section(tmp_path / "missing.ico") == ""
+    assert build_icon_rsrc_section(None) == ""
+
+    # Generated assembly is self-contained: it assembles even after the .ico is deleted
+    from pyfasm.fasm_runner import FasmRunner
+
+    icon_file = tmp_path / "icon.ico"
+    icon_file.write_bytes(ico)
+    for onefile in (True, False):
+        launcher = ProjectBundler().generate_launcher_asm(
+            entry_script=str(tmp_path / "app.py"), target="win64", onefile=onefile, icon_path=str(icon_file)
+        )
+        assert "_pyfasm_icon_bits_2:" in launcher
+        assert "file " not in launcher.split("section '.rsrc'", 1)[1]
+        icon_backup = icon_file.read_bytes()
+        icon_file.unlink()
+        out_exe = tmp_path / f"launcher_{int(onefile)}.exe"
+        ok, log = FasmRunner().assemble(launcher, str(out_exe), asm_file_path=str(tmp_path / f"launcher_{int(onefile)}.asm"))
+        assert ok, log
+        icon_file.write_bytes(icon_backup)
+
+
+def test_asm_files_written_without_py310_only_write_text_newline():
+    # Path.write_text(newline=...) only exists on Python 3.10+, but pyfasm64 supports 3.8+.
+    for rel in ("src/pyfasm/compiler.py", "src/pyfasm/fasm_runner.py", "src/pyfasm/bundler.py",
+                "src/pyfasm/fasm_exporter.py", "src/pyfasm/codegen_x64.py", "src/pyfasm/cli.py"):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert not re.search(r"write_text\([^)]*newline\s*=\s*[\"']", text), rel

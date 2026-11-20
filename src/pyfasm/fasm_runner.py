@@ -377,7 +377,9 @@ class FasmRunner:
             asm_path = out_bin.with_suffix(".asm")
 
         asm_path.parent.mkdir(parents=True, exist_ok=True)
-        asm_path.write_text(asm_content.replace('\r\n', '\n'), encoding="utf-8", newline="\n")
+        # Path.write_text(newline=...) requires Python 3.10+; open() works on 3.8+.
+        with open(asm_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(asm_content.replace('\r\n', '\n'))
 
         env = os.environ.copy()
         env["INCLUDE"] = self.include_path

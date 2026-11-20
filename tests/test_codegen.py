@@ -551,7 +551,10 @@ def main():
     rsrc_content = asm_file.read_text(encoding="utf-8")
     assert "section '.rsrc' resource data readable" in rsrc_content
     assert "directory 3, _pyfasm_icons, 14, _pyfasm_group_icons" in rsrc_content
-    assert "icon _pyfasm_main_icon" in rsrc_content
+    assert "resource _pyfasm_icons, 1, 0, _pyfasm_icon_data_1" in rsrc_content
+    assert "_pyfasm_main_icon dd RVA _pyfasm_icon_group_hdr, 20, 0, 0" in rsrc_content
+    # Icon bytes are embedded inline: no assembly-time `file` reads (portable across host FASM builds)
+    assert "file " not in rsrc_content
 
     if sys.platform == "win32":
         import ctypes

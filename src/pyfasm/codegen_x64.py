@@ -827,19 +827,12 @@ class X64CodeGen:
         return ""
 
     def _get_resources_section(self, use_relative_icon: bool = True) -> str:
+        # The icon is embedded inline (see pyfasm.icon_resource), so the generated
+        # assembly never depends on the .ico location; ``use_relative_icon`` is kept
+        # for backwards API compatibility only.
         if self.target in ("win64", "dll") and self.icon_path and Path(self.icon_path).exists():
-            icon_ref = "icon.ico" if use_relative_icon else str(Path(self.icon_path).resolve()).replace("\\", "/")
-            return f"""include 'macro/resource.inc'
-
-section '.rsrc' resource data readable
-
-directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
-
-resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
-resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
-
-icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_ref}'
-"""
+            from pyfasm.icon_resource import build_icon_rsrc_section
+            return build_icon_rsrc_section(self.icon_path)
         return ""
 
     def generate_modular(self) -> Dict[str, str]:

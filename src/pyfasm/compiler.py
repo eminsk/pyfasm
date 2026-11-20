@@ -150,10 +150,13 @@ class PyFasmCompiler:
                     fpath.write_bytes(m_content.replace(b"\r\r\n", b"\r\n") if not fname.lower().endswith((".ico", ".png", ".bmp", ".bin")) else m_content)
                 else:
                     clean_text = m_content.replace("\r\n", "\n")
+                    # Path.write_text(newline=...) requires Python 3.10+; open() works on 3.8+.
                     try:
-                        fpath.write_text(clean_text, encoding="utf-8", newline="\n")
-                    except Exception:
-                        fpath.write_text(clean_text, encoding="latin-1", newline="\n")
+                        with open(fpath, "w", encoding="utf-8", newline="\n") as fh:
+                            fh.write(clean_text)
+                    except UnicodeEncodeError:
+                        with open(fpath, "w", encoding="latin-1", newline="\n") as fh:
+                            fh.write(clean_text)
             return target_asm_dir / "main.asm"
 
         if keep_asm:

@@ -368,19 +368,10 @@ section '.idata' import data readable writeable
            ExitProcess, 'ExitProcess'
 """
             if icon_path and Path(icon_path).exists():
-                icon_posix = str(Path(icon_path).resolve()).replace("\\", "/")
-                win_asm += f"""
-include 'macro/resource.inc'
-
-section '.rsrc' resource data readable
-
-directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
-
-resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
-resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
-
-icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
-"""
+                from pyfasm.icon_resource import build_icon_rsrc_section
+                rsrc = build_icon_rsrc_section(icon_path)
+                if rsrc:
+                    win_asm += "\n" + rsrc
             return win_asm
         else:
             # Directory wrapper mode
@@ -468,19 +459,10 @@ section '.idata' import data readable writeable
            ExitProcess, 'ExitProcess'
 """
             if icon_path and Path(icon_path).exists():
-                icon_posix = str(Path(icon_path).resolve()).replace("\\", "/")
-                win_asm += f"""
-include 'macro/resource.inc'
-
-section '.rsrc' resource data readable
-
-directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
-
-resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
-resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
-
-icon _pyfasm_main_icon, _pyfasm_icon_data, {_fasm_db_str(icon_posix)}
-"""
+                from pyfasm.icon_resource import build_icon_rsrc_section
+                rsrc = build_icon_rsrc_section(icon_path)
+                if rsrc:
+                    win_asm += "\n" + rsrc
             return win_asm
 
     def bundle(
