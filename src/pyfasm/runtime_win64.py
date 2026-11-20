@@ -37,6 +37,12 @@ section '.data' data readable writeable
     flt_zero        dq 0.0
     align 8
     inp_buf         rb 4096
+    align 8
+    inp_wbuf        rw 2048
+    align 4
+    consoleMode     dd 0
+    isStdOutConsole dd 0
+    isStdInConsole  dd 0
 
     ; --- Native Win32 GUI Runtime Data ---
     _pyfasm_wnd_class   db 'PyFasmWindowClass', 0
@@ -321,54 +327,113 @@ _pyfasm_init_io:
     mov     rbp, rsp
     sub     rsp, 32
     and     rsp, -16
+    mov     ecx, 65001              ; CP_UTF8
+    call    [SetConsoleOutputCP]
+    mov     ecx, 65001              ; CP_UTF8
+    call    [SetConsoleCP]
     mov     ecx, -11                ; STD_OUTPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdOut], rax
+    mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdOutConsole], eax
     mov     ecx, -10                ; STD_INPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdIn], rax
+    mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdInConsole], eax
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_print_str:
-    ; RCX = pointer to null-terminated string
+    ; RCX = pointer to null-terminated UTF-8 string
     push    rbp
     mov     rbp, rsp
     push    rbx
     push    rsi
     push    rdi
-    sub     rsp, 48
+    push    r12
+    sub     rsp, 64
     and     rsp, -16
 
     mov     rsi, rcx
     test    rsi, rsi
     jz      .done_print_str
 
-    ; Calculate length
+    ; Calculate UTF-8 byte length
     xor     eax, eax
     mov     rdi, rsi
     mov     rcx, -1
     repne   scasb
     not     rcx
     dec     rcx
-    mov     rbx, rcx                ; string length in rbx
+    mov     rbx, rcx                ; byte length in rbx
     test    rbx, rbx
     jz      .done_print_str
 
+    cmp     dword [isStdOutConsole], 0
+    je      .print_str_file
+    cmp     rbx, 32768
+    ja      .print_str_file
+
+    ; Query UTF-16 character count
+    mov     ecx, 65001              ; CP_UTF8
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, ebx
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    call    [MultiByteToWideChar]
+    test    eax, eax
+    jle     .print_str_file
+    cmp     eax, 1024
+    jg      .print_str_file
+
+    mov     r12d, eax
+    sub     rsp, 2112               ; shadow (32) + args (32) + 1024 wchars (2048), 16-byte aligned
+    mov     ecx, 65001
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, ebx
+    lea     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    mov     [rsp + 40], r12
+    call    [MultiByteToWideChar]
+    test    eax, eax
+    jle     .print_str_console_fail
+
+    mov     rcx, [hStdOut]
+    lea     rdx, [rsp + 64]
+    mov     r8d, eax
+    lea     r9, [rsp + 48]
+    mov     dword [rsp + 48], 0
+    mov     qword [rsp + 32], 0
+    call    [WriteConsoleW]
+    test    eax, eax
+    jz      .print_str_console_fail
+    add     rsp, 2112
+    jmp     .done_print_str
+
+.print_str_console_fail:
+    add     rsp, 2112
+
+.print_str_file:
     ; WriteFile(hStdOut, rsi, rbx, &bytesWritten, NULL)
     mov     rcx, [hStdOut]
     mov     rdx, rsi
     mov     r8, rbx
-    lea     r9, [rsp + 32]
-    mov     qword [rsp + 32], 0
-    sub     rsp, 16                 ; 5th parameter on stack
+    lea     r9, [rsp + 48]
+    mov     qword [rsp + 48], 0
     mov     qword [rsp + 32], 0
     call    [WriteFile]
-    add     rsp, 16
 
 .done_print_str:
-    lea     rsp, [rbp - 24]
+    lea     rsp, [rbp - 32]
+    pop     r12
     pop     rdi
     pop     rsi
     pop     rbx
@@ -488,6 +553,113 @@ _pyfasm_print_float:
 .flt_done:
     lea     rsp, [rbp - 16]
     pop     rdi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_float_to_str:
+    ; RCX = IEEE-754 float64 bits -> RAX = heap-allocated string pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 96
+    and     rsp, -16
+
+    mov     [rbp - 40], rcx
+    mov     ecx, 64
+    call    _pyfasm_alloc
+    mov     r12, rax
+    mov     rdi, rax
+
+    movq    xmm0, qword [rbp - 40]
+    ucomisd xmm0, [flt_zero]
+    jae     .fts_pos
+    mov     byte [rdi], '-'
+    inc     rdi
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.fts_pos:
+    movsd   [rbp - 48], xmm0
+    cvttsd2si rax, xmm0
+    mov     [rbp - 56], rax
+
+    lea     rsi, [rbp - 64]
+    mov     byte [rsi], 0
+    mov     rbx, 10
+    test    rax, rax
+    jnz     .fts_int_loop
+    mov     byte [rdi], '0'
+    inc     rdi
+    jmp     .fts_dot
+.fts_int_loop:
+    test    rax, rax
+    jz      .fts_int_copy
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    dec     rsi
+    mov     [rsi], dl
+    jmp     .fts_int_loop
+.fts_int_copy:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .fts_dot
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    jmp     .fts_int_copy
+
+.fts_dot:
+    mov     byte [rdi], '.'
+    inc     rdi
+
+    movsd   xmm0, [rbp - 48]
+    cvtsi2sd xmm1, qword [rbp - 56]
+    subsd   xmm0, xmm1
+    mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
+    cvttsd2si rax, xmm0
+    test    rax, rax
+    jns     .fts_frac_nonneg
+    xor     eax, eax
+.fts_frac_nonneg:
+    cmp     rax, 1000000
+    jl      .fts_frac_check_zero
+    mov     rax, 999999
+.fts_frac_check_zero:
+    test    rax, rax
+    jnz     .fts_frac_digits
+    mov     byte [rdi], '0'
+    inc     rdi
+    jmp     .fts_done
+
+.fts_frac_digits:
+    mov     rbx, 10
+    mov     ecx, 6
+    lea     rsi, [rdi + 5]
+.fts_frac_loop:
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    mov     [rsi], dl
+    dec     rsi
+    dec     ecx
+    jnz     .fts_frac_loop
+    add     rdi, 6
+
+.fts_done:
+    mov     byte [rdi], 0
+    mov     rax, r12
+    lea     rsp, [rbp - 32]
+    pop     r12
+    pop     rdi
+    pop     rsi
     pop     rbx
     pop     rbp
     ret
@@ -4887,18 +5059,57 @@ _pyfasm_input:
     push    rsi
     push    rdi
     push    r12
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
 
     mov     rcx, [hStdIn]
     test    rcx, rcx
-    jnz     .inp_read
+    jnz     .inp_check_console
     mov     ecx, -10                ; STD_INPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdIn], rax
     mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdInConsole], eax
+    mov     rcx, [hStdIn]
 
-.inp_read:
+.inp_check_console:
+    cmp     dword [isStdInConsole], 0
+    je      .inp_read_file
+
+    ; Interactive Windows console input via ReadConsoleW -> UTF-8
+    lea     rdx, [inp_wbuf]
+    mov     r8d, 2047
+    lea     r9, [bytesRead]
+    mov     dword [bytesRead], 0
+    mov     qword [rsp + 32], 0
+    call    [ReadConsoleW]
+    test    eax, eax
+    jz      .inp_empty
+    mov     eax, dword [bytesRead]
+    test    eax, eax
+    jz      .inp_empty
+
+    mov     ecx, 65001              ; CP_UTF8
+    xor     edx, edx
+    lea     r8, [inp_wbuf]
+    mov     r9d, eax
+    lea     rax, [inp_buf]
+    mov     [rsp + 32], rax
+    mov     qword [rsp + 40], 4095
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    call    [WideCharToMultiByte]
+    test    eax, eax
+    jle     .inp_empty
+    mov     edi, eax
+    lea     rsi, [inp_buf]
+    mov     byte [rsi + rdi], 0
+    jmp     .inp_strip
+
+.inp_read_file:
+    mov     rcx, [hStdIn]
     lea     rdx, [inp_buf]
     mov     r8d, 4095
     lea     r9, [bytesRead]
@@ -8867,6 +9078,11 @@ section '.idata' import data readable writeable
            GetModuleHandleA, 'GetModuleHandleA', \\
            MultiByteToWideChar, 'MultiByteToWideChar', \\
            WideCharToMultiByte, 'WideCharToMultiByte', \\
+           SetConsoleOutputCP, 'SetConsoleOutputCP', \\
+           SetConsoleCP, 'SetConsoleCP', \\
+           GetConsoleMode, 'GetConsoleMode', \\
+           WriteConsoleW, 'WriteConsoleW', \\
+           ReadConsoleW, 'ReadConsoleW', \\
            GetCurrentThreadId, 'GetCurrentThreadId', \\
            LoadLibraryA, 'LoadLibraryA', \\
            GetProcAddress, 'GetProcAddress', \\
@@ -8880,8 +9096,8 @@ section '.idata' import data readable writeable
            RegisterClassExW, 'RegisterClassExW', \\
            CreateWindowExA, 'CreateWindowExA', \\
            CreateWindowExW, 'CreateWindowExW', \\
-           ShowWindow, 'ShowWindow', \
-             SetWindowPos, 'SetWindowPos', \\
+           ShowWindow, 'ShowWindow', \\
+           SetWindowPos, 'SetWindowPos', \\
            UpdateWindow, 'UpdateWindow', \\
            SetForegroundWindow, 'SetForegroundWindow', \\
            SetWindowTextA, 'SetWindowTextA', \\
@@ -8979,6 +9195,12 @@ section '.data' data readable writeable
     align 8
     inp_buf         rb 4096
     align 8
+    inp_wbuf        rw 2048
+    align 4
+    consoleMode     dd 0
+    isStdOutConsole dd 0
+    isStdInConsole  dd 0
+    align 8
     _pyfasm_int_buf rb 32
 """
 
@@ -9006,54 +9228,113 @@ _pyfasm_init_io:
     mov     rbp, rsp
     sub     rsp, 32
     and     rsp, -16
+    mov     ecx, 65001              ; CP_UTF8
+    call    [SetConsoleOutputCP]
+    mov     ecx, 65001              ; CP_UTF8
+    call    [SetConsoleCP]
     mov     ecx, -11                ; STD_OUTPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdOut], rax
+    mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdOutConsole], eax
     mov     ecx, -10                ; STD_INPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdIn], rax
+    mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdInConsole], eax
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_print_str:
-    ; RCX = pointer to null-terminated string
+    ; RCX = pointer to null-terminated UTF-8 string
     push    rbp
     mov     rbp, rsp
     push    rbx
     push    rsi
     push    rdi
-    sub     rsp, 48
+    push    r12
+    sub     rsp, 64
     and     rsp, -16
 
     mov     rsi, rcx
     test    rsi, rsi
     jz      .done_print_str
 
-    ; Calculate length
+    ; Calculate UTF-8 byte length
     xor     eax, eax
     mov     rdi, rsi
     mov     rcx, -1
     repne   scasb
     not     rcx
     dec     rcx
-    mov     rbx, rcx                ; string length in rbx
+    mov     rbx, rcx                ; byte length in rbx
     test    rbx, rbx
     jz      .done_print_str
 
+    cmp     dword [isStdOutConsole], 0
+    je      .print_str_file
+    cmp     rbx, 32768
+    ja      .print_str_file
+
+    ; Query UTF-16 character count
+    mov     ecx, 65001              ; CP_UTF8
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, ebx
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    call    [MultiByteToWideChar]
+    test    eax, eax
+    jle     .print_str_file
+    cmp     eax, 1024
+    jg      .print_str_file
+
+    mov     r12d, eax
+    sub     rsp, 2112               ; shadow (32) + args (32) + 1024 wchars (2048), 16-byte aligned
+    mov     ecx, 65001
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, ebx
+    lea     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    mov     [rsp + 40], r12
+    call    [MultiByteToWideChar]
+    test    eax, eax
+    jle     .print_str_console_fail
+
+    mov     rcx, [hStdOut]
+    lea     rdx, [rsp + 64]
+    mov     r8d, eax
+    lea     r9, [rsp + 48]
+    mov     dword [rsp + 48], 0
+    mov     qword [rsp + 32], 0
+    call    [WriteConsoleW]
+    test    eax, eax
+    jz      .print_str_console_fail
+    add     rsp, 2112
+    jmp     .done_print_str
+
+.print_str_console_fail:
+    add     rsp, 2112
+
+.print_str_file:
     ; WriteFile(hStdOut, rsi, rbx, &bytesWritten, NULL)
     mov     rcx, [hStdOut]
     mov     rdx, rsi
     mov     r8, rbx
-    lea     r9, [rsp + 32]
-    mov     qword [rsp + 32], 0
-    sub     rsp, 16                 ; 5th parameter on stack
+    lea     r9, [rsp + 48]
+    mov     qword [rsp + 48], 0
     mov     qword [rsp + 32], 0
     call    [WriteFile]
-    add     rsp, 16
 
 .done_print_str:
-    lea     rsp, [rbp - 24]
+    lea     rsp, [rbp - 32]
+    pop     r12
     pop     rdi
     pop     rsi
     pop     rbx
@@ -9173,6 +9454,113 @@ _pyfasm_print_float:
 .flt_done:
     lea     rsp, [rbp - 16]
     pop     rdi
+    pop     rbx
+    pop     rbp
+    ret
+
+_pyfasm_float_to_str:
+    ; RCX = IEEE-754 float64 bits -> RAX = heap-allocated string pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    sub     rsp, 96
+    and     rsp, -16
+
+    mov     [rbp - 40], rcx
+    mov     ecx, 64
+    call    _pyfasm_alloc
+    mov     r12, rax
+    mov     rdi, rax
+
+    movq    xmm0, qword [rbp - 40]
+    ucomisd xmm0, [flt_zero]
+    jae     .fts_pos
+    mov     byte [rdi], '-'
+    inc     rdi
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movaps  xmm0, xmm1
+.fts_pos:
+    movsd   [rbp - 48], xmm0
+    cvttsd2si rax, xmm0
+    mov     [rbp - 56], rax
+
+    lea     rsi, [rbp - 64]
+    mov     byte [rsi], 0
+    mov     rbx, 10
+    test    rax, rax
+    jnz     .fts_int_loop
+    mov     byte [rdi], '0'
+    inc     rdi
+    jmp     .fts_dot
+.fts_int_loop:
+    test    rax, rax
+    jz      .fts_int_copy
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    dec     rsi
+    mov     [rsi], dl
+    jmp     .fts_int_loop
+.fts_int_copy:
+    movzx   eax, byte [rsi]
+    test    al, al
+    jz      .fts_dot
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    jmp     .fts_int_copy
+
+.fts_dot:
+    mov     byte [rdi], '.'
+    inc     rdi
+
+    movsd   xmm0, [rbp - 48]
+    cvtsi2sd xmm1, qword [rbp - 56]
+    subsd   xmm0, xmm1
+    mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
+    cvttsd2si rax, xmm0
+    test    rax, rax
+    jns     .fts_frac_nonneg
+    xor     eax, eax
+.fts_frac_nonneg:
+    cmp     rax, 1000000
+    jl      .fts_frac_check_zero
+    mov     rax, 999999
+.fts_frac_check_zero:
+    test    rax, rax
+    jnz     .fts_frac_digits
+    mov     byte [rdi], '0'
+    inc     rdi
+    jmp     .fts_done
+
+.fts_frac_digits:
+    mov     rbx, 10
+    mov     ecx, 6
+    lea     rsi, [rdi + 5]
+.fts_frac_loop:
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    mov     [rsi], dl
+    dec     rsi
+    dec     ecx
+    jnz     .fts_frac_loop
+    add     rdi, 6
+
+.fts_done:
+    mov     byte [rdi], 0
+    mov     rax, r12
+    lea     rsp, [rbp - 32]
+    pop     r12
+    pop     rdi
+    pop     rsi
     pop     rbx
     pop     rbp
     ret
@@ -12881,18 +13269,57 @@ _pyfasm_input:
     push    rsi
     push    rdi
     push    r12
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
 
     mov     rcx, [hStdIn]
     test    rcx, rcx
-    jnz     .inp_read
+    jnz     .inp_check_console
     mov     ecx, -10                ; STD_INPUT_HANDLE
     call    [GetStdHandle]
     mov     [hStdIn], rax
     mov     rcx, rax
+    lea     rdx, [consoleMode]
+    call    [GetConsoleMode]
+    mov     [isStdInConsole], eax
+    mov     rcx, [hStdIn]
 
-.inp_read:
+.inp_check_console:
+    cmp     dword [isStdInConsole], 0
+    je      .inp_read_file
+
+    ; Interactive Windows console input via ReadConsoleW -> UTF-8
+    lea     rdx, [inp_wbuf]
+    mov     r8d, 2047
+    lea     r9, [bytesRead]
+    mov     dword [bytesRead], 0
+    mov     qword [rsp + 32], 0
+    call    [ReadConsoleW]
+    test    eax, eax
+    jz      .inp_empty
+    mov     eax, dword [bytesRead]
+    test    eax, eax
+    jz      .inp_empty
+
+    mov     ecx, 65001              ; CP_UTF8
+    xor     edx, edx
+    lea     r8, [inp_wbuf]
+    mov     r9d, eax
+    lea     rax, [inp_buf]
+    mov     [rsp + 32], rax
+    mov     qword [rsp + 40], 4095
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    call    [WideCharToMultiByte]
+    test    eax, eax
+    jle     .inp_empty
+    mov     edi, eax
+    lea     rsi, [inp_buf]
+    mov     byte [rsi + rdi], 0
+    jmp     .inp_strip
+
+.inp_read_file:
+    mov     rcx, [hStdIn]
     lea     rdx, [inp_buf]
     mov     r8d, 4095
     lea     r9, [bytesRead]
@@ -13943,6 +14370,11 @@ section '.idata' import data readable writeable
            GetModuleHandleA, 'GetModuleHandleA', \\
            MultiByteToWideChar, 'MultiByteToWideChar', \\
            WideCharToMultiByte, 'WideCharToMultiByte', \\
+           SetConsoleOutputCP, 'SetConsoleOutputCP', \\
+           SetConsoleCP, 'SetConsoleCP', \\
+           GetConsoleMode, 'GetConsoleMode', \\
+           WriteConsoleW, 'WriteConsoleW', \\
+           ReadConsoleW, 'ReadConsoleW', \\
            GetCurrentThreadId, 'GetCurrentThreadId', \\
            LoadLibraryA, 'LoadLibraryA', \\
            GetProcAddress, 'GetProcAddress', \\
@@ -13972,6 +14404,11 @@ section '.idata' import data readable writeable
            GetModuleHandleA, 'GetModuleHandleA', \\
            MultiByteToWideChar, 'MultiByteToWideChar', \\
            WideCharToMultiByte, 'WideCharToMultiByte', \\
+           SetConsoleOutputCP, 'SetConsoleOutputCP', \\
+           SetConsoleCP, 'SetConsoleCP', \\
+           GetConsoleMode, 'GetConsoleMode', \\
+           WriteConsoleW, 'WriteConsoleW', \\
+           ReadConsoleW, 'ReadConsoleW', \\
            GetCurrentThreadId, 'GetCurrentThreadId', \\
            LoadLibraryA, 'LoadLibraryA', \\
            GetProcAddress, 'GetProcAddress', \\

@@ -528,3 +528,55 @@ def test_synthetic_ast_args_have_annotation_for_py38(tmp_path: Path):
     assert "Point___init__" in mod.functions
     init_args = [a.name for a in mod.functions["Point___init__"].args]
     assert init_args == ["self", "x", "y"]
+
+
+def test_win64_input_fstring_concat_and_utf8_cyrillic(tmp_path: Path):
+    # 1. Cross-platform check: generated Win64 ASM must initialize UTF-8 CP 65001 and console wide APIs
+    src1 = tmp_path / "user_repro.py"
+    src1.write_text('s=input("Vvedi name")\nprint(f"Kak dela? "+s)\n', encoding="utf-8")
+    compiler = PyFasmCompiler()
+    asm1 = compiler.compile_source_to_asm(src1.read_text(encoding="utf-8"), target="win64")
+    for sym in ("SetConsoleOutputCP", "SetConsoleCP", "GetConsoleMode", "WriteConsoleW", "ReadConsoleW", "WideCharToMultiByte"):
+        assert sym in asm1
+    assert "_pyfasm_str_concat" in asm1
+
+    # 2. Complex f-strings: input() str inference, f"..." + s, float, method call, custom __str__, UTF-8 Cyrillic
+    src2 = tmp_path / "utf8_fstr.py"
+    src2.write_text(
+        "class Box:\n"
+        "    def __init__(self, v: int):\n"
+        "        self.v = v\n"
+        "    def __str__(self) -> str:\n"
+        "        return f'Box({self.v})'\n\n"
+        "def main() -> int:\n"
+        "    s = input('Введи имя: ')\n"
+        "    print(f'Как дела? ' + s)\n"
+        "    tag = 'ivan'\n"
+        "    b = Box(7)\n"
+        "    print(f'Привет, {s}! {tag.upper()} | {3.14} | {4.0} | {b}')\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+    if sys.platform != "win32":
+        asm2 = compiler.compile_source_to_asm(src2.read_text(encoding="utf-8"), target="win64")
+        assert "_pyfasm_float_to_str" in asm2
+        assert "Box___str__" in asm2
+        return
+
+    exe1 = tmp_path / "user_repro.exe"
+    ok1, out1, log1 = compiler.compile_file(str(src1), output_binary=str(exe1), target="win64")
+    assert ok1, log1
+    r1 = subprocess.run([out1], input="Alex\n", capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert r1.returncode == 0
+    assert "Vvedi name" in r1.stdout
+    assert "Kak dela? Alex" in r1.stdout
+
+    exe2 = tmp_path / "utf8_fstr.exe"
+    ok2, out2, log2 = compiler.compile_file(str(src2), output_binary=str(exe2), target="win64")
+    assert ok2, log2
+    r2 = subprocess.run([out2], input="Иван\n", capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert r2.returncode == 0
+    assert "Введи имя: " in r2.stdout
+    assert "Как дела? Иван" in r2.stdout
+    assert "Привет, Иван! IVAN | 3.140000 | 4.0 | Box(7)" in r2.stdout

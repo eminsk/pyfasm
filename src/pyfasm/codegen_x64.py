@@ -400,17 +400,37 @@ class X64CodeGen:
         if isinstance(part, ast.Constant):
             self._emit_string_pointer("rax", str(part.value))
         elif isinstance(part, ast.FormattedValue):
+            cls_name = self.resolve_instance_class(part.value)
+            str_m = (
+                self.resolve_class_method(cls_name, "__str__")
+                or self.resolve_class_method(cls_name, "__repr__")
+            ) if cls_name else None
+            if str_m:
+                self._generate_expr(part.value)
+                self.emit("mov rcx, rax", "pass self to __str__")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {safe_asm_label(str_m)}")
+                self.emit("add rsp, 32")
+                return
+
+            part_type = self._infer_expr_type(part.value)
             self._generate_expr(part.value)
-            is_str_part = False
-            if isinstance(part.value, ast.Name) and self.current_func:
-                v = self.current_func.local_vars.get(part.value.id)
-                if v and v.var_type.is_str():
-                    is_str_part = True
-            elif isinstance(part.value, ast.Constant) and isinstance(part.value.value, str):
-                is_str_part = True
-            if not is_str_part:
+            if (
+                part_type.is_str()
+                or isinstance(part.value, ast.JoinedStr)
+                or (isinstance(part.value, ast.Constant) and isinstance(part.value.value, str))
+            ):
+                return
+            if part_type.is_float() and self.target in ("win64", "dll"):
                 self.emit("mov rcx, rax")
-                self.emit("call _pyfasm_int_to_str")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_float_to_str")
+                self.emit("add rsp, 32")
+                return
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_int_to_str")
+            self.emit("add rsp, 32")
         else:
             self._generate_expr(part)
 
@@ -2247,7 +2267,7 @@ include 'functions.inc'
                     return TYPE_PTR
                 if attr == "choice":
                     return TYPE_STR
-                if attr in ("lower", "upper", "strip", "replace", "format"):
+                if attr in ("lower", "upper", "strip", "replace", "format", "join", "removeprefix", "removesuffix"):
                     return TYPE_STR
                 if attr in ("count", "find", "index"):
                     return TYPE_INT
@@ -2498,32 +2518,33 @@ include 'functions.inc'
                     self._generate_expr(ast.JoinedStr(values=parts))
                     return
 
+            lt = self._infer_expr_type(expr.left)
+            rt = self._infer_expr_type(expr.right)
+
             is_str_add = False
             if isinstance(expr.op, ast.Add):
-                if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
+                if (
+                    lt.is_str()
+                    or rt.is_str()
+                    or isinstance(expr.left, ast.JoinedStr)
+                    or isinstance(expr.right, ast.JoinedStr)
+                    or (isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str))
+                    or (isinstance(expr.right, ast.Constant) and isinstance(expr.right.value, str))
+                ):
                     is_str_add = True
-                elif isinstance(expr.right, ast.Constant) and isinstance(expr.right.value, str):
-                    is_str_add = True
-                elif isinstance(expr.left, ast.Name) and self.current_func:
-                    var = self.current_func.local_vars.get(expr.left.id)
-                    if var and var.var_type.is_str():
-                        is_str_add = True
-                elif isinstance(expr.right, ast.Name) and self.current_func:
-                    var = self.current_func.local_vars.get(expr.right.id)
-                    if var and var.var_type.is_str():
-                        is_str_add = True
 
             if is_str_add:
                 self._generate_expr(expr.left)
-                self.emit("push rax")
+                self.emit("sub rsp, 16", "spill str1 (16-byte aligned)")
+                self.emit("mov [rsp], rax")
                 self._generate_expr(expr.right)
                 self.emit("mov rdx, rax", "str2")
-                self.emit("pop rcx", "str1")
+                self.emit("mov rcx, [rsp]", "str1")
+                self.emit("add rsp, 16")
+                self.emit("sub rsp, 32", "shadow space for _pyfasm_str_concat")
                 self.emit("call _pyfasm_str_concat")
+                self.emit("add rsp, 32")
                 return
-
-            lt = self._infer_expr_type(expr.left)
-            rt = self._infer_expr_type(expr.right)
 
             # List repetition (Mult) or concatenation (Add)
             is_left_list = lt.is_list() or lt.is_tuple() or isinstance(expr.left, (ast.List, ast.Tuple))
@@ -3122,16 +3143,22 @@ include 'functions.inc'
         elif isinstance(expr, ast.JoinedStr):
             if not expr.values:
                 self._emit_string_pointer("rax", "")
+            elif len(expr.values) == 1:
+                self._generate_fstring_part(expr.values[0])
             else:
                 self._generate_fstring_part(expr.values[0])
-                self.emit("push rax", "save first part")
+                self.emit("sub rsp, 16", "spill accumulated f-string (16-byte aligned)")
+                self.emit("mov [rsp], rax", "save first part")
                 for part in expr.values[1:]:
                     self._generate_fstring_part(part)
                     self.emit("mov rdx, rax", "next part")
-                    self.emit("pop rcx", "accumulated string")
+                    self.emit("mov rcx, [rsp]", "accumulated string")
+                    self.emit("sub rsp, 32", "shadow space for _pyfasm_str_concat")
                     self.emit("call _pyfasm_str_concat")
-                    self.emit("push rax", "save combined")
-                self.emit("pop rax", "final combined string")
+                    self.emit("add rsp, 32")
+                    self.emit("mov [rsp], rax", "save combined")
+                self.emit("mov rax, [rsp]", "final combined string")
+                self.emit("add rsp, 16")
 
         elif isinstance(expr, ast.List):
             num_elts = len(expr.elts)

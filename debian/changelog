@@ -1,3 +1,11 @@
+python3-pyfasm64 (0.3.4-1) stable; urgency=medium
+
+  * Release PyFASM64 0.3.4.
+  * Fixed Windows console UTF-8 Cyrillic input/output via SetConsoleOutputCP(65001), SetConsoleCP(65001), GetConsoleMode, WriteConsoleW, and ReadConsoleW.
+  * Fixed input() string type inference, f-string concatenation with `+`, and float/`__str__` formatting inside f-strings.
+
+ -- eminsk <M_N_N@tut.by>  Fri, 20 Nov 2026 15:22:00 -0500
+
 python3-pyfasm64 (0.3.3-1) stable; urgency=medium
 
   * Release PyFASM64 0.3.3.

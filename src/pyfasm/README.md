@@ -45,6 +45,9 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 - **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
 - **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
 - **Native Win32 Tkinter / CustomTkinter UI**: Translates Python desktop GUIs and Canvas drawing directly into DPI-aware Win32 GDI dark-mode applications.
+- **v0.3.4 Windows UTF-8 Console & F-String Fixes**:
+  - Automatic Windows console UTF-8 (`CP_UTF8` / `WriteConsoleW` / `ReadConsoleW`) with pipe-safe `WriteFile` / `ReadFile` fallback so Cyrillic and Unicode `input()` / `print()` render cleanly without mojibake.
+  - Proper `TYPE_STR` inference for `input()`, full `+` string concatenation for `ast.JoinedStr` f-strings, and native `float` (`_pyfasm_float_to_str`) / `__str__` formatting inside f-strings.
 - **v0.3.3 Runtime, ABI, Diagnostics & Packaging Hardening**:
   - Full Microsoft x64 callee-saved register preservation in generated functions and Win64/Linux/macOS runtime routines, plus dummy-safe PE64 `.reloc` sections for ASLR and simultaneous multi-DLL loading via `ctypes`.
   - Exact Python floor division (`//`) and modulo (`%`) sign semantics, exact IEEE-754 float literal pooling, zero-padded `print_float`, thread-safe heap-allocated `str(int)`, and bounded dictionary/set probing with tombstone reuse.
@@ -370,7 +373,7 @@ uv run pytest
 ```
 
 ```text
-============================= 139 passed ==============================
+============================= 140 passed ==============================
 ```
 
 Verified compatibility matrix:

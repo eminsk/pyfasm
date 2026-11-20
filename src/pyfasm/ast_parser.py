@@ -1545,7 +1545,7 @@ class AstAnalyzer:
         elif isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fid = expr.func.id
-                if fid in ("str", "chr", "hex", "bin", "file_read", "get_simd_isa"):
+                if fid in ("str", "chr", "input", "hex", "bin", "oct", "file_read", "get_simd_isa"):
                     return TYPE_STR
                 elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open", "bit_length"):
                     return TYPE_INT
@@ -1565,7 +1565,7 @@ class AstAnalyzer:
                     return TYPE_TUPLE
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice", "get_simd_isa"):
+                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice", "get_simd_isa", "join", "removeprefix", "removesuffix"):
                     return TYPE_STR
                 elif attr in ("keys", "values", "items", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
                     if attr in ("matmul",):

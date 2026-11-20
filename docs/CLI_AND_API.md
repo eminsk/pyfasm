@@ -8,7 +8,7 @@ Both `pyfasm64` and `pyfasm` (or `python -m pyfasm64` / `python -m pyfasm`) invo
 
 ### Global Flags
 
-* `-V`, `--version`: Prints `<prog> 0.3.3` and exits.
+* `-V`, `--version`: Prints `<prog> 0.3.4` and exits.
 
 ### `compile` — Compile Python file or project directory to a native binary
 
