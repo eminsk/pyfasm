@@ -34,6 +34,13 @@ def main() -> int:
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
     p_compile.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
     p_compile.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources, window, and taskbar")
+    p_compile.add_argument("--strict", action="store_true", help="Treat compiler warnings (external imports, unsupported dunders, unresolved symbols) as errors")
+
+    # Subcommand: check
+    p_check = subparsers.add_parser("check", help="Validate Python compatibility and report errors/warnings without assembling")
+    p_check.add_argument("source", help="Path to input Python source file (.py) or project directory")
+    p_check.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_check.add_argument("--strict", action="store_true", help="Treat warnings as errors (non-zero exit code)")
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
@@ -41,6 +48,7 @@ def main() -> int:
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
     p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
     p_asm.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources")
+    p_asm.add_argument("--strict", action="store_true", help="Treat compiler warnings as errors")
 
     # Subcommand: bundle
     p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 monolithic executable")
@@ -155,6 +163,20 @@ def main() -> int:
         print(f"[PyFASM SUCCESS] Project bundled into native executable: {out_bin}")
         return 0
 
+    if args.command == "check":
+        ok, report = compiler.check_file(
+            source_path=args.source,
+            target=args.target,
+            strict=args.strict,
+        )
+        if report.items:
+            print(report.format_all(), file=sys.stderr)
+        if not ok:
+            return 1
+        if not report.items:
+            print(f"[PyFASM OK] No issues found in: {args.source}")
+        return 0
+
     if args.command == "compile":
         success, out_bin, log = compiler.compile_file(
             source_path=args.source,
@@ -163,11 +185,18 @@ def main() -> int:
             keep_asm=not args.no_asm,
             export_fasm_dir=args.export_fasm,
             icon_path=args.icon,
+            strict=args.strict,
         )
 
         if not success:
-            print(f"[PyFASM ERROR] Compilation failed:\n{log}", file=sys.stderr)
+            if log.lstrip().startswith(("error[", "warning[")):
+                print(log, file=sys.stderr)
+            else:
+                print(f"[PyFASM ERROR] Compilation failed:\n{log}", file=sys.stderr)
             return 1
+
+        if compiler.last_diagnostics.warnings:
+            print(compiler.last_diagnostics.format_all(), file=sys.stderr)
 
         print(f"[PyFASM SUCCESS] Binary compiled: {out_bin}")
         if log:
@@ -182,42 +211,35 @@ def main() -> int:
         return 0
 
     elif args.command == "emit-asm":
-        src = Path(args.source).resolve()
-        if not src.exists():
-            print(f"[PyFASM ERROR] File not found: {args.source}", file=sys.stderr)
+        report, src_file, project_dir, _ = compiler._prepare_compile_inputs(args.source, args.target)
+        if report.has_errors or src_file is None or project_dir is None:
+            print(report.format_all(), file=sys.stderr)
             return 1
-
-        if src.is_dir():
-            candidates = ["main.py", "app.py", "bot.py", "run.py", "index.py"]
-            entry_file = None
-            for cand in candidates:
-                cand_p = src / cand
-                if cand_p.exists():
-                    entry_file = cand_p
-                    break
-            if not entry_file:
-                py_files = sorted(list(src.glob("*.py")))
-                entry_file = py_files[0] if py_files else None
-            if not entry_file:
-                print(f"[PyFASM ERROR] No Python source files (.py) found in directory: {args.source}", file=sys.stderr)
-                return 1
-            project_dir = src
-            src_file = entry_file
-        else:
-            project_dir = src.parent
-            src_file = src
 
         from pyfasm.ast_parser import AstAnalyzer
         from pyfasm.codegen_x64 import X64CodeGen
 
         analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
+        report.extend(parsed_mod.diagnostics)
+        if report.has_errors:
+            print(report.format_all(), file=sys.stderr)
+            return 1
+
         codegen = X64CodeGen(parsed_mod, target=args.target, icon_path=args.icon)
         asm_code = codegen.generate()
+        report.extend(codegen.diagnostics)
+        if args.strict:
+            report.promote_warnings_to_errors()
+        if report.items:
+            print(report.format_all(), file=sys.stderr)
+        if report.has_errors:
+            return 1
 
         if args.output:
             out_asm = Path(args.output).resolve()
-            out_asm.write_text(asm_code, encoding="utf-8")
+            with open(out_asm, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(asm_code)
             print(f"[PyFASM] Assembly written to: {out_asm}")
         else:
             print(asm_code)

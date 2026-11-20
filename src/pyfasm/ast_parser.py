@@ -18,6 +18,14 @@ from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
     TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType, ListType, DictType, SetType
 )
+from pyfasm.diagnostics import (
+    CompilerDiagnostic,
+    KNOWN_UNSUPPORTED_EXTERNAL_MODULES,
+    NATIVELY_SUPPORTED_OR_ADAPTED_MODULES,
+    SUPPORTED_DUNDERS_SUMMARY,
+    UNSUPPORTED_DUNDERS,
+    from_syntax_error,
+)
 
 
 @dataclass
@@ -42,6 +50,7 @@ class FunctionSymbol:
     global_names: Set[str] = field(default_factory=set)
     is_generator: bool = False
     defaults: List[ast.expr] = field(default_factory=list)
+    source_file: Optional[str] = None
 
 
 @dataclass
@@ -88,6 +97,8 @@ class ParsedModule:
     calls_main_in_top_level: bool = False
     ui_spec: Optional[Any] = None
     module_inits: List[str] = field(default_factory=list)
+    diagnostics: List[CompilerDiagnostic] = field(default_factory=list)
+    source_files: Dict[str, str] = field(default_factory=dict)
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
@@ -558,8 +569,179 @@ class AstAnalyzer:
         self._site_packages_dirs: List[Path] = []
         self._str_counter = 0
         self._flt_counter = 0
+        self._current_source_file: Optional[str] = None
         if self.project_root:
             self._discover_site_packages()
+
+    @staticmethod
+    def _ast_span(node: ast.AST) -> tuple:
+        lineno = getattr(node, "lineno", None)
+        col0 = getattr(node, "col_offset", None)
+        col = (col0 + 1) if isinstance(col0, int) else None
+        end_col0 = getattr(node, "end_col_offset", None)
+        end_ln = getattr(node, "end_lineno", lineno)
+        end_col = (end_col0 + 1) if (isinstance(end_col0, int) and end_ln == lineno) else None
+        return lineno, col, end_col
+
+    def _is_binary_site_package(self, root_name: str) -> bool:
+        for sp in self._site_packages_dirs:
+            pkg_dir = sp / root_name
+            mod_file = sp / f"{root_name}.py"
+            if (pkg_dir.is_dir() and self._is_binary_extension_module(pkg_dir)) or (
+                mod_file.is_file() and self._is_binary_extension_module(mod_file)
+            ):
+                return True
+        return False
+
+    def _validate_ast_tree(
+        self,
+        tree: ast.AST,
+        module: ParsedModule,
+        file_path: Optional[str],
+        source_text: str,
+        current_dir: Optional[Path] = None,
+    ) -> None:
+        """Collects semantic errors and warnings before AST lowering."""
+        key = file_path or "<source>"
+        module.source_files[key] = source_text
+        src_lines = source_text.splitlines()
+
+        def _line_at(ln: Optional[int]) -> Optional[str]:
+            if ln is not None and 1 <= ln <= len(src_lines):
+                return src_lines[ln - 1]
+            return None
+
+        def _check_import(mod_name: str, imp_node: ast.AST) -> None:
+            if not mod_name:
+                return
+            root = mod_name.split(".")[0].lower().replace("-", "_")
+            if root in NATIVELY_SUPPORTED_OR_ADAPTED_MODULES:
+                return
+            if current_dir is not None:
+                resolved = self._resolve_local_module(mod_name, current_dir)
+                if resolved is not None:
+                    res_low = str(resolved).lower()
+                    if ".venv" not in res_low and "venv" not in res_low and "site-packages" not in res_low:
+                        return
+            if root in KNOWN_UNSUPPORTED_EXTERNAL_MODULES or self._is_binary_site_package(root):
+                ln, col, end_col = self._ast_span(imp_node)
+                module.diagnostics.append(
+                    CompilerDiagnostic(
+                        severity="warning",
+                        code="W2005",
+                        message=(
+                            f"External or C-extension module '{mod_name}' is not natively "
+                            "compiled by PyFASM64 in standalone compile mode"
+                        ),
+                        file_path=key,
+                        lineno=ln,
+                        col_offset=col,
+                        end_col_offset=end_col,
+                        source_line=_line_at(ln),
+                        hint=(
+                            "Use `pyfasm64 bundle` to package apps with external/C-extension dependencies, "
+                            "or compile pure compute hotspots as `--target dll`."
+                        ),
+                    )
+                )
+
+        for node in ast.walk(tree):
+            ln, col, end_col = self._ast_span(node)
+            src_line = _line_at(ln)
+            if isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.AsyncFor, ast.AsyncWith)):
+                construct = type(node).__name__.replace("Async", "async ").replace("Await", "await")
+                module.diagnostics.append(
+                    CompilerDiagnostic(
+                        severity="error",
+                        code="E2001",
+                        message=f"Asyncio construct '{construct}' is not supported in AOT native compilation",
+                        file_path=key,
+                        lineno=ln,
+                        col_offset=col,
+                        end_col_offset=end_col,
+                        source_line=src_line,
+                        hint=(
+                            "Use OS threads (`spawn_thread()` / `wait_thread()`) for native concurrency, "
+                            "or package async code with `pyfasm64 bundle`."
+                        ),
+                    )
+                )
+            elif isinstance(node, ast.ClassDef):
+                for kw in getattr(node, "keywords", []):
+                    if kw.arg == "metaclass":
+                        k_ln, k_col, k_end = self._ast_span(kw)
+                        module.diagnostics.append(
+                            CompilerDiagnostic(
+                                severity="error",
+                                code="E2002",
+                                message=f"Metaclasses are not supported on class '{node.name}'",
+                                file_path=key,
+                                lineno=k_ln or ln,
+                                col_offset=k_col or col,
+                                end_col_offset=k_end,
+                                source_line=_line_at(k_ln or ln),
+                                hint="Use standard single inheritance, `@property`, or helper factory functions instead of metaclasses.",
+                            )
+                        )
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in UNSUPPORTED_DUNDERS:
+                        m_ln, m_col, m_end = self._ast_span(item)
+                        module.diagnostics.append(
+                            CompilerDiagnostic(
+                                severity="warning",
+                                code="W2006",
+                                message=f"Magic method '{node.name}.{item.name}' is not wired for automatic dispatch",
+                                file_path=key,
+                                lineno=m_ln,
+                                col_offset=m_col,
+                                end_col_offset=m_end,
+                                source_line=_line_at(m_ln),
+                                hint=f"Supported dunder methods: {SUPPORTED_DUNDERS_SUMMARY}.",
+                            )
+                        )
+            elif isinstance(node, ast.Nonlocal):
+                module.diagnostics.append(
+                    CompilerDiagnostic(
+                        severity="error",
+                        code="E2003",
+                        message="The `nonlocal` statement is not supported in PyFASM64 closures",
+                        file_path=key,
+                        lineno=ln,
+                        col_offset=col,
+                        end_col_offset=end_col,
+                        source_line=src_line,
+                        hint="Pass mutable state via a class instance, list/dict argument, or module-level variable (`global`).",
+                    )
+                )
+            elif isinstance(node, ast.With):
+                for item in node.items:
+                    ctx = item.context_expr
+                    is_open_call = (
+                        isinstance(ctx, ast.Call)
+                        and isinstance(ctx.func, ast.Name)
+                        and ctx.func.id == "open"
+                    )
+                    if not is_open_call:
+                        w_ln, w_col, w_end = self._ast_span(ctx)
+                        module.diagnostics.append(
+                            CompilerDiagnostic(
+                                severity="warning",
+                                code="W2004",
+                                message="Custom `with` context manager is not natively lowered (only `with open(...)` is compiled)",
+                                file_path=key,
+                                lineno=w_ln or ln,
+                                col_offset=w_col or col,
+                                end_col_offset=w_end,
+                                source_line=_line_at(w_ln or ln),
+                                hint="Call explicit setup/cleanup methods in `try ... finally`, or use `pyfasm64 bundle`.",
+                            )
+                        )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    _check_import(alias.name, alias if hasattr(alias, "lineno") else node)
+            elif isinstance(node, ast.ImportFrom):
+                if getattr(node, "level", 0) == 0 and node.module:
+                    _check_import(node.module, node)
 
     def get_or_create_string(self, text: str) -> str:
         for s in self.strings:
@@ -673,9 +855,16 @@ class AstAnalyzer:
     def parse_source(self, source_code: str) -> ParsedModule:
         """Parses a raw Python source code string into a ParsedModule."""
         source_code = source_code.lstrip("\ufeff")
-        tree = ast.parse(source_code)
-        tree = preprocess_ast(tree)
         module = ParsedModule()
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError as e:
+            module.source_files["<source>"] = source_code
+            module.diagnostics.append(from_syntax_error(e, file_path="<source>", source_text=source_code))
+            return module
+
+        self._validate_ast_tree(tree, module, "<source>", source_code, current_dir=self.project_root)
+        tree = preprocess_ast(tree)
 
         # First pass: find imports, string and float constants across the AST
         for node in ast.walk(tree):
@@ -697,8 +886,13 @@ class AstAnalyzer:
         module.float_literals = self.floats
 
         # Second pass: extract functions, classes, and top-level statements
-        self._extract_top_level_and_functions(tree, module, is_entry=True, mod_prefix="")
-        self._propagate_generator_types(module)
+        prev_file = self._current_source_file
+        self._current_source_file = "<source>"
+        try:
+            self._extract_top_level_and_functions(tree, module, is_entry=True, mod_prefix="")
+            self._propagate_generator_types(module)
+        finally:
+            self._current_source_file = prev_file
 
         return module
 
@@ -858,16 +1052,51 @@ class AstAnalyzer:
                 pass
 
         if not real_path.exists() or not real_path.is_file():
+            module.diagnostics.append(
+                CompilerDiagnostic(
+                    severity="error",
+                    code="E1002",
+                    message=f"Source file not found: {real_path}",
+                    file_path=str(real_path),
+                    hint="Verify the file path and imported module names.",
+                )
+            )
             return
 
         try:
             source_code = real_path.read_text(encoding="utf-8-sig").lstrip("\ufeff")
-            tree = ast.parse(source_code)
+        except OSError as e:
+            module.diagnostics.append(
+                CompilerDiagnostic(
+                    severity="error",
+                    code="E1002",
+                    message=f"Cannot read source file {real_path}: {e}",
+                    file_path=str(real_path),
+                    hint="Check file permissions and encoding (expected UTF-8).",
+                )
+            )
+            return
+
+        try:
+            tree = ast.parse(source_code, filename=str(real_path))
+        except SyntaxError as e:
+            module.source_files[str(real_path)] = source_code
+            module.diagnostics.append(from_syntax_error(e, file_path=str(real_path), source_text=source_code))
+            return
+
+        if not any(v in path_str for v in (".venv", "venv", "site-packages")):
+            self._validate_ast_tree(tree, module, str(real_path), source_code, current_dir=real_path.parent)
+        try:
             tree = preprocess_ast(tree)
         except Exception as e:
-            if is_entry:
-                import sys
-                print(f"[PyFASM ERROR] Failed to parse {real_path}: {e}", file=sys.stderr)
+            module.diagnostics.append(
+                CompilerDiagnostic(
+                    severity="error",
+                    code="E2000",
+                    message=f"AST preprocessing failed for {real_path}: {e}",
+                    file_path=str(real_path),
+                )
+            )
             return
 
         # 1. Collect imports, string & float constants across the AST
@@ -925,7 +1154,12 @@ class AstAnalyzer:
                                 module.functions[local_alias] = orig_fn
 
         # 3. Extract functions and top-level code from this module
-        self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
+        prev_file = self._current_source_file
+        self._current_source_file = str(real_path)
+        try:
+            self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
+        finally:
+            self._current_source_file = prev_file
 
     def _extract_top_level_and_functions(
         self,
@@ -1621,5 +1855,6 @@ class AstAnalyzer:
             ast_node=node,
             global_names=global_names,
             is_generator=is_gen,
-            defaults=list(node.args.defaults)
+            defaults=list(node.args.defaults),
+            source_file=self._current_source_file,
         )

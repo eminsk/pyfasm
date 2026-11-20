@@ -58,6 +58,7 @@ artifacts = [
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/docs",
     "/tools",
     "/tests",
     "README.md",

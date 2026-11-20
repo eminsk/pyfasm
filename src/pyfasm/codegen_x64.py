@@ -14,6 +14,7 @@ _AST_MATCH_AS = getattr(ast, 'MatchAs', ())
 _AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
 _AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
+from pyfasm.diagnostics import CompilerDiagnostic, extract_source_line
 from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, TYPE_PTR, PyFasmType, ListType, DictType, SetType
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
@@ -111,10 +112,24 @@ class X64CodeGen:
         self.loop_stack: List[Tuple[str, str]] = []  # (start_label, end_label)
         self.try_stack: List[str] = []
         self.unresolved_symbols: Set[str] = set()
+        self.unresolved_locations: Dict[str, Tuple[Optional[str], Optional[int], Optional[int], Optional[int]]] = {}
+        self.diagnostics: List[CompilerDiagnostic] = list(getattr(module, "diagnostics", []))
         self.local_var_classes: Dict[str, str] = {}
         self.gui_control_id = 1000
         self.gui_edit_id = 100
         self.gui_chip_count = 0
+
+    def _record_unresolved(self, sym: str, node: Optional[ast.AST] = None) -> None:
+        self.unresolved_symbols.add(sym)
+        if sym not in self.unresolved_locations:
+            src_file = getattr(self.current_func, "source_file", None) if self.current_func else None
+            ln = getattr(node, "lineno", None) if node is not None else None
+            col0 = getattr(node, "col_offset", None) if node is not None else None
+            col = (col0 + 1) if isinstance(col0, int) else None
+            end_col0 = getattr(node, "end_col_offset", None) if node is not None else None
+            end_ln = getattr(node, "end_lineno", ln) if node is not None else ln
+            end_col = (end_col0 + 1) if (isinstance(end_col0, int) and end_ln == ln) else None
+            self.unresolved_locations[sym] = (src_file, ln, col, end_col)
 
     @property
     def features(self) -> Set[str]:
@@ -803,6 +818,27 @@ class X64CodeGen:
                 if sym == "str":
                     self.emit("jmp _pyfasm_int_to_str")
                 else:
+                    loc = self.unresolved_locations.get(sym, (None, None, None, None))
+                    src_file, ln, col, end_col = loc
+                    src_line = extract_source_line(
+                        src_file, ln, getattr(self.module, "source_files", None)
+                    )
+                    self.diagnostics.append(
+                        CompilerDiagnostic(
+                            severity="warning",
+                            code="W3001",
+                            message=f"Unresolved external symbol '{sym}' (emitted fallback stub returning 0)",
+                            file_path=src_file,
+                            lineno=ln,
+                            col_offset=col,
+                            end_col_offset=end_col,
+                            source_line=src_line,
+                            hint=(
+                                f"Define '{sym}', import its pure-Python module, or compile "
+                                "with `--strict` to treat unresolved symbols as errors."
+                            ),
+                        )
+                    )
                     self.emit("push rbp")
                     self.emit("mov rbp, rsp")
                     self.emit("xor eax, eax", f"fallback stub for external symbol '{sym}'")
@@ -2292,7 +2328,7 @@ include 'functions.inc'
                 safe_fn = safe_asm_label(expr.id)
                 self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
             else:
-                self.unresolved_symbols.add(expr.id)
+                self._record_unresolved(expr.id, expr)
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
         elif isinstance(expr, ast.Attribute):
@@ -4091,7 +4127,7 @@ include 'functions.inc'
 
             self._generate_expr(arg0)
             self.emit("mov rcx, rax")
-            self.unresolved_symbols.add("str")
+            self._record_unresolved("str", call)
             self.emit("call fn_str")
             return
 
@@ -5695,7 +5731,7 @@ include 'functions.inc'
             callee_target = "r10"
         else:
             if func_name not in self.module.functions:
-                self.unresolved_symbols.add(func_name)
+                self._record_unresolved(func_name, call)
             callee_target = safe_asm_label(func_name)
 
         # Allocate 32 bytes shadow space

@@ -45,9 +45,10 @@
 - **Расширенная поддержка Python и stdlib**: Полная поддержка `float`, `list`, `dict` (включая кортежные ключи), `set`, `tuple`, генераторов списков/словарей/множеств, генераторов (`yield`, `yield from`, generator expressions), ООП (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, а также нативных модулей `math`, `itertools`, `functools`, `bisect`, `heapq` и `json`.
 - **Движок NanoGEMM SIMD**: Аппаратное матричное умножение AVX2/FMA (`@` / `matmul`) и функции совместимости с NumPy (`zeros`, `ones`, `asarray`, `flatnonzero`).
 - **Нативный Win32 Tkinter / CustomTkinter UI**: Трансляция графических приложений и Canvas-графики напрямую в нативный Win32 GDI интерфейс с темной темой.
-- **Улучшения ABI, рантайма и пакетирования в v0.3.3**:
+- **Улучшения ABI, рантайма, диагностики и пакетирования в v0.3.3**:
   - Полное сохранение callee-saved регистров Microsoft x64 в сгенерированных функциях и в рантаймах Win64/Linux/macOS, а также секция `.reloc` для ASLR и одновременной загрузки нескольких DLL через `ctypes`.
   - Точная семантика целочисленного деления `//` и остатка `%` по правилам Python, точное сравнение 64-битных констант `float`, корректные ведущие нули в `print_float`, потокобезопасная аллокация `str(int)` и защита от зацикливания в хэш-таблицах с переиспользованием tombstones.
+  - Структурированная диагностика компилятора в стиле rustc/clang (`error[E1001]`–`E4002`, `warning[W2004]`–`W3001`), команда предпроверки `pyfasm64 check` и строгий режим `--strict`.
   - Маркеры PEP 561 `py.typed`, запуск `python -m pyfasm64` / `python -m pyfasm`, флаг `pyfasm64 --version` и надежная работа `--no-asm` и `--dir-mode`.
 
 ---
@@ -324,13 +325,29 @@ uv run pytest
 ```
 
 ```text
-============================= 132 passed ==============================
+============================= 139 passed ==============================
 ```
 
 Подтвержденная матрица совместимости:
 * **CPython 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16**: 100% тестов пройдены.
 * **Python Free-Threaded / No-GIL (3.13t, 3.14t, 3.15t, 3.16t)**: 100% тестов пройдены.
 * **PyPy (3.8, 3.9, 3.10, 3.11, 3.12)**: 100% тестов пройдены.
+
+---
+
+## Подробная документация
+
+Полные руководства и справочники находятся в папке [`docs/`](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md):
+
+| Документ | Описание |
+| :--- | :--- |
+| [Полное руководство на русском языке](https://github.com/eminsk/pyfasm/blob/main/docs/GUIDE_RU.md) | Установка, структура многомодульных проектов, классы, импорты, `check --strict` и коды ошибок |
+| [Documentation Hub (EN / RU)](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) | Общий индекс документации |
+| [Getting Started (EN)](https://github.com/eminsk/pyfasm/blob/main/docs/GETTING_STARTED.md) | Быстрый старт, проекты из нескольких пакетов, DLL и бандлинг |
+| [Language & Compatibility Reference (EN)](https://github.com/eminsk/pyfasm/blob/main/docs/LANGUAGE_REFERENCE.md) | Типы, ООП, наследование, `@property`, таблица магических методов и библиотек |
+| [CLI & Python API Reference (EN)](https://github.com/eminsk/pyfasm/blob/main/docs/CLI_AND_API.md) | Справочник команд `compile`, `check`, `emit-asm`, `bundle`, `clean` и Python API |
+| [Compiler Diagnostics & Error Codes (EN)](https://github.com/eminsk/pyfasm/blob/main/docs/ERRORS.md) | Полный каталог ошибок (`E1001`–`E4002`, `W2004`–`W3001`), режим `--strict` и способы исправления |
+| [Architecture & ABI Internals (EN)](https://github.com/eminsk/pyfasm/blob/main/docs/ARCHITECTURE.md) | Конвейер компиляции, устройство объектов в памяти, x86-64 ABI, `.rsrc` и `.reloc` |
 
 ---
 

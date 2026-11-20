@@ -7,9 +7,10 @@ import sys
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict, Any
 from pyfasm.ast_parser import AstAnalyzer, ParsedModule
 from pyfasm.codegen_x64 import X64CodeGen
+from pyfasm.diagnostics import DiagnosticReport, PyFasmCompileError, VALID_TARGETS, format_fasm_error
 from pyfasm.fasm_runner import FasmRunner
 
 
@@ -18,59 +19,34 @@ class PyFasmCompiler:
 
     def __init__(self, fasm_path: Optional[str] = None, include_path: Optional[str] = None):
         self.fasm_runner = FasmRunner(fasm_path=fasm_path, include_path=include_path)
+        self.last_diagnostics: DiagnosticReport = DiagnosticReport()
 
-    def compile_source_to_asm(
-        self,
-        source_code: str,
-        target: str = "win64",
-        project_dir: Optional[str] = None,
-        icon_path: Optional[str] = None,
-    ) -> str:
-        """Parses Python source code and returns complete FASM x64 assembly."""
-        analyzer = AstAnalyzer(project_root=project_dir)
-        parsed_mod = analyzer.parse_source(source_code)
-        if parsed_mod.ui_spec and getattr(parsed_mod.ui_spec, "has_canvas", False):
-            from pyfasm.ui_codegen import generate_ui_app_asm
-            return generate_ui_app_asm(parsed_mod.ui_spec)
-        if parsed_mod.ui_spec and (parsed_mod.ui_spec.root_class_name == "StackOverflowApp" or "stackoverflow" in getattr(parsed_mod.ui_spec, "window_title", "").lower()):
-            from pyfasm.ui_codegen import generate_stackoverflow_asm
-            modular_files = generate_stackoverflow_asm(parsed_mod.ui_spec, project_dir=project_dir)
-            return modular_files["main.asm"]
-        if project_dir and (Path(project_dir) / "asm" / "punto64.asm").exists():
-            from pyfasm.ui_codegen import generate_punto_asm
-            modular_files = generate_punto_asm(parsed_mod, project_dir=project_dir)
-            return modular_files["main.asm"]
-        if project_dir and (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists():
-            from pyfasm.ui_codegen import generate_excel_asm
-            modular_files = generate_excel_asm(parsed_mod, project_dir=project_dir)
-            return modular_files["main.asm"]
-        if not icon_path and project_dir:
-            cand = Path(project_dir) / "icon.ico"
-            if cand.exists():
-                icon_path = str(cand.resolve())
-        codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
-        return codegen.generate()
-
-    def compile_file(
-        self,
+    @staticmethod
+    def _prepare_compile_inputs(
         source_path: str,
-        output_binary: Optional[str] = None,
-        target: str = "win64",
-        keep_asm: bool = True,
-        export_fasm_dir: Optional[str] = None,
-        icon_path: Optional[str] = None,
-    ) -> Tuple[bool, str, str]:
-        """
-        Compiles a Python file or entire project directory into a single standalone native binary.
-        Recursively resolves and bundles all imported local project modules into 1 file.
-        Returns (success: bool, output_binary_path: str, log_message: str).
-        """
+        target: str,
+    ) -> Tuple[DiagnosticReport, Optional[Path], Optional[Path], str]:
+        report = DiagnosticReport()
+        t_low = (target or "").lower()
+        if t_low not in VALID_TARGETS:
+            report.add_error(
+                "E1003",
+                f"Unsupported compilation target '{target}'.",
+                hint=f"Choose one of the supported targets: {', '.join(VALID_TARGETS)}.",
+            )
+            return report, None, None, ""
+
         src = Path(source_path).resolve()
         if not src.exists():
-            return False, "", f"Source path not found: {source_path}"
+            report.add_error(
+                "E1002",
+                f"Source path not found: {source_path}",
+                file_path=str(source_path),
+                hint="Verify the input Python file or project directory path.",
+            )
+            return report, None, None, ""
 
         if src.is_dir():
-            # Project directory compilation: auto-detect entry script
             candidates = ["main.py", "app.py", "bot.py", "run.py", "index.py"]
             entry_file = None
             for cand in candidates:
@@ -83,27 +59,93 @@ class PyFasmCompiler:
                 if py_files:
                     entry_file = py_files[0]
                 else:
-                    return False, "", f"No Python source files (.py) found in directory: {source_path}"
-            project_dir = src
-            src_file = entry_file
-            default_stem = src.name
-        else:
-            project_dir = src.parent
-            src_file = src
-            default_stem = src.stem
+                    report.add_error(
+                        "E1002",
+                        f"No Python source files (.py) found in directory: {source_path}",
+                        file_path=str(src),
+                        hint="Pass a `.py` entry file or add `main.py` / `app.py` to the project directory.",
+                    )
+                    return report, None, None, ""
+            return report, entry_file, src, src.name
 
-        if not icon_path and project_dir:
-            cand = project_dir / "icon.ico"
-            if cand.exists():
-                icon_path = str(cand.resolve())
+        return report, src, src.parent, src.stem
+
+    def compile_source_to_asm(
+        self,
+        source_code: str,
+        target: str = "win64",
+        project_dir: Optional[str] = None,
+        icon_path: Optional[str] = None,
+        strict: bool = False,
+    ) -> str:
+        """Parses Python source code and returns complete FASM x64 assembly."""
+        report = DiagnosticReport()
+        self.last_diagnostics = report
+        if (target or "").lower() not in VALID_TARGETS:
+            report.add_error(
+                "E1003",
+                f"Unsupported compilation target '{target}'.",
+                hint=f"Choose one of the supported targets: {', '.join(VALID_TARGETS)}.",
+            )
+            raise PyFasmCompileError(report)
 
         analyzer = AstAnalyzer(project_root=project_dir)
+        parsed_mod = analyzer.parse_source(source_code)
+        report.extend(parsed_mod.diagnostics)
+        if report.has_errors:
+            raise PyFasmCompileError(report)
+
+        asm_out: Optional[str] = None
+        if parsed_mod.ui_spec and getattr(parsed_mod.ui_spec, "has_canvas", False):
+            from pyfasm.ui_codegen import generate_ui_app_asm
+            asm_out = generate_ui_app_asm(parsed_mod.ui_spec)
+        elif parsed_mod.ui_spec and (parsed_mod.ui_spec.root_class_name == "StackOverflowApp" or "stackoverflow" in getattr(parsed_mod.ui_spec, "window_title", "").lower()):
+            from pyfasm.ui_codegen import generate_stackoverflow_asm
+            modular_files = generate_stackoverflow_asm(parsed_mod.ui_spec, project_dir=project_dir)
+            asm_out = modular_files["main.asm"]
+        elif project_dir and (Path(project_dir) / "asm" / "punto64.asm").exists():
+            from pyfasm.ui_codegen import generate_punto_asm
+            modular_files = generate_punto_asm(parsed_mod, project_dir=project_dir)
+            asm_out = modular_files["main.asm"]
+        elif project_dir and (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists():
+            from pyfasm.ui_codegen import generate_excel_asm
+            modular_files = generate_excel_asm(parsed_mod, project_dir=project_dir)
+            asm_out = modular_files["main.asm"]
+        else:
+            if not icon_path and project_dir:
+                cand = Path(project_dir) / "icon.ico"
+                if cand.exists():
+                    icon_path = str(cand.resolve())
+            codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
+            asm_out = codegen.generate()
+            report.extend(codegen.diagnostics)
+
+        if strict:
+            report.promote_warnings_to_errors()
+        if report.has_errors:
+            raise PyFasmCompileError(report)
+        return asm_out
+
+    def _run_frontend_and_codegen(
+        self,
+        src_file: Path,
+        project_dir: Path,
+        target: str,
+        icon_path: Optional[str],
+        report: DiagnosticReport,
+        emit_full_asm: bool = False,
+    ) -> Tuple[Optional[ParsedModule], Optional[Dict[str, Any]], str]:
+        analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
+        report.extend(parsed_mod.diagnostics)
+        if report.has_errors:
+            return parsed_mod, None, ""
+
         asm_code = ""
         if parsed_mod.ui_spec and getattr(parsed_mod.ui_spec, "has_canvas", False):
             from pyfasm.ui_codegen import generate_ui_app_asm
             asm_code = generate_ui_app_asm(parsed_mod.ui_spec)
-            modular_files = {"main.asm": asm_code}
+            modular_files: Dict[str, Any] = {"main.asm": asm_code}
         elif parsed_mod.ui_spec and (parsed_mod.ui_spec.root_class_name == "StackOverflowApp" or "stackoverflow" in getattr(parsed_mod.ui_spec, "window_title", "").lower()):
             from pyfasm.ui_codegen import generate_stackoverflow_asm
             modular_files = generate_stackoverflow_asm(parsed_mod.ui_spec, project_dir=project_dir)
@@ -119,8 +161,67 @@ class PyFasmCompiler:
         else:
             codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
             modular_files = codegen.generate_modular()
-            if export_fasm_dir:
+            if emit_full_asm:
                 asm_code = codegen.generate(relative_icon=True)
+            report.extend(codegen.diagnostics)
+
+        return parsed_mod, modular_files, asm_code
+
+    def check_file(
+        self,
+        source_path: str,
+        target: str = "win64",
+        strict: bool = False,
+    ) -> Tuple[bool, DiagnosticReport]:
+        """Runs parsing, semantic validation, and x64 codegen checks without assembling."""
+        report, src_file, project_dir, _ = self._prepare_compile_inputs(source_path, target)
+        self.last_diagnostics = report
+        if report.has_errors or src_file is None or project_dir is None:
+            return False, report
+
+        self._run_frontend_and_codegen(src_file, project_dir, target, None, report, emit_full_asm=False)
+        if strict:
+            report.promote_warnings_to_errors()
+        return (not report.has_errors), report
+
+    def compile_file(
+        self,
+        source_path: str,
+        output_binary: Optional[str] = None,
+        target: str = "win64",
+        keep_asm: bool = True,
+        export_fasm_dir: Optional[str] = None,
+        icon_path: Optional[str] = None,
+        strict: bool = False,
+    ) -> Tuple[bool, str, str]:
+        """
+        Compiles a Python file or entire project directory into a single standalone native binary.
+        Recursively resolves and bundles all imported local project modules into 1 file.
+        Returns (success: bool, output_binary_path: str, log_message: str).
+        """
+        report, src_file, project_dir, default_stem = self._prepare_compile_inputs(source_path, target)
+        self.last_diagnostics = report
+        if report.has_errors or src_file is None or project_dir is None:
+            return False, "", report.format_all()
+
+        src = Path(source_path).resolve()
+        if not icon_path and project_dir:
+            cand = project_dir / "icon.ico"
+            if cand.exists():
+                icon_path = str(cand.resolve())
+
+        _parsed_mod, modular_files, asm_code = self._run_frontend_and_codegen(
+            src_file,
+            project_dir,
+            target,
+            icon_path,
+            report,
+            emit_full_asm=bool(export_fasm_dir),
+        )
+        if strict:
+            report.promote_warnings_to_errors()
+        if report.has_errors or modular_files is None:
+            return False, "", report.format_all()
 
         if not output_binary:
             if target == "win64":
@@ -178,6 +279,10 @@ class PyFasmCompiler:
                     asm_file_path=str(main_asm_file),
                     keep_asm=True
                 )
+
+        if not success:
+            report.add(format_fasm_error(log, asm_path=str(main_asm_file)))
+            return False, str(out_bin), report.format_all()
 
         if success and os.path.exists(out_bin):
             try:

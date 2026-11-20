@@ -45,9 +45,10 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 - **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
 - **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
 - **Native Win32 Tkinter / CustomTkinter UI**: Translates Python desktop GUIs and Canvas drawing directly into DPI-aware Win32 GDI dark-mode applications.
-- **v0.3.3 Runtime, ABI & Packaging Hardening**:
+- **v0.3.3 Runtime, ABI, Diagnostics & Packaging Hardening**:
   - Full Microsoft x64 callee-saved register preservation in generated functions and Win64/Linux/macOS runtime routines, plus dummy-safe PE64 `.reloc` sections for ASLR and simultaneous multi-DLL loading via `ctypes`.
   - Exact Python floor division (`//`) and modulo (`%`) sign semantics, exact IEEE-754 float literal pooling, zero-padded `print_float`, thread-safe heap-allocated `str(int)`, and bounded dictionary/set probing with tombstone reuse.
+  - Structured rustc/clang-style compiler diagnostics (`error[E1001]`–`E4002`, `warning[W2004]`–`W3001`), pre-flight validation command `pyfasm64 check`, and `--strict` mode.
   - PEP 561 `py.typed` markers, `python -m pyfasm64` / `python -m pyfasm` execution, `pyfasm64 --version`, and reliable `--no-asm` / `--dir-mode` builds.
 
 ---
@@ -369,13 +370,29 @@ uv run pytest
 ```
 
 ```text
-============================= 132 passed ==============================
+============================= 139 passed ==============================
 ```
 
 Verified compatibility matrix:
 * **CPython 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16**: 100% tests passing.
 * **Python Free-Threaded / No-GIL (3.13t, 3.14t, 3.15t, 3.16t)**: 100% tests passing.
 * **PyPy (3.8, 3.9, 3.10, 3.11, 3.12)**: 100% tests passing.
+
+---
+
+## Documentation
+
+Full guides and engineering references live in the [`docs/`](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) directory:
+
+| Document | Description |
+| :--- | :--- |
+| [Documentation Hub](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) | Navigation hub (English & Russian) |
+| [Getting Started](https://github.com/eminsk/pyfasm/blob/main/docs/GETTING_STARTED.md) | Installation, single-file & multi-package project structure, DLLs, and bundling |
+| [Language & Compatibility Reference](https://github.com/eminsk/pyfasm/blob/main/docs/LANGUAGE_REFERENCE.md) | Types, OOP, inheritance, `@property`, magic methods matrix, stdlib, and external imports |
+| [CLI & Python API Reference](https://github.com/eminsk/pyfasm/blob/main/docs/CLI_AND_API.md) | Full reference for `compile`, `check`, `emit-asm`, `bundle`, `clean`, and Python APIs |
+| [Compiler Diagnostics & Error Codes](https://github.com/eminsk/pyfasm/blob/main/docs/ERRORS.md) | Diagnostic catalog (`E1001`–`E4002`, `W2004`–`W3001`), `--strict`, and fixes |
+| [Architecture & ABI Internals](https://github.com/eminsk/pyfasm/blob/main/docs/ARCHITECTURE.md) | Compilation pipeline, heap object layouts, x86-64 ABI, `.rsrc` & `.reloc` internals |
+| [Руководство на русском языке](https://github.com/eminsk/pyfasm/blob/main/docs/GUIDE_RU.md) | Полное руководство пользователя и справочник ошибок на русском языке |
 
 ---
 
