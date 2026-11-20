@@ -23,9 +23,11 @@ class PeepholeOptimizer:
     def optimize(self, asm_text: str) -> str:
         lines = asm_text.splitlines()
         optimized = lines
+        self.passes_run = 0
         for _ in range(3):  # Run up to 3 passes until convergence
             prev_len = len(optimized)
             optimized = self._optimize_pass(optimized)
+            self.passes_run += 1
             if len(optimized) == prev_len:
                 break
         return "\n".join(optimized)
@@ -103,20 +105,23 @@ class PeepholeOptimizer:
                     next_args_str = next_match.group(2) or ""
                     next_args = [a.strip() for a in next_args_str.split(",")] if next_args_str else []
 
-                    # 4. Collapse push X; pop Y
+                    # 4. Collapse push X; pop Y (only when stack-neutral and valid x86-64 mov)
                     if op == "push" and next_op == "pop" and len(args) == 1 and len(next_args) == 1:
                         push_arg = args[0]
                         pop_arg = next_args[0]
+                        push_low = push_arg.lower()
+                        pop_low = pop_arg.lower()
                         indent = "    "
-                        if push_arg.lower() == pop_arg.lower():
-                            # push rax; pop rax -> eliminated entirely
-                            i = next_idx + 1
-                            continue
-                        else:
-                            # push rdx; pop rax -> mov rax, rdx
-                            result.append(f"{indent}mov {pop_arg}, {push_arg} ; optimized push/pop")
-                            i = next_idx + 1
-                            continue
+                        if push_low != "rsp" and pop_low != "rsp":
+                            if push_low == pop_low and push_low in X64_64BIT_REGS:
+                                # push rax; pop rax -> eliminated entirely
+                                i = next_idx + 1
+                                continue
+                            elif push_low in X64_64BIT_REGS or pop_low in X64_64BIT_REGS:
+                                # push rdx; pop rax -> mov rax, rdx
+                                result.append(f"{indent}mov {pop_arg}, {push_arg} ; optimized push/pop")
+                                i = next_idx + 1
+                                continue
 
                     # 5. Eliminate redundant write then immediate read from stack:
                     # mov [rbp - X], rax
@@ -124,11 +129,13 @@ class PeepholeOptimizer:
                     if op == "mov" and next_op == "mov" and len(args) == 2 and len(next_args) == 2:
                         dst1, src1 = args[0].lower(), args[1].lower()
                         dst2, src2 = next_args[0].lower(), next_args[1].lower()
-                        if dst1 == src2 and src1 == dst2:
+                        dst1_mem = dst1[6:].strip() if dst1.startswith("qword ") else dst1
+                        src2_mem = src2[6:].strip() if src2.startswith("qword ") else src2
+                        if dst1_mem == src2_mem and src1 == dst2 and src1 in X64_64BIT_REGS:
                             # Thread Safety: ONLY eliminate for thread-private stack variables:
                             # [rbp - ...] or [rsp + ...].
                             # NEVER eliminate for heap memory ([rcx]), globals ([rel ...]), or shared memory!
-                            if dst1.startswith("[rbp -") or dst1.startswith("[rsp +"):
+                            if dst1_mem.startswith("[rbp -") or dst1_mem.startswith("[rsp +"):
                                 result.append(line)
                                 i = next_idx + 1
                                 continue

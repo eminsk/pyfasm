@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Tuple, Optional, List
 from pyfasm.ast_parser import AstAnalyzer, ParsedModule
@@ -39,7 +40,7 @@ class PyFasmCompiler:
             from pyfasm.ui_codegen import generate_punto_asm
             modular_files = generate_punto_asm(parsed_mod, project_dir=project_dir)
             return modular_files["main.asm"]
-        if project_dir and ("0121" in str(project_dir) or (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists()):
+        if project_dir and (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists():
             from pyfasm.ui_codegen import generate_excel_asm
             modular_files = generate_excel_asm(parsed_mod, project_dir=project_dir)
             return modular_files["main.asm"]
@@ -98,7 +99,7 @@ class PyFasmCompiler:
 
         analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
-        codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
+        asm_code = ""
         if parsed_mod.ui_spec and getattr(parsed_mod.ui_spec, "has_canvas", False):
             from pyfasm.ui_codegen import generate_ui_app_asm
             asm_code = generate_ui_app_asm(parsed_mod.ui_spec)
@@ -107,17 +108,19 @@ class PyFasmCompiler:
             from pyfasm.ui_codegen import generate_stackoverflow_asm
             modular_files = generate_stackoverflow_asm(parsed_mod.ui_spec, project_dir=project_dir)
             asm_code = modular_files["main.asm"]
-        elif (project_dir and (Path(project_dir) / "asm" / "punto64.asm").exists()) or (getattr(parsed_mod, "is_tray_app", False) and project_dir and "0123" in str(project_dir)):
+        elif project_dir and (Path(project_dir) / "asm" / "punto64.asm").exists():
             from pyfasm.ui_codegen import generate_punto_asm
             modular_files = generate_punto_asm(parsed_mod, project_dir=project_dir)
             asm_code = modular_files["main.asm"]
-        elif (project_dir and ("0121" in str(project_dir) or (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists())):
+        elif project_dir and (Path(project_dir) / "xlsx_viewer" / "asm" / "xlsx_gui64.asm").exists():
             from pyfasm.ui_codegen import generate_excel_asm
             modular_files = generate_excel_asm(parsed_mod, project_dir=project_dir)
             asm_code = modular_files["main.asm"]
         else:
-            asm_code = codegen.generate()
+            codegen = X64CodeGen(parsed_mod, target=target, icon_path=icon_path)
             modular_files = codegen.generate_modular()
+            if export_fasm_dir:
+                asm_code = codegen.generate(relative_icon=True)
 
         if not output_binary:
             if target == "win64":
@@ -134,33 +137,44 @@ class PyFasmCompiler:
         else:
             out_bin = Path(output_binary).resolve()
 
-        # Modular Assembly Generation: Create clean 'asm/' directory in project folder
-        asm_dir = project_dir / "asm"
-        asm_dir.mkdir(parents=True, exist_ok=True)
-        if icon_path and Path(icon_path).exists():
-            try:
-                shutil.copyfile(icon_path, asm_dir / "icon.ico")
-            except Exception:
-                pass
-        for fname, m_content in modular_files.items():
-            fpath = asm_dir / fname
-            if isinstance(m_content, bytes):
-                fpath.write_bytes(m_content.replace(b"\r\r\n", b"\r\n"))
-            else:
-                clean_text = m_content.replace("\r\n", "\n")
+        def _write_modular_dir(target_asm_dir: Path) -> Path:
+            target_asm_dir.mkdir(parents=True, exist_ok=True)
+            if icon_path and Path(icon_path).exists():
                 try:
-                    fpath.write_text(clean_text, encoding="utf-8", newline="\n")
+                    shutil.copyfile(icon_path, target_asm_dir / "icon.ico")
                 except Exception:
-                    fpath.write_text(clean_text, encoding="latin-1", newline="\n")
+                    pass
+            for fname, m_content in modular_files.items():
+                fpath = target_asm_dir / fname
+                if isinstance(m_content, bytes):
+                    fpath.write_bytes(m_content.replace(b"\r\r\n", b"\r\n") if not fname.lower().endswith((".ico", ".png", ".bmp", ".bin")) else m_content)
+                else:
+                    clean_text = m_content.replace("\r\n", "\n")
+                    try:
+                        fpath.write_text(clean_text, encoding="utf-8", newline="\n")
+                    except Exception:
+                        fpath.write_text(clean_text, encoding="latin-1", newline="\n")
+            return target_asm_dir / "main.asm"
 
-        main_asm_file = asm_dir / "main.asm"
-
-        success, log = self.fasm_runner.assemble(
-            asm_content=modular_files["main.asm"],
-            output_binary=str(out_bin),
-            asm_file_path=str(main_asm_file) if keep_asm else None,
-            keep_asm=keep_asm
-        )
+        if keep_asm:
+            # Modular Assembly Generation: Create clean 'asm/' directory in project folder
+            asm_dir = project_dir / "asm"
+            main_asm_file = _write_modular_dir(asm_dir)
+            success, log = self.fasm_runner.assemble(
+                asm_content=modular_files["main.asm"],
+                output_binary=str(out_bin),
+                asm_file_path=str(main_asm_file),
+                keep_asm=True
+            )
+        else:
+            with tempfile.TemporaryDirectory(prefix="pyfasm_asm_") as tmp_asm:
+                main_asm_file = _write_modular_dir(Path(tmp_asm))
+                success, log = self.fasm_runner.assemble(
+                    asm_content=modular_files["main.asm"],
+                    output_binary=str(out_bin),
+                    asm_file_path=str(main_asm_file),
+                    keep_asm=True
+                )
 
         if success and os.path.exists(out_bin):
             try:
@@ -185,6 +199,7 @@ class PyFasmCompiler:
                 app_name=default_stem,
                 target=target,
                 include_compiler=True,
+                icon_path=icon_path,
             )
 
         return success, str(out_bin), log

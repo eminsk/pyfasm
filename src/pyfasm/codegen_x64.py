@@ -4,8 +4,10 @@ Emits clean, optimized Flat Assembler (FASM) assembly instructions.
 """
 from __future__ import annotations
 import ast
+import math
 from pathlib import Path
 import re
+import struct
 from typing import List, Dict, Optional, Tuple, Set, Any
 _AST_MATCH = getattr(ast, 'Match', ())
 _AST_MATCH_AS = getattr(ast, 'MatchAs', ())
@@ -62,6 +64,17 @@ RESERVED_FASM_KEYWORDS: Set[str] = {
     "propsheetpage", "propsheetheader", "imageinfo", "tbbutton",
     "initcommoncontrolsex",
 }
+
+
+_CALLEE_REG_PATTERNS = [
+    ("rbx", re.compile(r'\b(rbx|ebx|bx|bl|bh)\b', re.I)),
+    ("rsi", re.compile(r'\b(rsi|esi|si|sil)\b', re.I)),
+    ("rdi", re.compile(r'\b(rdi|edi|di|dil)\b', re.I)),
+    ("r12", re.compile(r'\b(r12|r12d|r12w|r12b)\b', re.I)),
+    ("r13", re.compile(r'\b(r13|r13d|r13w|r13b)\b', re.I)),
+    ("r14", re.compile(r'\b(r14|r14d|r14w|r14b)\b', re.I)),
+    ("r15", re.compile(r'\b(r15|r15d|r15w|r15b)\b', re.I)),
+]
 
 
 def safe_asm_label(name: str) -> str:
@@ -649,7 +662,13 @@ class X64CodeGen:
 
         # Emit user float literals
         for flit in self.module.float_literals:
-            lines.append(f"    {flit.label} dq {flit.value}")
+            val = flit.value
+            is_neg_zero = (val == 0.0 and math.copysign(1.0, val) < 0.0)
+            if math.isfinite(val) and not is_neg_zero:
+                lines.append(f"    {flit.label} dq {repr(val)}")
+            else:
+                bits = struct.unpack("<Q", struct.pack("<d", val))[0]
+                lines.append(f"    {flit.label} dq 0x{bits:016X}")
 
         # Emit global variables
         for gname, gval in self.module.global_vars.items():
@@ -807,9 +826,9 @@ class X64CodeGen:
             return "\n".join(lines)
         return ""
 
-    def _get_resources_section(self) -> str:
+    def _get_resources_section(self, use_relative_icon: bool = True) -> str:
         if self.target in ("win64", "dll") and self.icon_path and Path(self.icon_path).exists():
-            icon_posix = str(Path(self.icon_path).resolve()).replace("\\", "/")
+            icon_ref = "icon.ico" if use_relative_icon else str(Path(self.icon_path).resolve()).replace("\\", "/")
             return f"""include 'macro/resource.inc'
 
 section '.rsrc' resource data readable
@@ -819,7 +838,7 @@ directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
 resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
 resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
 
-icon _pyfasm_main_icon, _pyfasm_icon_data, 'icon.ico'
+icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_ref}'
 """
         return ""
 
@@ -905,13 +924,21 @@ include 'functions.inc'
             "functions.inc": optimize_fasm_code(functions_inc),
             "imports.inc": imports_inc,
         }
-        rsrc_content = self._get_resources_section()
+        rsrc_content = self._get_resources_section(use_relative_icon=True)
         if rsrc_content:
             res_dict["resources.inc"] = rsrc_content
-            res_dict["main.asm"] = main_asm.strip() + "\n\ninclude 'resources.inc'\n"
+            res_dict["main.asm"] = res_dict["main.asm"].strip() + "\n\ninclude 'resources.inc'\n"
+        if self.target == "dll":
+            res_dict["reloc.inc"] = (
+                "section '.reloc' fixups data readable discardable\n"
+                "if $=$$\n"
+                "    dd 0, 8\n"
+                "end if\n"
+            )
+            res_dict["main.asm"] = res_dict["main.asm"].strip() + "\n\ninclude 'reloc.inc'\n"
         return res_dict
 
-    def generate(self) -> str:
+    def generate(self, relative_icon: bool = False) -> str:
         if getattr(self.module, "ui_spec", None) and getattr(self.module.ui_spec, "has_canvas", False):
             from pyfasm.ui_codegen import generate_ui_app_asm
             return generate_ui_app_asm(self.module.ui_spec)
@@ -921,12 +948,17 @@ include 'functions.inc'
         funcs = self._get_functions_section()
         runtime = self._get_runtime_code()
         imports = self._get_imports_section()
-        rsrc = self._get_resources_section()
+        rsrc = self._get_resources_section(use_relative_icon=relative_icon)
         raw_parts = [header, data, entry, funcs, runtime, imports]
         if rsrc:
             raw_parts.append(rsrc)
         if self.target == "dll":
-            raw_parts.append("section '.reloc' fixups data discardable\n")
+            raw_parts.append(
+                "section '.reloc' fixups data readable discardable\n"
+                "if $=$$\n"
+                "    dd 0, 8\n"
+                "end if\n"
+            )
         raw = "\n".join(raw_parts)
         from pyfasm.optimizer import optimize_fasm_code
         return optimize_fasm_code(raw)
@@ -996,10 +1028,67 @@ include 'functions.inc'
         else:
             self.emit_raw(f"{fn_lbl}:")
 
+        # Generate Function Body into temporary buffer to detect modified callee-saved registers
+        saved_lines = self.lines
+        self.lines = []
+        if fn.name in self.module.classes:
+            self._generate_constructor_body(self.module.classes[fn.name])
+        elif fn.ast_node:
+            for stmt in fn.ast_node.body:
+                self._generate_statement(stmt)
+
+        if fn.name == "main":
+            self.emit("xor eax, eax", "default return 0 for main")
+        body_lines = self.lines
+        self.lines = saved_lines
+
+        used_callee: List[str] = []
+        non_save_ops = {
+            "push", "cmp", "test", "call", "jmp", "jz", "jnz", "je", "jne",
+            "jl", "jle", "jg", "jge", "jb", "jbe", "ja", "jae", "js", "jns", "ret",
+        }
+        str_ops = {"scasb", "scasw", "scasd", "scasq", "stosb", "stosw", "stosd", "stosq", "repne", "repe", "rep"}
+        for reg_name, pat in _CALLEE_REG_PATTERNS:
+            modified = False
+            for raw_l in body_lines:
+                stmt_txt = raw_l.split(";", 1)[0].strip()
+                if not stmt_txt or stmt_txt.endswith(":"):
+                    continue
+                op_parts = stmt_txt.split(None, 1)
+                op_kw = op_parts[0].lower()
+                if op_kw in non_save_ops:
+                    continue
+                if op_kw in str_ops:
+                    if reg_name == "rdi" or (reg_name == "rsi" and "movs" in stmt_txt.lower()):
+                        modified = True
+                        break
+                    continue
+                if len(op_parts) > 1:
+                    dst_op = op_parts[1].split(",", 1)[0].strip()
+                    if not dst_op.startswith("[") and pat.search(dst_op):
+                        modified = True
+                        break
+            if modified:
+                used_callee.append(reg_name)
+
+        used_local_end = max(
+            [v.stack_offset for v in fn.local_vars.values()]
+            + [a.stack_offset for a in fn.args]
+            + [0]
+        )
+        save_base = ((used_local_end + 7) // 8) * 8
+        save_offsets = [(reg, save_base + (i + 1) * 8) for i, reg in enumerate(used_callee)]
+        total_local_bytes = save_base + len(save_offsets) * 8
+        total_stack = max(fn.stack_size, ((total_local_bytes + 15) // 16) * 16 + 32)
+        if total_stack % 16 != 0:
+            total_stack = ((total_stack + 15) // 16) * 16
+
         # Prolog
         self.emit("push rbp")
         self.emit("mov rbp, rsp")
-        self.emit(f"sub rsp, {fn.stack_size}", "frame + shadow space")
+        self.emit(f"sub rsp, {total_stack}", "frame + shadow space")
+        for reg, off in save_offsets:
+            self.emit(f"mov [rbp - {off}], {reg}", f"save callee-saved {reg}")
 
         # Spill arguments to their local stack slots
         arg_regs = ["rcx", "rdx", "r8", "r9"]
@@ -1012,18 +1101,12 @@ include 'functions.inc'
                 self.emit(f"mov rax, [rbp + {caller_offset}]")
                 self.emit(f"mov [rbp - {arg.stack_offset}], rax", f"arg {arg.name}")
 
-        # Function Body
-        if fn.name in self.module.classes:
-            self._generate_constructor_body(self.module.classes[fn.name])
-        elif fn.ast_node:
-            for stmt in fn.ast_node.body:
-                self._generate_statement(stmt)
-
-        if fn.name == "main":
-            self.emit("xor eax, eax", "default return 0 for main")
+        self.lines.extend(body_lines)
 
         # Epilog
         self.emit_raw(f".epilog_{safe_asm_label(fn.name)}:")
+        for reg, off in reversed(save_offsets):
+            self.emit(f"mov {reg}, [rbp - {off}]", f"restore callee-saved {reg}")
         self.emit("mov rsp, rbp")
         self.emit("pop rbp")
         self.emit("ret")
@@ -2187,8 +2270,9 @@ include 'functions.inc'
                     self.emit("xor eax, eax")
             elif isinstance(expr.value, float):
                 flabel = ""
+                target_bits = struct.pack("<d", expr.value)
                 for flit in self.module.float_literals:
-                    if abs(flit.value - expr.value) < 1e-12:
+                    if struct.pack("<d", flit.value) == target_bits:
                         flabel = flit.label
                         break
                 if flabel:
@@ -3481,7 +3565,7 @@ include 'functions.inc'
             self.emit("sub rsp, 32")
             self.emit("call _pyfasm_nanogemm_matmul")
             self.emit("add rsp, 32")
-        elif isinstance(op, ast.FloorDiv) or isinstance(op, ast.Div):
+        elif isinstance(op, (ast.FloorDiv, ast.Div)):
             lbl_div_ok = self.new_label("div_ok")
             lbl_div_end = self.new_label("div_end")
             self.emit("test r11, r11")
@@ -3495,9 +3579,16 @@ include 'functions.inc'
             self.emit_raw(f"{lbl_div_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
+            self.emit("test rdx, rdx", "check remainder for Python floor rounding")
+            self.emit(f"jz {lbl_div_end}")
+            self.emit("mov r10, rdx")
+            self.emit("xor r10, r11")
+            self.emit(f"jns {lbl_div_end}")
+            self.emit("dec rax", "floor toward -infinity")
             self.emit_raw(f"{lbl_div_end}:")
         elif isinstance(op, ast.Mod):
             lbl_mod_ok = self.new_label("mod_ok")
+            lbl_mod_store = self.new_label("mod_store")
             lbl_mod_end = self.new_label("mod_end")
             self.emit("test r11, r11")
             self.emit(f"jnz {lbl_mod_ok}")
@@ -3510,6 +3601,13 @@ include 'functions.inc'
             self.emit_raw(f"{lbl_mod_ok}:")
             self.emit("cqo")
             self.emit("idiv r11")
+            self.emit("test rdx, rdx", "adjust remainder sign to match divisor")
+            self.emit(f"jz {lbl_mod_store}")
+            self.emit("mov r10, rdx")
+            self.emit("xor r10, r11")
+            self.emit(f"jns {lbl_mod_store}")
+            self.emit("add rdx, r11")
+            self.emit_raw(f"{lbl_mod_store}:")
             self.emit("mov rax, rdx")
             self.emit_raw(f"{lbl_mod_end}:")
         elif isinstance(op, ast.BitAnd):
@@ -3844,12 +3942,54 @@ include 'functions.inc'
                 self.emit("call _pyfasm_set_remove")
                 return
 
-        # List pop
-        if attr_name == "pop" and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var and var.var_type.is_list():
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
+        # List / Dict pop
+        if attr_name == "pop" and isinstance(call.func, ast.Attribute):
+            var = self.current_func.local_vars.get(prefix) if (prefix and self.current_func) else None
+            val_type = (
+                var.var_type
+                if (var and (var.var_type.is_list() or var.var_type.is_dict()))
+                else self._infer_expr_type(call.func.value)
+            )
+            if val_type.is_list():
+                if var:
+                    self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
+                else:
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "list_ptr")
                 self.emit("call _pyfasm_list_pop")
+                return
+            if val_type.is_dict() and call.args:
+                is_tuple_key = isinstance(call.args[0], ast.Tuple)
+                if isinstance(call.args[0], ast.Name) and self.current_func:
+                    kv = self.current_func.local_vars.get(call.args[0].id)
+                    if kv and kv.var_type.is_tuple():
+                        is_tuple_key = True
+                self.emit("sub rsp, 32", "spill [dict_ptr, key, popped_val]")
+                self._generate_expr(call.func.value)
+                self.emit("mov [rsp], rax", "save dict_ptr")
+                self._generate_expr(call.args[0])
+                self.emit("mov [rsp + 8], rax", "save key")
+                if len(call.args) >= 2:
+                    self._generate_expr(call.args[1])
+                    self.emit("mov r8, rax", "default val")
+                else:
+                    self.emit("xor r8d, r8d", "default val = 0")
+                self.emit("mov rcx, [rsp]", "dict_ptr")
+                self.emit("mov rdx, [rsp + 8]", "key")
+                self.emit("sub rsp, 32", "shadow space")
+                if is_tuple_key:
+                    self.emit("call _pyfasm_dict_get_tuple")
+                else:
+                    self.emit("call _pyfasm_dict_get")
+                self.emit("add rsp, 32")
+                self.emit("mov [rsp + 16], rax", "save popped value")
+                self.emit("mov rcx, [rsp]", "dict_ptr")
+                self.emit("mov rdx, [rsp + 8]", "key")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_dict_remove")
+                self.emit("add rsp, 32")
+                self.emit("mov rax, [rsp + 16]", "return popped value")
+                self.emit("add rsp, 32")
                 return
 
         # List / Container __setitem__(idx, val)
@@ -4285,7 +4425,7 @@ include 'functions.inc'
                 self.emit_raw(f".loop_{lbl_fnz}:")
                 self.emit("cmp r14, r13")
                 self.emit(f"jge .done_{lbl_fnz}")
-                self.emit("mov rax, [rbx + (r14 + 1) * 8]")
+                self.emit("mov rax, [rbx + r14 * 8 + 8]")
                 self.emit("test rax, rax")
                 self.emit(f"jz .skip_{lbl_fnz}")
                 self.emit("mov rcx, r12")
@@ -4688,22 +4828,34 @@ include 'functions.inc'
             args = call.args
             start_expr = None
             stop_expr = None
-            step_val = 1
+            const_step: Optional[int] = 1
+            step_expr: Optional[ast.expr] = None
             if len(args) == 1:
                 stop_expr = args[0]
             elif len(args) >= 2:
                 start_expr = args[0]
                 stop_expr = args[1]
-                if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
-                    step_val = args[2].value
+                if len(args) >= 3:
+                    if isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
+                        const_step = args[2].value
+                    elif isinstance(args[2], ast.UnaryOp) and isinstance(args[2].op, ast.USub) and isinstance(args[2].operand, ast.Constant) and isinstance(args[2].operand.value, int):
+                        const_step = -args[2].operand.value
+                    else:
+                        const_step = None
+                        step_expr = args[2]
 
             lbl_loop = self.new_label("range_expr_loop")
             lbl_done = self.new_label("range_expr_done")
+            lbl_alloc_ok = self.new_label("range_alloc_ok")
+            lbl_alloc_min = self.new_label("range_alloc_min")
 
             self.emit("push rbx")
             self.emit("push r12")
             self.emit("push r13")
-            self.emit("push r14") # 4 registers pushed = 32 bytes, aligns stack to 16
+            self.emit("push r14")
+            if step_expr is not None:
+                self.emit("push r15")
+                self.emit("sub rsp, 8", "keep 16-byte alignment")
 
             self._generate_expr(stop_expr)
             self.emit("mov r13, rax", "range stop")
@@ -4714,36 +4866,109 @@ include 'functions.inc'
             else:
                 self.emit("xor r12, r12", "range start = 0")
 
-            self.emit("mov ecx, 1024", "initial list buffer")
+            if step_expr is not None:
+                self._generate_expr(step_expr)
+                self.emit("mov r15, rax", "range step")
+
+            if const_step == 0:
+                self.emit("mov ecx, 1024", "empty range buffer")
+            elif const_step is not None:
+                if const_step > 0:
+                    self.emit("mov rax, r13")
+                    self.emit("sub rax, r12")
+                else:
+                    self.emit("mov rax, r12")
+                    self.emit("sub rax, r13")
+                self.emit("cmp rax, 0")
+                self.emit(f"jle {lbl_alloc_min}")
+                abs_step = abs(const_step)
+                if abs_step > 1:
+                    self.emit("cqo")
+                    self.emit(f"mov rcx, {abs_step}")
+                    self.emit("idiv rcx")
+                self.emit("lea rcx, [rax * 8 + 32]")
+                self.emit("cmp rcx, 1024")
+                self.emit(f"jae {lbl_alloc_ok}")
+                self.emit_raw(f"{lbl_alloc_min}:")
+                self.emit("mov ecx, 1024", "initial list buffer")
+                self.emit_raw(f"{lbl_alloc_ok}:")
+            else:
+                lbl_dyn_pos = self.new_label("range_dyn_pos")
+                lbl_dyn_calc = self.new_label("range_dyn_calc")
+                self.emit("mov rax, r13")
+                self.emit("sub rax, r12")
+                self.emit("test r15, r15")
+                self.emit(f"jz {lbl_alloc_min}")
+                self.emit(f"jg {lbl_dyn_pos}")
+                self.emit("neg rax")
+                self.emit("mov rcx, r15")
+                self.emit("neg rcx")
+                self.emit(f"jmp {lbl_dyn_calc}")
+                self.emit_raw(f"{lbl_dyn_pos}:")
+                self.emit("mov rcx, r15")
+                self.emit_raw(f"{lbl_dyn_calc}:")
+                self.emit("cmp rax, 0")
+                self.emit(f"jle {lbl_alloc_min}")
+                self.emit("cqo")
+                self.emit("idiv rcx")
+                self.emit("lea rcx, [rax * 8 + 32]")
+                self.emit("cmp rcx, 1024")
+                self.emit(f"jae {lbl_alloc_ok}")
+                self.emit_raw(f"{lbl_alloc_min}:")
+                self.emit("mov ecx, 1024", "initial list buffer")
+                self.emit_raw(f"{lbl_alloc_ok}:")
+
             self.emit("sub rsp, 32", "shadow space for alloc")
             self.emit("call _pyfasm_alloc")
             self.emit("add rsp, 32", "restore shadow space")
             self.emit("mov qword [rax], 0", "length = 0")
             self.emit("mov r14, rax", "list_ptr")
 
-            self.emit_raw(f".loop_{lbl_loop}:")
-            self.emit("cmp r12, r13")
-            if step_val > 0:
-                self.emit(f"jge .done_{lbl_done}")
+            if const_step == 0:
+                self.emit(f"jmp .done_{lbl_done}")
             else:
-                self.emit(f"jle .done_{lbl_done}")
+                self.emit_raw(f".loop_{lbl_loop}:")
+                if const_step is not None:
+                    self.emit("cmp r12, r13")
+                    if const_step > 0:
+                        self.emit(f"jge .done_{lbl_done}")
+                    else:
+                        self.emit(f"jle .done_{lbl_done}")
+                else:
+                    lbl_step_pos = self.new_label("range_step_pos")
+                    lbl_step_body = self.new_label("range_step_body")
+                    self.emit("test r15, r15")
+                    self.emit(f"jz .done_{lbl_done}")
+                    self.emit(f"jg {lbl_step_pos}")
+                    self.emit("cmp r12, r13")
+                    self.emit(f"jle .done_{lbl_done}")
+                    self.emit(f"jmp {lbl_step_body}")
+                    self.emit_raw(f"{lbl_step_pos}:")
+                    self.emit("cmp r12, r13")
+                    self.emit(f"jge .done_{lbl_done}")
+                    self.emit_raw(f"{lbl_step_body}:")
 
-            self.emit("mov rdx, r12", "current item")
-            self.emit("mov rcx, r14", "list_ptr")
-            self.emit("sub rsp, 32", "shadow space for append")
-            self.emit("call _pyfasm_list_append")
-            self.emit("add rsp, 32", "restore shadow space")
+                self.emit("mov rdx, r12", "current item")
+                self.emit("mov rcx, r14", "list_ptr")
+                self.emit("sub rsp, 32", "shadow space for append")
+                self.emit("call _pyfasm_list_append")
+                self.emit("add rsp, 32", "restore shadow space")
 
-            if step_val == 1:
-                self.emit("inc r12")
-            elif step_val == -1:
-                self.emit("dec r12")
-            else:
-                self.emit(f"add r12, {step_val}")
-            self.emit(f"jmp .loop_{lbl_loop}")
+                if const_step is None:
+                    self.emit("add r12, r15")
+                elif const_step == 1:
+                    self.emit("inc r12")
+                elif const_step == -1:
+                    self.emit("dec r12")
+                else:
+                    self.emit(f"add r12, {const_step}")
+                self.emit(f"jmp .loop_{lbl_loop}")
 
             self.emit_raw(f".done_{lbl_done}:")
             self.emit("mov rax, r14", "return range list")
+            if step_expr is not None:
+                self.emit("add rsp, 8")
+                self.emit("pop r15")
             self.emit("pop r14")
             self.emit("pop r13")
             self.emit("pop r12")
@@ -4882,7 +5107,14 @@ include 'functions.inc'
                 return
 
         # Built-in list(...) constructor
-        if func_name == "list" and call.args:
+        if func_name == "list":
+            if not call.args:
+                self.emit("mov ecx, 1024", "empty list buffer")
+                self.emit("sub rsp, 32", "shadow space for alloc")
+                self.emit("call _pyfasm_alloc")
+                self.emit("add rsp, 32", "restore shadow space")
+                self.emit("mov qword [rax], 0", "length = 0")
+                return
             arg = call.args[0]
             is_gen = False
             if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
@@ -4901,7 +5133,7 @@ include 'functions.inc'
                 self.emit("push rbx")
                 self.emit("push r12")
                 self.emit("mov rbx, rax", "gen_ptr")
-                self.emit("mov ecx, 1024", "initial list capacity")
+                self.emit("mov ecx, 65536", "initial list capacity")
                 self.emit("sub rsp, 32", "shadow space for alloc")
                 self.emit("call _pyfasm_alloc")
                 self.emit("add rsp, 32", "restore shadow space")
@@ -4925,6 +5157,27 @@ include 'functions.inc'
                 self.emit("pop r12")
                 self.emit("pop rbx")
                 return
+
+            if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "range":
+                self._generate_expr(arg)
+                return
+
+            arg_type = self._infer_expr_type(arg)
+            self._generate_expr(arg)
+            if (
+                self.target == "win64"
+                and not arg_type.is_str()
+                and not arg_type.is_dict()
+                and not arg_type.is_set()
+            ):
+                self.emit("mov rcx, rax", "sequence pointer")
+                self.emit("xor edx, edx", "start = 0")
+                self.emit("mov r8, -999999", "end sentinel")
+                self.emit("mov r9, 1", "step = 1")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_list_slice")
+                self.emit("add rsp, 32", "restore shadow space")
+            return
 
         if func_name in ("len", "str_len"):
             if call.args:

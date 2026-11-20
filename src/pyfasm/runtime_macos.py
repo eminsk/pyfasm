@@ -27,11 +27,11 @@ lc_segment_text:
     dd 72 + 80              ; cmdsize: 72 + 80
     db '__TEXT', 0,0,0,0,0,0,0,0,0,0 ; segname (16 bytes)
     dq 0x100000000          ; vmaddr
-    dq 0x10000              ; vmsize (64KB)
+    dq ((file_size + 4095) / 4096) * 4096 ; vmsize (page-aligned)
     dq 0                    ; fileoff
     dq file_size            ; filesize
     dd 7                    ; maxprot: rwx
-    dd 5                    ; initprot: r-x
+    dd 7                    ; initprot: rwx (data + code live in __TEXT)
     dd 1                    ; nsects: 1
     dd 0                    ; flags
 
@@ -58,7 +58,7 @@ lc_unixthread:
     dq 0,0,0,0,0,0,0,0      ; r8, r9, r10, r11, r12, r13, r14, r15
     dq 0x100000000 + _pyfasm_entry_point ; rip (Entry Point)
     dq 0                    ; rflags
-    dq 0,0                  ; cs, fs, gs
+    dq 0,0,0                ; cs, fs, gs (21 qwords = 168 bytes)
 
 sizeof_cmds = $ - commands_start
 
@@ -153,6 +153,8 @@ _pyfasm_print_newline:
 
 _pyfasm_str_len:
     ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .sl_zero
     push    rdi
     mov     rdi, rcx
     xor     eax, eax
@@ -162,6 +164,9 @@ _pyfasm_str_len:
     dec     rcx
     mov     rax, rcx
     pop     rdi
+    ret
+.sl_zero:
+    xor     eax, eax
     ret
 
 _pyfasm_print_int:
@@ -207,6 +212,7 @@ _pyfasm_print_int:
     mov     rdi, 1                  ; stdout
     syscall
 
+    add     rsp, 48
     pop     rdi
     pop     rsi
     pop     rbx
@@ -252,15 +258,47 @@ _pyfasm_print_float:
     mov     rdx, 1
     syscall
 
-    ; Fraction (6 decimals)
+    ; Fraction (6 decimals with leading zeros)
     movsd   xmm0, [rsp + 32]
-    cvtsi2sd xmm2, [rsp + 40]
+    cvtsi2sd xmm2, qword [rsp + 40]
     subsd   xmm0, xmm2
     mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
     cvttsd2si rax, xmm0
-    mov     rcx, rax
+    test    rax, rax
+    jns     .frac_nonneg
+    xor     eax, eax
+.frac_nonneg:
+    cmp     rax, 1000000
+    jl      .frac_check_zero
+    mov     rax, 999999
+.frac_check_zero:
+    test    rax, rax
+    jnz     .frac_padded
+    xor     ecx, ecx
     call    _pyfasm_print_int
-
+    jmp     .flt_done
+.frac_padded:
+    lea     r8, [rsp + 22]
+    mov     byte [r8], 0
+    mov     r9, 10
+    mov     ecx, 6
+.frac_digit_loop:
+    xor     rdx, rdx
+    div     r9
+    add     dl, '0'
+    dec     r8
+    mov     [r8], dl
+    dec     ecx
+    jnz     .frac_digit_loop
+    mov     rax, 0x2000004
+    mov     rdi, 1
+    mov     rsi, r8
+    mov     rdx, 6
+    syscall
+.flt_done:
     mov     rsp, rbp
     pop     rbp
     ret
@@ -315,6 +353,7 @@ _pyfasm_get_tick_count:
 _pyfasm_sleep_ms:
     push    rbp
     mov     rbp, rsp
+    push    rbx
     sub     rsp, 32
     mov     rax, rcx
     xor     rdx, rdx
@@ -327,13 +366,14 @@ _pyfasm_sleep_ms:
     xor     rsi, rsi
     mov     rax, 0x20000EB          ; Darwin sys_nanosleep
     syscall
+    add     rsp, 32
+    pop     rbx
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_alloc:
-    xor     eax, eax
-    ret
+    jmp     _pyfasm_alloc_memory
 
 _pyfasm_free:
     xor     eax, eax

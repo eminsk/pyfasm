@@ -1,6 +1,6 @@
 context:
   name: pyfasm64
-  version: "0.3.1"
+  version: "0.3.3"
 
 package:
   name: ${{ name }}
@@ -35,9 +35,11 @@ tests:
   - script:
       - pyfasm64 --help
       - pyfasm --help
+      - pyfasm64 --version
+      - pyfasm --version
 
 about:
-  homepage: https://github.com/eminsk/pyfasm
+  homepage: https://eminsk.github.io/#pyfasm
   repository: https://github.com/eminsk/pyfasm
   documentation: https://github.com/eminsk/pyfasm#readme
   license: MIT

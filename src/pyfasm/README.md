@@ -1,6 +1,6 @@
 # PyFASM64: Universal Python-to-Pure FASM x86_64 Native Compiler
 
-> 🌐 **Language / Язык:** **English** | [🇷🇺 Русский (Russian Documentation)](README_RU.md)
+> 🌐 **Language / Язык:** **English** | [🇷🇺 Русский (Russian Documentation)](https://github.com/eminsk/pyfasm/blob/main/README_RU.md)
 
 [![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![GitHub Release](https://img.shields.io/github/v/release/eminsk/pyfasm?style=flat&logo=github&logoColor=white&color=blue)](https://github.com/eminsk/pyfasm/releases)
@@ -14,17 +14,19 @@
 [![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
 [![Targets: Windows | Linux | macOS | DLL](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20DLL-purple.svg?style=flat)]()
 [![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64%20v1.73.36-red.svg?style=flat)](https://flatassembler.net)
+[![FASM Forum](https://img.shields.io/badge/FASM%20Board-Official%20Topic-blue.svg)](https://board.flatassembler.net/topic.php?t=24431)
 [![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
 [![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](https://github.com/eminsk/pyfasm/blob/main/LICENSE)
 [![Donate USDT](https://img.shields.io/badge/Donate-USDT_(TRC20)-26A17B?style=flat&logo=tether&logoColor=white)](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P)
 
 > ### 🤝 Community, Issues & Support
 > - 🐛 **Found a bug, compiler issue, or edge case?** Please [Open an Issue](https://github.com/eminsk/pyfasm/issues) — bug reports and platform patches are tracked and resolved quickly!
 > - 💬 **Questions, cross-compilation ideas, or new architectures?** Join our [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
+> - 🏛️ **Official Community Topic:** [Flat Assembler Board (board.flatassembler.net)](https://board.flatassembler.net/topic.php?t=24431)
 > - ⭐ **Find PyFASM64 useful?** Give it a star on GitHub — it helps more developers discover the compiler!
-> - 📖 **Documentation:** Read online on GitHub, or use the CLI: `pyfasm docs` (English) or `pyfasm docs --ru` (Russian).
+> - 📖 **Documentation:** Read online on GitHub, or use the CLI: `pyfasm64 docs` (English) or `pyfasm64 docs --ru` (Russian).
 > - ☕ **Support development (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
 
 **PyFASM64** (package: `pyfasm64`, legacy alias: `pyfasm`) is a high-performance cross-platform native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It generates tiny, self-contained standalone binaries with **zero runtime overhead**, **no virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
@@ -35,6 +37,18 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 > - **Dual CLI Commands**: Both `pyfasm64` and `pyfasm` commands are installed and supported out of the box.
 > - **Dual Python Imports**: Both `import pyfasm64` and `import pyfasm` work seamlessly.
 > - **Zero Breaking Changes**: All compiler options, multi-module imports, targets (`win64`, `linux`, `macos`, `dll`), benchmarks, and the native bundler operate with complete backward compatibility.
+
+---
+
+## What's New in v0.3.x
+
+- **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
+- **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
+- **Native Win32 Tkinter / CustomTkinter UI**: Translates Python desktop GUIs and Canvas drawing directly into DPI-aware Win32 GDI dark-mode applications.
+- **v0.3.3 Runtime, ABI & Packaging Hardening**:
+  - Full Microsoft x64 callee-saved register preservation in generated functions and Win64/Linux/macOS runtime routines, plus dummy-safe PE64 `.reloc` sections for ASLR and simultaneous multi-DLL loading via `ctypes`.
+  - Exact Python floor division (`//`) and modulo (`%`) sign semantics, exact IEEE-754 float literal pooling, zero-padded `print_float`, thread-safe heap-allocated `str(int)`, and bounded dictionary/set probing with tombstone reuse.
+  - PEP 561 `py.typed` markers, `python -m pyfasm64` / `python -m pyfasm` execution, `pyfasm64 --version`, and reliable `--no-asm` / `--dir-mode` builds.
 
 ---
 
@@ -207,17 +221,21 @@ uv sync
 
 Both `pyfasm64` and `pyfasm` CLI commands are available and identical in syntax and options:
 
-### 1. View Built-in Documentation
+### 1. View Built-in Documentation & Version
 
 ```bash
+# Print compiler version:
+uv run pyfasm64 --version
+uv run python -m pyfasm64 --version
+
 # View primary English documentation:
-uv run pyfasm docs
+uv run pyfasm64 docs
 
 # View Russian documentation:
-uv run pyfasm docs --ru
+uv run pyfasm64 docs --ru
 
 # Open in default markdown viewer / editor:
-uv run pyfasm docs --open
+uv run pyfasm64 docs --open
 ```
 
 ### 2. Compile and Run on Windows (PE64)
@@ -273,7 +291,7 @@ uv run pyfasm64 compile my_math.py -o my_math.dll --target dll
 
 ```bash
 # Exports assembly, headers, compiler, and 1-click build scripts into FASM/ directory:
-uv run pyfasm compile my_app.py --export-fasm
+uv run pyfasm64 compile my_app.py --export-fasm
 ```
 
 ---
@@ -282,26 +300,26 @@ uv run pyfasm compile my_app.py --export-fasm
 
 ```bash
 # Compile with application icon embedded into PE resources (.rsrc), window, and taskbar:
-uv run pyfasm compile main.py --icon icon.ico
+uv run pyfasm64 compile main.py --icon icon.ico
 
 # Auto-detects icon.ico if present in project directory:
-uv run pyfasm bundle . -o MyApp.exe
+uv run pyfasm64 bundle . -o MyApp.exe
 ```
 
 ### 10. Clean Compiler & Build Caches
 
 ```bash
 # Clean local project build artifacts (asm/, __pycache__, .stamp_*):
-uv run pyfasm clean
+uv run pyfasm64 clean
 
 # Dry-run to inspect items without deleting:
-uv run pyfasm clean --dry-run
+uv run pyfasm64 clean --dry-run
 
 # Clean global unpacked application caches (%LOCALAPPDATA%/pyfasm):
-uv run pyfasm clean --apps
+uv run pyfasm64 clean --apps
 
 # Clean all local and global caches:
-uv run pyfasm clean --all
+uv run pyfasm64 clean --all
 ```
 
 ---
@@ -311,17 +329,21 @@ uv run pyfasm clean --all
 
 | Feature | Syntax / API | Description |
 | :--- | :--- | :--- |
-| **Functions** | `def name(a: int, b: int) -> int:` | Strongly-typed x86_64 functions with ABI calling conventions |
-| **Data Types** | `int`, `ptr`, `str`, `bool`, `void` | 64-bit native integers, pointers, string constants, booleans |
-| **Arithmetic** | `+`, `-`, `*`, `//`, `%`, `&`, `\|`, `^`, `<<`, `>>` | Direct x86_64 ALU operations (`add`, `sub`, `imul`, `idiv`) |
-| **Control Flow** | `if`, `elif`, `else`, `while`, `for i in range()` | Conditional jumps, loops, `break`, `continue`, `return` |
+| **Functions & Lambdas** | `def name(a: int, b: int) -> int:`, `lambda` | Strongly-typed x86_64 functions with ABI calling conventions & defaults |
+| **Data Types** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-bit signed ints, IEEE-754 SSE doubles, UTF-8/UTF-16LE strings, raw pointers |
+| **Containers** | `list`, `dict`, `set`, `tuple`, slicing | Dynamic arrays, FNV-1a hash tables (incl. tuple keys), hash sets, comprehensions |
+| **OOP & Classes** | `class`, `__init__`, `super()`, `@property` | Native object layout, method dispatch, inheritance, and property getters/setters |
+| **Generators & Errors** | `yield`, `yield from`, `try`/`except`, `with` | State-machine coroutines, generator expressions, structured exception unwinding |
+| **Arithmetic** | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, bitwise | Direct x86_64 ALU & SSE instructions, Python floor div/mod, AVX2 NanoGEMM `@` |
+| **Control Flow** | `if`/`elif`/`else`, `while`, `for`, `match`/`case` | Loops, unpacking, `break`, `continue`, `return`, pattern matching |
+| **Stdlib Modules** | `math`, `itertools`, `functools`, `bisect`, `heapq`, `json` | Native zero-dependency `gcd`, `lcm`, `isqrt`, `chain`, `reduce`, `heappush`, `loads` |
 | **Dynamic Memory** | `alloc_memory(bytes)`, `free_memory(ptr)` | OS virtual memory allocation (`VirtualAlloc` / `sys_mmap`) |
 | **Buffer Access** | `buf[i] = val` and `val = buf[i]` | Indexed memory read and write operations |
 | **Multithreading** | `spawn_thread(worker, param)`, `wait_thread(h)` | Hardware OS threads running concurrently without GIL |
 | **Atomic Ops** | `atomic_add(ptr, val)`, `atomic_sub(ptr, val)` | Thread-safe atomic operations via CPU `lock` prefix |
-| **Console I/O** | `print()`, `print_int()`, `print_str()`, `print_newline()` | Low-level buffered stdout streaming |
+| **Console I/O** | `print()`, `input()`, `print_int()`, `print_float()` | Low-level buffered stdout streaming and console line input |
 | **Timers & Sleep**| `get_tick_count()`, `sleep_ms(ms)` | High-precision timing and thread sleep |
-| **Unicode Strings**| `str` | Transparent UTF-8 to UTF-16LE conversion for Win32 GUI APIs |
+| **Native GUI** | `tkinter`, `customtkinter`, `pystray` | Win32 GDI dark-mode controls, Canvas plotting, and tray apps |
 
 ---
 
@@ -347,7 +369,7 @@ uv run pytest
 ```
 
 ```text
-============================= 48 passed in 6.37s ==============================
+============================= 129 passed ==============================
 ```
 
 Verified compatibility matrix:
@@ -359,4 +381,4 @@ Verified compatibility matrix:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](https://github.com/eminsk/pyfasm/blob/main/LICENSE).

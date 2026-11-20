@@ -31,6 +31,7 @@ class FasmExporter:
         target: str = "win64",
         payload_zip: Optional[Union[str, Path]] = None,
         include_compiler: bool = True,
+        icon_path: Optional[Union[str, Path]] = None,
     ) -> Path:
         """
         Exports a complete, self-contained FASM project into export_dir.
@@ -54,12 +55,20 @@ class FasmExporter:
             out_ext = ".macho"
         elif target_norm == "dll":
             out_ext = ".dll"
+        elif target_norm == "myos":
+            out_ext = ".bin"
         else:
             out_ext = ".exe"
 
         # 1. Write the assembly source file
         asm_path = out_dir / f"{app_name}.asm"
         asm_path.write_text(asm_content, encoding="utf-8")
+
+        if icon_path and Path(icon_path).exists():
+            try:
+                shutil.copy2(icon_path, out_dir / "icon.ico")
+            except Exception:
+                pass
 
         # 2. Copy include headers
         tools_dir = cls.get_bundled_tools_dir()
@@ -108,18 +117,20 @@ class FasmExporter:
         # 3. Copy compiler binaries if requested
         if include_compiler:
             copied_bin = False
-            if tools_dir.exists():
-                for bin_name in ("FASM.EXE", "fasm.exe", "fasm.x64", "fasm.darwin", "fasm"):
-                    src_bin = tools_dir / bin_name
-                    if src_bin.exists() and src_bin.is_file():
-                        dst_bin = out_dir / bin_name
-                        if not dst_bin.exists():
-                            shutil.copy2(src_bin, dst_bin)
-                        copied_bin = True
-                        try:
-                            os.chmod(dst_bin, 0o755)
-                        except Exception:
-                            pass
+            bin_dirs = [tools_dir, tools_dir / "bin"]
+            for bdir in bin_dirs:
+                if bdir.exists():
+                    for bin_name in ("FASM.EXE", "fasm.exe", "fasm.x64", "fasm.darwin", "fasm"):
+                        src_bin = bdir / bin_name
+                        if src_bin.exists() and src_bin.is_file():
+                            dst_bin = out_dir / bin_name
+                            if not dst_bin.exists():
+                                shutil.copy2(src_bin, dst_bin)
+                            copied_bin = True
+                            try:
+                                os.chmod(dst_bin, 0o755)
+                            except Exception:
+                                pass
             if not copied_bin:
                 try:
                     from pyfasm.fasm_runner import FasmRunner
@@ -179,7 +190,8 @@ class FasmExporter:
             bat_lines.extend([
                 "",
                 f'echo [*] Appending monolithic payload {payload_name}...',
-                f'copy /b "%~dp0{app_name}{out_ext}" + "%~dp0{payload_name}" "%~dp0{app_name}{out_ext}" >nul',
+                f'copy /b "%~dp0{app_name}{out_ext}" + "%~dp0{payload_name}" "%~dp0{app_name}{out_ext}.tmp" >nul',
+                f'move /y "%~dp0{app_name}{out_ext}.tmp" "%~dp0{app_name}{out_ext}" >nul',
             ])
         bat_lines.extend([
             "",
@@ -194,15 +206,15 @@ class FasmExporter:
             "set -e",
             'DIR="$(cd "$(dirname "$0")" && pwd)"',
             'export INCLUDE="$DIR/INCLUDE"',
-            'FASM_BIN="$DIR/fasm"',
-            'if [ ! -f "$FASM_BIN" ]; then',
-            '    if [ -f "$DIR/fasm.x64" ]; then',
-            '        FASM_BIN="$DIR/fasm.x64"',
-            '    elif [ -f "$DIR/fasm.darwin" ]; then',
-            '        FASM_BIN="$DIR/fasm.darwin"',
-            '    else',
-            '        FASM_BIN="fasm"',
-            '    fi',
+            'OS_NAME="$(uname -s 2>/dev/null || echo Linux)"',
+            'if [ "$OS_NAME" = "Darwin" ] && [ -f "$DIR/fasm.darwin" ]; then',
+            '    FASM_BIN="$DIR/fasm.darwin"',
+            'elif [ -f "$DIR/fasm.x64" ]; then',
+            '    FASM_BIN="$DIR/fasm.x64"',
+            'elif [ -f "$DIR/fasm" ]; then',
+            '    FASM_BIN="$DIR/fasm"',
+            'else',
+            '    FASM_BIN="fasm"',
             'fi',
             'chmod +x "$FASM_BIN" 2>/dev/null || true',
             f'echo "[*] Assembling {app_name}.asm to {app_name}{out_ext}..."',

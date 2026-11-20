@@ -111,7 +111,8 @@ def analyze_ui_structure(tree: ast.AST) -> Optional[UiAppSpec]:
                         app_spec.window_title = node.args[0].value
                 if node.func.attr == "geometry" and node.args:
                     if isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                        parts = node.args[0].value.lower().split("x")
+                        geom_size = node.args[0].value.lower().split("+", 1)[0].split("-", 1)[0]
+                        parts = geom_size.split("x")
                         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                             app_spec.window_width = int(parts[0])
                             app_spec.window_height = int(parts[1])
@@ -291,8 +292,14 @@ def analyze_ui_structure(tree: ast.AST) -> Optional[UiAppSpec]:
                     t_name = c.func.value.attr if isinstance(c.func.value, ast.Attribute) else (c.func.value.id if isinstance(c.func.value, ast.Name) else "")
                     for w in app_spec.widgets:
                         if w.name == t_name:
-                            w.row = _extract_kwarg_int(c, "row") or w.row
-                            w.column = _extract_kwarg_int(c, "column") or w.column
-                            w.sticky = _extract_kwarg_str(c, "sticky") or w.sticky
+                            r_val = _extract_kwarg_int(c, "row")
+                            if r_val is not None:
+                                w.row = r_val
+                            c_val = _extract_kwarg_int(c, "column")
+                            if c_val is not None:
+                                w.column = c_val
+                            stk_val = _extract_kwarg_str(c, "sticky")
+                            if stk_val is not None:
+                                w.sticky = stk_val
 
     return app_spec

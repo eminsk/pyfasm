@@ -115,7 +115,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -158,7 +158,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -202,7 +202,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -254,9 +254,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
           softwareupdate --install-rosetta --agree-to-license || true
           codesign -s - -f tools/fasm/fasm.darwin || true
+          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -285,9 +286,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
           softwareupdate --install-rosetta --agree-to-license || true
           codesign -s - -f tools/fasm/fasm.darwin || true
+          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -316,9 +318,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
           softwareupdate --install-rosetta --agree-to-license || true
           codesign -s - -f tools/fasm/fasm.darwin || true
+          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

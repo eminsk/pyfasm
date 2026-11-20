@@ -119,3 +119,42 @@ def test_ui_codegen_stackoverflow_search():
     assert "network.inc" in modular
     assert "format PE64 GUI 5.0" in modular["main.asm"]
     assert "include 'win64a.inc'" in modular["main.asm"]
+
+
+def test_ui_analyzer_inline_geometry_offset_and_row_zero():
+    """Verify inline UI AST extraction handles +X+Y geometry offsets, row=0, and canvas codegen."""
+    code = """
+import customtkinter as ctk
+
+class InlinePlotApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Inline Solver")
+        self.geometry("1100x700+50+50")
+        side = ctk.CTkFrame(self, corner_radius=12)
+        side.grid(row=0, column=0, sticky="ns")
+        self.title_lbl = ctk.CTkLabel(side, text="Header")
+        self.title_lbl.grid(row=2, column=1)
+        self.title_lbl.grid(row=0, column=0)
+        self.solve_btn = ctk.CTkButton(side, text="Solve", command=self.solve)
+        self.canvas = FigureCanvasTkAgg(None, master=self)
+
+    def solve(self):
+        pass
+"""
+    tree = ast.parse(code)
+    spec = analyze_ui_structure(tree)
+    assert spec is not None
+    assert spec.window_title == "Inline Solver"
+    assert spec.window_width == 1100
+    assert spec.window_height == 700
+    assert spec.has_canvas is True
+    assert "side" in spec.containers
+    lbl = next(w for w in spec.widgets if w.name == "title_lbl")
+    assert lbl.row == 0
+    assert lbl.column == 0
+
+    asm = generate_ui_app_asm(spec)
+    assert "format PE64 GUI 5.0" in asm
+    assert "_pyfasm_entry_point:" in asm
+

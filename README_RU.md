@@ -1,6 +1,6 @@
 # PyFASM64: Универсальный нативный компилятор Python в чистый FASM x86_64
 
-> 🌐 **Язык / Language:** [🇬🇧 English (Основная документация)](README.md) | **Русский**
+> 🌐 **Язык / Language:** [🇬🇧 English (Основная документация)](https://github.com/eminsk/pyfasm/blob/main/README.md) | **Русский**
 
 [![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![GitHub Release](https://img.shields.io/github/v/release/eminsk/pyfasm?style=flat&logo=github&logoColor=white&color=blue)](https://github.com/eminsk/pyfasm/releases)
@@ -18,7 +18,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
 [![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](https://github.com/eminsk/pyfasm/blob/main/LICENSE)
 [![Donate USDT](https://img.shields.io/badge/Donate-USDT_(TRC20)-26A17B?style=flat&logo=tether&logoColor=white)](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P)
 
 > ### 🤝 Сообщество, вопросы и поддержка
@@ -26,7 +26,7 @@
 > - 💬 **Вопросы, идеи по кросс-компиляции и предложения:** Присоединяйтесь к [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
 > - 🏛️ **Официальное обсуждение:** [Анонс на Flat Assembler Board (board.flatassembler.net)](https://board.flatassembler.net/topic.php?t=24431)
 > - ⭐ **Нравится PyFASM64?** Поставьте звезду на GitHub — это помогает проекту развиваться!
-> - 📖 **Документация из терминала:** `pyfasm docs` (английская) или `pyfasm docs --ru` (русская).
+> - 📖 **Документация из терминала:** `pyfasm64 docs` (английская) или `pyfasm64 docs --ru` (русская).
 > - ☕ **Поддержать разработку (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Проверить на TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
 
 **PyFASM64** (пакет: `pyfasm64`, классический псевдоним: `pyfasm`) — высокопроизводительный кроссплатформенный нативный компилятор, транслирующий код Python напрямую в чистый машинный код ассемблера **x86_64 Flat Assembler (FASM)**. Он генерирует сверхкомпактные автономные исполняемые файлы с **нулевым оверхедом рантайма**, **без виртуальной машины** и с **полным устранением Global Interpreter Lock (Zero-GIL)**.
@@ -37,6 +37,18 @@
 > - **Две команды CLI**: Доступны обе команды — и `pyfasm64`, и `pyfasm`.
 > - **Два варианта импорта**: Работают как `import pyfasm64`, так и `import pyfasm`.
 > - **Полная преемственность**: Все параметры компиляции, сборка многофайловых проектов, цели (`win64`, `linux`, `macos`, `dll`), бенчмарки и бандлер работают без изменений.
+
+---
+
+## Что нового в v0.3.x
+
+- **Расширенная поддержка Python и stdlib**: Полная поддержка `float`, `list`, `dict` (включая кортежные ключи), `set`, `tuple`, генераторов списков/словарей/множеств, генераторов (`yield`, `yield from`, generator expressions), ООП (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, а также нативных модулей `math`, `itertools`, `functools`, `bisect`, `heapq` и `json`.
+- **Движок NanoGEMM SIMD**: Аппаратное матричное умножение AVX2/FMA (`@` / `matmul`) и функции совместимости с NumPy (`zeros`, `ones`, `asarray`, `flatnonzero`).
+- **Нативный Win32 Tkinter / CustomTkinter UI**: Трансляция графических приложений и Canvas-графики напрямую в нативный Win32 GDI интерфейс с темной темой.
+- **Улучшения ABI, рантайма и пакетирования в v0.3.3**:
+  - Полное сохранение callee-saved регистров Microsoft x64 в сгенерированных функциях и в рантаймах Win64/Linux/macOS, а также секция `.reloc` для ASLR и одновременной загрузки нескольких DLL через `ctypes`.
+  - Точная семантика целочисленного деления `//` и остатка `%` по правилам Python, точное сравнение 64-битных констант `float`, корректные ведущие нули в `print_float`, потокобезопасная аллокация `str(int)` и защита от зацикливания в хэш-таблицах с переиспользованием tombstones.
+  - Маркеры PEP 561 `py.typed`, запуск `python -m pyfasm64` / `python -m pyfasm`, флаг `pyfasm64 --version` и надежная работа `--no-asm` и `--dir-mode`.
 
 ---
 
@@ -193,17 +205,21 @@ uv sync
 
 Обе команды — `pyfasm64` и `pyfasm` — полностью эквивалентны по синтаксису и аргументам:
 
-### 1. Просмотр документации
+### 1. Просмотр документации и версии
 
 ```bash
+# Вывести версию компилятора:
+uv run pyfasm64 --version
+uv run python -m pyfasm64 --version
+
 # Вывести основную документацию на английском:
-uv run pyfasm docs
+uv run pyfasm64 docs
 
 # Вывести документацию на русском языке:
-uv run pyfasm docs --ru
+uv run pyfasm64 docs --ru
 
 # Открыть файл документации в текстовом редакторе/просмотрщике:
-uv run pyfasm docs --open
+uv run pyfasm64 docs --open
 ```
 
 ### 2. Компиляция и запуск под Windows (PE64)
@@ -259,7 +275,7 @@ uv run pyfasm64 compile my_math.py -o my_math.dll --target dll
 
 ```bash
 # Экспортирует код, заголовки, компилятор и скрипты сборки в папку FASM/:
-uv run pyfasm compile my_app.py --export-fasm
+uv run pyfasm64 compile my_app.py --export-fasm
 ```
 
 ---
@@ -268,17 +284,21 @@ uv run pyfasm compile my_app.py --export-fasm
 
 | Возможность | Синтаксис / API | Описание |
 | :--- | :--- | :--- |
-| **Функции** | `def name(a: int, b: int) -> int:` | Строго типизированные функции x86_64 с соглашениями ABI |
-| **Типы данных** | `int`, `ptr`, `str`, `bool`, `void` | 64-битные целые числа, указатели, строковые константы, логический тип |
-| **Арифметика** | `+`, `-`, `*`, `//`, `%`, `&`, `\|`, `^`, `<<`, `>>` | Прямые инструкции ALU x86_64 (`add`, `sub`, `imul`, `idiv`) |
-| **Управление потоком**| `if`, `elif`, `else`, `while`, `for i in range()` | Условные переходы, циклы, `break`, `continue`, `return` |
+| **Функции и lambda** | `def name(a: int, b: int) -> int:`, `lambda` | Строго типизированные функции x86_64 с соглашениями ABI и значениями по умолчанию |
+| **Типы данных** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-битные целые числа, IEEE-754 SSE числа, строки UTF-8/UTF-16LE, указатели |
+| **Контейнеры** | `list`, `dict`, `set`, `tuple`, срезы | Динамические массивы, хэш-таблицы FNV-1a (вкл. кортежи), множества, comprehensions |
+| **ООП и классы** | `class`, `__init__`, `super()`, `@property` | Нативная разметка объектов, вызов методов, наследование и свойства |
+| **Генераторы и исключения** | `yield`, `yield from`, `try`/`except`, `with` | Корутины на конечных автоматах, выражения-генераторы и обработка исключений |
+| **Арифметика** | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, битовые | Инструкции ALU/SSE x86_64, floor-деление Python, AVX2 NanoGEMM `@` |
+| **Управление потоком**| `if`/`elif`/`else`, `while`, `for`, `match`/`case` | Циклы, распаковка, `break`, `continue`, `return`, сопоставление с образцом |
+| **Модули stdlib** | `math`, `itertools`, `functools`, `bisect`, `heapq`, `json` | Нативные `gcd`, `lcm`, `isqrt`, `chain`, `reduce`, `heappush`, `loads` |
 | **Память** | `alloc_memory(bytes)`, `free_memory(ptr)` | Выделение виртуальной памяти ОС (`VirtualAlloc` / `sys_mmap`) |
 | **Работа с буфером**| `buf[i] = val` и `val = buf[i]` | Индексированное чтение и запись в память по указателю |
 | **Многопоточность** | `spawn_thread(worker, param)`, `wait_thread(h)` | Нативные системные потоки без GIL на всех ядрах CPU |
 | **Атомарные операции**| `atomic_add(ptr, val)`, `atomic_sub(ptr, val)` | Потокобезопасные атомарные операции с префиксом `lock` |
-| **Консольный вывод**| `print()`, `print_int()`, `print_str()`, `print_newline()` | Низкоуровневая буферизованная потоковая печать в stdout |
+| **Консольный вывод**| `print()`, `input()`, `print_int()`, `print_float()` | Низкоуровневая потоковая печать в stdout и ввод с консоли |
 | **Таймеры и паузы** | `get_tick_count()`, `sleep_ms(ms)` | Высокоточные таймеры и сон потока |
-| **Строки Unicode** | `str` | Прозрачная конвертация UTF-8 в UTF-16LE для Win32 GUI API |
+| **Нативный GUI** | `tkinter`, `customtkinter`, `pystray` | Win32 GDI темная тема, графики Canvas и фоновые трей-приложения |
 
 ---
 
@@ -304,7 +324,7 @@ uv run pytest
 ```
 
 ```text
-============================= 48 passed in 6.37s ==============================
+============================= 129 passed ==============================
 ```
 
 Подтвержденная матрица совместимости:
@@ -316,4 +336,4 @@ uv run pytest
 
 ## Лицензия
 
-Проект распространяется под открытой лицензией [MIT License](LICENSE).
+Проект распространяется под открытой лицензией [MIT License](https://github.com/eminsk/pyfasm/blob/main/LICENSE).

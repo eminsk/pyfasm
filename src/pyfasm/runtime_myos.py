@@ -45,8 +45,8 @@ _pyfasm_init_io:
     ret
 
 _pyfasm_print_char:
-    ; AL = character
-    mov     ah, al
+    ; CL = character
+    mov     ah, cl
     mov     dx, 03FDh
 .wait_tx:
     in      al, dx
@@ -58,25 +58,31 @@ _pyfasm_print_char:
     ret
 
 _pyfasm_print_str:
-    ; RSI or RDI/RCX = pointer to string
+    ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .done_str_early
     push    rsi
     mov     rsi, rcx
 .loop_str:
     lodsb
     test    al, al
     jz      .done_str
+    mov     cl, al
     call    _pyfasm_print_char
     jmp     .loop_str
 .done_str:
     pop     rsi
+.done_str_early:
     ret
 
 _pyfasm_print_newline:
     push    rax
-    mov     al, 13
+    push    rcx
+    mov     cl, 13
     call    _pyfasm_print_char
-    mov     al, 10
+    mov     cl, 10
     call    _pyfasm_print_char
+    pop     rcx
     pop     rax
     ret
 
@@ -90,7 +96,7 @@ _pyfasm_print_int:
     test    rax, rax
     jns     .pos
     push    rax
-    mov     al, '-'
+    mov     cl, '-'
     call    _pyfasm_print_char
     pop     rax
     neg     rax

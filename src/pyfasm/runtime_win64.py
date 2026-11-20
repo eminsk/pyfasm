@@ -407,6 +407,8 @@ _pyfasm_print_char:
 
 _pyfasm_str_len:
     ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .sl_zero
     push    rdi
     mov     rdi, rcx
     xor     eax, eax
@@ -417,44 +419,76 @@ _pyfasm_str_len:
     mov     rax, rcx
     pop     rdi
     ret
+.sl_zero:
+    xor     eax, eax
+    ret
 
 _pyfasm_print_float:
     ; XMM0 = double
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 48
+    push    rbx
+    push    rdi
+    sub     rsp, 64
     and     rsp, -16
     ucomisd xmm0, [flt_zero]
     jae     .flt_pos
-    movsd   [rsp + 32], xmm0
+    movsd   [rbp - 24], xmm0
     lea     rcx, [minus_str]
     call    _pyfasm_print_str
-    movsd   xmm0, [rsp + 32]
+    movsd   xmm0, [rbp - 24]
     xorpd   xmm1, xmm1
     subsd   xmm1, xmm0
     movaps  xmm0, xmm1
 .flt_pos:
-    movsd   [rsp + 32], xmm0
+    movsd   [rbp - 24], xmm0
     cvttsd2si rax, xmm0
-    mov     [rsp + 40], rax
+    mov     [rbp - 32], rax
     mov     rcx, rax
     call    _pyfasm_print_int
     lea     rcx, [dot_str]
     call    _pyfasm_print_str
 
-    movsd   xmm0, [rsp + 32]
-    cvtsi2sd xmm1, [rsp + 40]
+    movsd   xmm0, [rbp - 24]
+    cvtsi2sd xmm1, qword [rbp - 32]
     subsd   xmm0, xmm1
     mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
     cvttsd2si rax, xmm0
     test    rax, rax
-    jns     .frac_ok
-    neg     rax
-.frac_ok:
-    mov     rcx, rax
+    jns     .frac_nonneg
+    xor     eax, eax
+.frac_nonneg:
+    cmp     rax, 1000000
+    jl      .frac_check_zero
+    mov     rax, 999999
+.frac_check_zero:
+    test    rax, rax
+    jnz     .frac_padded
+    xor     ecx, ecx
     call    _pyfasm_print_int
-
-    mov     rsp, rbp
+    jmp     .flt_done
+.frac_padded:
+    lea     rdi, [rbp - 42]
+    mov     byte [rdi], 0
+    mov     rbx, 10
+    mov     ecx, 6
+.frac_digit_loop:
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    dec     rdi
+    mov     [rdi], dl
+    dec     ecx
+    jnz     .frac_digit_loop
+    mov     rcx, rdi
+    call    _pyfasm_print_str
+.flt_done:
+    lea     rsp, [rbp - 16]
+    pop     rdi
+    pop     rbx
     pop     rbp
     ret
 
@@ -1058,7 +1092,7 @@ _pyfasm_http_get:
     mov     qword [_pyfasm_http_resp_obj + 24], rax
 
     lea     rax, [_pyfasm_http_resp_obj]
-    add     rsp, 64
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -1084,7 +1118,7 @@ _pyfasm_http_get:
     mov     qword [_pyfasm_http_resp_obj + 24], rax
 
     lea     rax, [_pyfasm_http_resp_obj]
-    add     rsp, 64
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -1137,7 +1171,7 @@ _pyfasm_json_parse:
 .jp_null:
     xor     eax, eax
 .jp_ret:
-    add     rsp, 48
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -1398,16 +1432,20 @@ _pyfasm_str_concat:
     mov     rdi, rax                       ; rdi = new buffer
     mov     [rsp + 40], rax                ; save return pointer
 
+    test    rsi, rsi
+    jz      .copy_s2_init
 .copy_s1:
     mov     al, [rsi]
-    mov     [rdi], al
     test    al, al
     jz      .copy_s2_init
+    mov     [rdi], al
     inc     rsi
     inc     rdi
     jmp     .copy_s1
 
 .copy_s2_init:
+    test    rbx, rbx
+    jz      .concat_null_term
 .copy_s2:
     mov     al, [rbx]
     mov     [rdi], al
@@ -1417,9 +1455,11 @@ _pyfasm_str_concat:
     inc     rdi
     jmp     .copy_s2
 
+.concat_null_term:
+    mov     byte [rdi], 0
 .concat_done:
     mov     rax, [rsp + 40]
-    add     rsp, 48
+    lea     rsp, [rbp - 24]
     pop     rbx
     pop     rdi
     pop     rsi
@@ -1434,8 +1474,10 @@ _pyfasm_str_cmp:
     je      .cmp_eq
     test    rcx, rcx
     jz      .cmp_ne
+    js      .cmp_ne
     test    rdx, rdx
     jz      .cmp_ne
+    js      .cmp_ne
     cmp     rcx, 65536
     jb      .cmp_ne
     cmp     rdx, 65536
@@ -1792,17 +1834,26 @@ _pyfasm_str_strip:
     ret
 
 _pyfasm_dict_create:
-    ; RCX = initial capacity (0 = default 16)
+    ; RCX = initial capacity (0 = default 256; rounded up to power of 2, min 256)
     push    rbp
     mov     rbp, rsp
     push    rbx
-    sub     rsp, 40
+    push    rdi
+    sub     rsp, 32
     and     rsp, -16
+    mov     rax, 256
     test    rcx, rcx
-    jnz     .cap_ok
-    mov     rcx, 16
+    jle     .cap_ok
+    cmp     rcx, rax
+    jbe     .cap_ok
+.cap_pow2_loop:
+    cmp     rax, 1048576
+    jae     .cap_ok
+    shl     rax, 1
+    cmp     rax, rcx
+    jb      .cap_pow2_loop
 .cap_ok:
-    mov     rbx, rcx
+    mov     rbx, rax
     lea     rax, [rbx + rbx * 2]
     shl     rax, 3
     add     rax, 16
@@ -1812,12 +1863,12 @@ _pyfasm_dict_create:
     mov     qword [rax + 8], 0
     lea     rdi, [rax + 16]
     lea     rcx, [rbx + rbx * 2]
-    shl     rcx, 1
-    push    rax
+    mov     rdx, rax
     xor     eax, eax
     rep     stosq
-    pop     rax
-    lea     rsp, [rbp - 8]
+    mov     rax, rdx
+    lea     rsp, [rbp - 16]
+    pop     rdi
     pop     rbx
     mov     rsp, rbp
     pop     rbp
@@ -1825,9 +1876,10 @@ _pyfasm_dict_create:
 
 _pyfasm_str_hash:
     ; RCX = null-terminated string or 64-bit integer
-    ; Returns RAX = 64-bit FNV-1a hash
+    ; Returns RAX = 64-bit FNV-1a hash (never 0 or -1)
     test    rcx, rcx
     jz      .hash_zero
+    js      .hash_int
     cmp     rcx, 65536
     jb      .hash_int
     mov     rax, 0CBF29CE484222325h
@@ -1848,14 +1900,18 @@ _pyfasm_str_hash:
     mov     rdx, 100000001B3h
     imul    rax, rdx
     test    rax, rax
-    jnz     .hash_ret
-    mov     rax, 1
+    jz      .hash_one
+    cmp     rax, -1
+    je      .hash_one
     ret
 .hash_done:
     test    rax, rax
-    jnz     .hash_ret
+    jz      .hash_one
+    cmp     rax, -1
+    je      .hash_one
+    ret
+.hash_one:
     mov     rax, 1
-.hash_ret:
     ret
 
 _pyfasm_dict_set:
@@ -1868,11 +1924,11 @@ _pyfasm_dict_set:
     push    r12
     push    r13
     push    r14
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
-    test    rcx, rcx
-    jz      .dict_set_done
     mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dict_set_done
     mov     rsi, rdx
     mov     r12, r8
 
@@ -1881,11 +1937,18 @@ _pyfasm_dict_set:
     mov     r13, rax
 
     mov     r14, [rbx]
+    test    r14, r14
+    jz      .dict_set_done
     dec     r14
     and     rax, r14
     mov     rdi, rax
 
+    xor     r11, r11
+    mov     qword [rsp + 40], 0
 .dict_probe:
+    cmp     r11, [rbx]
+    jge     .dict_use_tombstone_or_done
+
     lea     rax, [rdi + rdi * 2]
     shl     rax, 3
     lea     rcx, [rbx + 16 + rax]
@@ -1894,13 +1957,18 @@ _pyfasm_dict_set:
     test    rax, rax
     jz      .dict_slot_empty
 
+    cmp     rax, -1
+    je      .dict_slot_tombstone
+
     cmp     rax, r13
     jne     .dict_next_slot
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]
     mov     rdx, rsi
     call    _pyfasm_str_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jnz     .dict_update_val
@@ -1908,9 +1976,28 @@ _pyfasm_dict_set:
 .dict_next_slot:
     inc     rdi
     and     rdi, r14
+    inc     r11
     jmp     .dict_probe
 
+.dict_slot_tombstone:
+    cmp     qword [rsp + 40], 0
+    jne     .dict_next_slot
+    mov     [rsp + 40], rcx
+    jmp     .dict_next_slot
+
+.dict_use_tombstone_or_done:
+    mov     rcx, [rsp + 40]
+    test    rcx, rcx
+    jz      .dict_set_done
+    jmp     .dict_insert_at_rcx
+
 .dict_slot_empty:
+    mov     rax, [rsp + 40]
+    test    rax, rax
+    jz      .dict_insert_at_rcx
+    mov     rcx, rax
+
+.dict_insert_at_rcx:
     mov     [rcx], r13
     mov     [rcx + 8], rsi
     mov     [rcx + 16], r12
@@ -2037,7 +2124,10 @@ _pyfasm_tuple_hash:
     dec     rbx
     jnz     .th_loop
     test    rax, rax
-    jnz     .th_ret
+    jz      .th_one
+    cmp     rax, -1
+    jne     .th_ret
+.th_one:
     mov     rax, 1
 .th_ret:
     pop     rsi
@@ -2088,11 +2178,11 @@ _pyfasm_dict_set_tuple:
     push    r12
     push    r13
     push    r14
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
-    test    rcx, rcx
-    jz      .dst_done
     mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dst_done
     mov     rsi, rdx
     mov     r12, r8
 
@@ -2101,11 +2191,18 @@ _pyfasm_dict_set_tuple:
     mov     r13, rax
 
     mov     r14, [rbx]             ; capacity
+    test    r14, r14
+    jz      .dst_done
     dec     r14
     and     rax, r14
     mov     rdi, rax
 
+    xor     r11, r11
+    mov     qword [rsp + 40], 0
 .dst_probe:
+    cmp     r11, [rbx]
+    jge     .dst_use_tombstone_or_done
+
     lea     rax, [rdi + rdi * 2]
     shl     rax, 3
     lea     rcx, [rbx + 16 + rax]
@@ -2114,13 +2211,18 @@ _pyfasm_dict_set_tuple:
     test    rax, rax
     jz      .dst_slot_empty
 
+    cmp     rax, -1
+    je      .dst_slot_tombstone
+
     cmp     rax, r13
     jne     .dst_next_slot
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]         ; existing tuple in slot
     mov     rdx, rsi               ; target tuple
     call    _pyfasm_tuple_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jnz     .dst_update_val
@@ -2128,9 +2230,28 @@ _pyfasm_dict_set_tuple:
 .dst_next_slot:
     inc     rdi
     and     rdi, r14
+    inc     r11
     jmp     .dst_probe
 
+.dst_slot_tombstone:
+    cmp     qword [rsp + 40], 0
+    jne     .dst_next_slot
+    mov     [rsp + 40], rcx
+    jmp     .dst_next_slot
+
+.dst_use_tombstone_or_done:
+    mov     rcx, [rsp + 40]
+    test    rcx, rcx
+    jz      .dst_done
+    jmp     .dst_insert_at_rcx
+
 .dst_slot_empty:
+    mov     rax, [rsp + 40]
+    test    rax, rax
+    jz      .dst_insert_at_rcx
+    mov     rcx, rax
+
+.dst_insert_at_rcx:
     mov     [rcx], r13
     mov     [rcx + 8], rsi
     mov     [rcx + 16], r12
@@ -2299,9 +2420,11 @@ _pyfasm_dict_remove:
     jne     .rem_next
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]
     mov     rdx, rsi
     call    _pyfasm_str_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jz      .rem_next
@@ -4543,21 +4666,24 @@ _pyfasm_darkdetect_theme:
 
 _pyfasm_int_to_str:
     ; RCX = integer
-    ; Returns RAX = pointer to null-terminated string in _pyfasm_int_buf
+    ; Returns RAX = pointer to newly allocated null-terminated string
     push    rbp
     mov     rbp, rsp
     push    rbx
+    push    rsi
     push    rdi
+    sub     rsp, 80
+    and     rsp, -16
 
-    lea     rdi, [_pyfasm_int_buf + 30]
-    mov     byte [rdi + 1], 0
+    lea     rdi, [rbp - 32]
+    mov     byte [rdi], 0
     mov     rax, rcx
 
     test    rax, rax
     jnz     .its_check_neg
+    dec     rdi
     mov     byte [rdi], '0'
-    mov     rax, rdi
-    jmp     .its_done
+    jmp     .its_copy_alloc
 
 .its_check_neg:
     xor     ebx, ebx
@@ -4577,29 +4703,41 @@ _pyfasm_int_to_str:
     shl     rcx, 1
     sub     r8, rcx
     add     r8b, '0'
-    mov     [rdi], r8b
     dec     rdi
+    mov     [rdi], r8b
     mov     rax, rdx
     jmp     .its_loop
 
 .its_finish:
     test    ebx, ebx
-    jz      .its_pos
-    mov     byte [rdi], '-'
+    jz      .its_copy_alloc
     dec     rdi
-.its_pos:
-    inc     rdi
-    mov     rax, rdi
+    mov     byte [rdi], '-'
 
-.its_done:
+.its_copy_alloc:
+    mov     rsi, rdi
+    lea     rcx, [rbp - 32]
+    sub     rcx, rsi
+    inc     rcx
+    mov     rbx, rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     rdx, rax
+    mov     rcx, rbx
+    rep     movsb
+    mov     rax, rdx
+
+    lea     rsp, [rbp - 24]
     pop     rdi
+    pop     rsi
     pop     rbx
-    mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_print_auto:
     ; RCX = value (could be int or string pointer)
+    test    rcx, rcx
+    js      _pyfasm_print_int
     cmp     rcx, 65536
     jb      _pyfasm_print_int
     movzx   eax, byte [rcx]
@@ -4622,7 +4760,7 @@ _pyfasm_print_int:
     push    rbx
     push    rsi
     push    rdi
-    sub     rsp, 64
+    sub     rsp, 80
     and     rsp, -16
 
     mov     rax, rcx
@@ -4630,14 +4768,14 @@ _pyfasm_print_int:
     jns     .positive
 
     ; Negative number
-    push    rax
+    mov     rbx, rax
     lea     rcx, [minus_str]
     call    _pyfasm_print_str
-    pop     rax
+    mov     rax, rbx
     neg     rax
 
 .positive:
-    lea     rdi, [rbp - 48]         ; end of temporary digit buffer
+    lea     rdi, [rbp - 32]         ; end of temporary digit buffer
     mov     byte [rdi], 0           ; null-terminator
     mov     rsi, rax
     mov     r9, 0CCCCCCCCCCCCCCCDh  ; reciprocal multiplier for fast division by 10 (from porth/Lemire)
@@ -4690,8 +4828,11 @@ _pyfasm_print_list:
     jmp     .pl_ret
 
 .pl_not_null:
+    test    rbx, rbx
+    js      .pl_is_int
     cmp     rbx, 65536
     jae     .pl_is_ptr
+.pl_is_int:
     mov     rcx, rbx
     lea     rsp, [rbp - 48]
     pop     r14
@@ -6215,8 +6356,8 @@ _pyfasm_create_label:
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
-    mov     r12, [rsp + 64]
-    mov     [rsp + 56], r12
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 0
@@ -6237,7 +6378,7 @@ _pyfasm_create_edit:
     ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 112
+    sub     rsp, 128
     and     rsp, -16
     mov     [rsp + 96], rcx
     mov     [rsp + 104], rdx
@@ -6254,12 +6395,12 @@ _pyfasm_create_edit:
     jnz     .edt_id_ok
     mov     rax, 100
 .edt_id_ok:
-    mov     [rsp + 56], rax
+    mov     [rsp + 112], rax
 
     call    _pyfasm_ensure_window
 
     ; Check if search edit already created in split view
-    cmp     qword [rsp + 56], 101       ; Search Entry ID
+    cmp     qword [rsp + 112], 101      ; Search Entry ID
     jne     .chk_filter_id
     cmp     qword [_pyfasm_h_search_edit], 0
     jz      .do_create_edt
@@ -6269,7 +6410,7 @@ _pyfasm_create_edit:
     ret
 
 .chk_filter_id:
-    cmp     qword [rsp + 56], 102       ; Filter Entry ID
+    cmp     qword [rsp + 112], 102      ; Filter Entry ID
     jne     .do_create_edt
     cmp     qword [_pyfasm_h_filter_edit], 0
     jz      .do_create_edt
@@ -6308,11 +6449,11 @@ _pyfasm_create_edit:
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
-    mov     r12, [rsp + 64]
-    mov     [rsp + 56], r12
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
-    mov     rax, [rsp + 56]
+    mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
@@ -6530,7 +6671,7 @@ _pyfasm_create_listbox:
     ; RCX = 0, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 112
+    sub     rsp, 128
     and     rsp, -16
     mov     [rsp + 104], rdx
     mov     [rsp + 80], r8
@@ -6546,7 +6687,7 @@ _pyfasm_create_listbox:
     jnz     .lb_id_ok
     mov     rax, 3001
 .lb_id_ok:
-    mov     [rsp + 56], rax
+    mov     [rsp + 112], rax
 
     call    _pyfasm_ensure_window
 
@@ -6583,11 +6724,11 @@ _pyfasm_create_listbox:
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
-    mov     r12, [rsp + 64]
-    mov     [rsp + 56], r12
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
     mov     rax, [_pyfasm_h_wnd]
     mov     [rsp + 64], rax
-    mov     rax, [rsp + 56]
+    mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
@@ -6647,6 +6788,8 @@ _pyfasm_set_text:
     mov     rcx, rsi
     lea     rdx, [_pyfasm_wide_buf]
     call    [SetWindowTextW]
+    lea     rsp, [rbp - 8]
+    pop     rsi
     mov     rsp, rbp
     pop     rbp
     ret
@@ -6855,6 +6998,8 @@ _pyfasm_listbox_add:
     xor     r8d, r8d
     lea     r9, [_pyfasm_wide_buf]
     call    [SendMessageW]
+    lea     rsp, [rbp - 8]
+    pop     rsi
     mov     rsp, rbp
     pop     rbp
     ret
@@ -8170,6 +8315,8 @@ _pyfasm_tray_wnd_proc:
     push    r12
     push    rsi
     push    rdi
+    push    rbx
+    push    r13
     sub     rsp, 64
     and     rsp, -16
 
@@ -8371,7 +8518,9 @@ _pyfasm_tray_wnd_proc:
     jmp     .tret
 
 .tret:
-    lea     rsp, [rbp - 24]
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     rbx
     pop     rdi
     pop     rsi
     pop     r12
@@ -8408,6 +8557,7 @@ _pyfasm_message_box:
     xor     r9d, r9d                ; uType = MB_OK (0)
     call    [MessageBoxW]
 
+    lea     rsp, [rbp - 16]
     pop     rdi
     pop     rsi
     mov     rsp, rbp
@@ -8942,6 +9092,8 @@ _pyfasm_print_char:
 
 _pyfasm_str_len:
     ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .sl_zero
     push    rdi
     mov     rdi, rcx
     xor     eax, eax
@@ -8952,44 +9104,76 @@ _pyfasm_str_len:
     mov     rax, rcx
     pop     rdi
     ret
+.sl_zero:
+    xor     eax, eax
+    ret
 
 _pyfasm_print_float:
     ; XMM0 = double
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 48
+    push    rbx
+    push    rdi
+    sub     rsp, 64
     and     rsp, -16
     ucomisd xmm0, [flt_zero]
     jae     .flt_pos
-    movsd   [rsp + 32], xmm0
+    movsd   [rbp - 24], xmm0
     lea     rcx, [minus_str]
     call    _pyfasm_print_str
-    movsd   xmm0, [rsp + 32]
+    movsd   xmm0, [rbp - 24]
     xorpd   xmm1, xmm1
     subsd   xmm1, xmm0
     movaps  xmm0, xmm1
 .flt_pos:
-    movsd   [rsp + 32], xmm0
+    movsd   [rbp - 24], xmm0
     cvttsd2si rax, xmm0
-    mov     [rsp + 40], rax
+    mov     [rbp - 32], rax
     mov     rcx, rax
     call    _pyfasm_print_int
     lea     rcx, [dot_str]
     call    _pyfasm_print_str
 
-    movsd   xmm0, [rsp + 32]
-    cvtsi2sd xmm1, [rsp + 40]
+    movsd   xmm0, [rbp - 24]
+    cvtsi2sd xmm1, qword [rbp - 32]
     subsd   xmm0, xmm1
     mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
     cvttsd2si rax, xmm0
     test    rax, rax
-    jns     .frac_ok
-    neg     rax
-.frac_ok:
-    mov     rcx, rax
+    jns     .frac_nonneg
+    xor     eax, eax
+.frac_nonneg:
+    cmp     rax, 1000000
+    jl      .frac_check_zero
+    mov     rax, 999999
+.frac_check_zero:
+    test    rax, rax
+    jnz     .frac_padded
+    xor     ecx, ecx
     call    _pyfasm_print_int
-
-    mov     rsp, rbp
+    jmp     .flt_done
+.frac_padded:
+    lea     rdi, [rbp - 42]
+    mov     byte [rdi], 0
+    mov     rbx, 10
+    mov     ecx, 6
+.frac_digit_loop:
+    xor     edx, edx
+    div     rbx
+    add     dl, '0'
+    dec     rdi
+    mov     [rdi], dl
+    dec     ecx
+    jnz     .frac_digit_loop
+    mov     rcx, rdi
+    call    _pyfasm_print_str
+.flt_done:
+    lea     rsp, [rbp - 16]
+    pop     rdi
+    pop     rbx
     pop     rbp
     ret
 
@@ -9260,16 +9444,20 @@ _pyfasm_str_concat:
     mov     rdi, rax                       ; rdi = new buffer
     mov     [rsp + 40], rax                ; save return pointer
 
+    test    rsi, rsi
+    jz      .copy_s2_init
 .copy_s1:
     mov     al, [rsi]
-    mov     [rdi], al
     test    al, al
     jz      .copy_s2_init
+    mov     [rdi], al
     inc     rsi
     inc     rdi
     jmp     .copy_s1
 
 .copy_s2_init:
+    test    rbx, rbx
+    jz      .concat_null_term
 .copy_s2:
     mov     al, [rbx]
     mov     [rdi], al
@@ -9279,9 +9467,11 @@ _pyfasm_str_concat:
     inc     rdi
     jmp     .copy_s2
 
+.concat_null_term:
+    mov     byte [rdi], 0
 .concat_done:
     mov     rax, [rsp + 40]
-    add     rsp, 48
+    lea     rsp, [rbp - 24]
     pop     rbx
     pop     rdi
     pop     rsi
@@ -9296,8 +9486,10 @@ _pyfasm_str_cmp:
     je      .cmp_eq
     test    rcx, rcx
     jz      .cmp_ne
+    js      .cmp_ne
     test    rdx, rdx
     jz      .cmp_ne
+    js      .cmp_ne
     cmp     rcx, 65536
     jb      .cmp_ne
     cmp     rdx, 65536
@@ -9654,17 +9846,26 @@ _pyfasm_str_strip:
     ret
 
 _pyfasm_dict_create:
-    ; RCX = initial capacity (0 = default 16)
+    ; RCX = initial capacity (0 = default 256; rounded up to power of 2, min 256)
     push    rbp
     mov     rbp, rsp
     push    rbx
-    sub     rsp, 40
+    push    rdi
+    sub     rsp, 32
     and     rsp, -16
+    mov     rax, 256
     test    rcx, rcx
-    jnz     .cap_ok
-    mov     rcx, 16
+    jle     .cap_ok
+    cmp     rcx, rax
+    jbe     .cap_ok
+.cap_pow2_loop:
+    cmp     rax, 1048576
+    jae     .cap_ok
+    shl     rax, 1
+    cmp     rax, rcx
+    jb      .cap_pow2_loop
 .cap_ok:
-    mov     rbx, rcx
+    mov     rbx, rax
     lea     rax, [rbx + rbx * 2]
     shl     rax, 3
     add     rax, 16
@@ -9674,12 +9875,12 @@ _pyfasm_dict_create:
     mov     qword [rax + 8], 0
     lea     rdi, [rax + 16]
     lea     rcx, [rbx + rbx * 2]
-    shl     rcx, 1
-    push    rax
+    mov     rdx, rax
     xor     eax, eax
     rep     stosq
-    pop     rax
-    lea     rsp, [rbp - 8]
+    mov     rax, rdx
+    lea     rsp, [rbp - 16]
+    pop     rdi
     pop     rbx
     mov     rsp, rbp
     pop     rbp
@@ -9687,9 +9888,10 @@ _pyfasm_dict_create:
 
 _pyfasm_str_hash:
     ; RCX = null-terminated string or 64-bit integer
-    ; Returns RAX = 64-bit FNV-1a hash
+    ; Returns RAX = 64-bit FNV-1a hash (never 0 or -1)
     test    rcx, rcx
     jz      .hash_zero
+    js      .hash_int
     cmp     rcx, 65536
     jb      .hash_int
     mov     rax, 0CBF29CE484222325h
@@ -9710,14 +9912,18 @@ _pyfasm_str_hash:
     mov     rdx, 100000001B3h
     imul    rax, rdx
     test    rax, rax
-    jnz     .hash_ret
-    mov     rax, 1
+    jz      .hash_one
+    cmp     rax, -1
+    je      .hash_one
     ret
 .hash_done:
     test    rax, rax
-    jnz     .hash_ret
+    jz      .hash_one
+    cmp     rax, -1
+    je      .hash_one
+    ret
+.hash_one:
     mov     rax, 1
-.hash_ret:
     ret
 
 _pyfasm_dict_set:
@@ -9730,11 +9936,11 @@ _pyfasm_dict_set:
     push    r12
     push    r13
     push    r14
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
-    test    rcx, rcx
-    jz      .dict_set_done
     mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dict_set_done
     mov     rsi, rdx
     mov     r12, r8
 
@@ -9743,11 +9949,18 @@ _pyfasm_dict_set:
     mov     r13, rax
 
     mov     r14, [rbx]
+    test    r14, r14
+    jz      .dict_set_done
     dec     r14
     and     rax, r14
     mov     rdi, rax
 
+    xor     r11, r11
+    mov     qword [rsp + 40], 0
 .dict_probe:
+    cmp     r11, [rbx]
+    jge     .dict_use_tombstone_or_done
+
     lea     rax, [rdi + rdi * 2]
     shl     rax, 3
     lea     rcx, [rbx + 16 + rax]
@@ -9756,13 +9969,18 @@ _pyfasm_dict_set:
     test    rax, rax
     jz      .dict_slot_empty
 
+    cmp     rax, -1
+    je      .dict_slot_tombstone
+
     cmp     rax, r13
     jne     .dict_next_slot
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]
     mov     rdx, rsi
     call    _pyfasm_str_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jnz     .dict_update_val
@@ -9770,9 +9988,28 @@ _pyfasm_dict_set:
 .dict_next_slot:
     inc     rdi
     and     rdi, r14
+    inc     r11
     jmp     .dict_probe
 
+.dict_slot_tombstone:
+    cmp     qword [rsp + 40], 0
+    jne     .dict_next_slot
+    mov     [rsp + 40], rcx
+    jmp     .dict_next_slot
+
+.dict_use_tombstone_or_done:
+    mov     rcx, [rsp + 40]
+    test    rcx, rcx
+    jz      .dict_set_done
+    jmp     .dict_insert_at_rcx
+
 .dict_slot_empty:
+    mov     rax, [rsp + 40]
+    test    rax, rax
+    jz      .dict_insert_at_rcx
+    mov     rcx, rax
+
+.dict_insert_at_rcx:
     mov     [rcx], r13
     mov     [rcx + 8], rsi
     mov     [rcx + 16], r12
@@ -9899,7 +10136,10 @@ _pyfasm_tuple_hash:
     dec     rbx
     jnz     .th_loop
     test    rax, rax
-    jnz     .th_ret
+    jz      .th_one
+    cmp     rax, -1
+    jne     .th_ret
+.th_one:
     mov     rax, 1
 .th_ret:
     pop     rsi
@@ -9950,11 +10190,11 @@ _pyfasm_dict_set_tuple:
     push    r12
     push    r13
     push    r14
-    sub     rsp, 48
+    sub     rsp, 64
     and     rsp, -16
-    test    rcx, rcx
-    jz      .dst_done
     mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dst_done
     mov     rsi, rdx
     mov     r12, r8
 
@@ -9963,11 +10203,18 @@ _pyfasm_dict_set_tuple:
     mov     r13, rax
 
     mov     r14, [rbx]             ; capacity
+    test    r14, r14
+    jz      .dst_done
     dec     r14
     and     rax, r14
     mov     rdi, rax
 
+    xor     r11, r11
+    mov     qword [rsp + 40], 0
 .dst_probe:
+    cmp     r11, [rbx]
+    jge     .dst_use_tombstone_or_done
+
     lea     rax, [rdi + rdi * 2]
     shl     rax, 3
     lea     rcx, [rbx + 16 + rax]
@@ -9976,13 +10223,18 @@ _pyfasm_dict_set_tuple:
     test    rax, rax
     jz      .dst_slot_empty
 
+    cmp     rax, -1
+    je      .dst_slot_tombstone
+
     cmp     rax, r13
     jne     .dst_next_slot
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]         ; existing tuple in slot
     mov     rdx, rsi               ; target tuple
     call    _pyfasm_tuple_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jnz     .dst_update_val
@@ -9990,9 +10242,28 @@ _pyfasm_dict_set_tuple:
 .dst_next_slot:
     inc     rdi
     and     rdi, r14
+    inc     r11
     jmp     .dst_probe
 
+.dst_slot_tombstone:
+    cmp     qword [rsp + 40], 0
+    jne     .dst_next_slot
+    mov     [rsp + 40], rcx
+    jmp     .dst_next_slot
+
+.dst_use_tombstone_or_done:
+    mov     rcx, [rsp + 40]
+    test    rcx, rcx
+    jz      .dst_done
+    jmp     .dst_insert_at_rcx
+
 .dst_slot_empty:
+    mov     rax, [rsp + 40]
+    test    rax, rax
+    jz      .dst_insert_at_rcx
+    mov     rcx, rax
+
+.dst_insert_at_rcx:
     mov     [rcx], r13
     mov     [rcx + 8], rsi
     mov     [rcx + 16], r12
@@ -10161,9 +10432,11 @@ _pyfasm_dict_remove:
     jne     .rem_next
 
     push    rcx
+    push    r11
     mov     rcx, [rcx + 8]
     mov     rdx, rsi
     call    _pyfasm_str_cmp
+    pop     r11
     pop     rcx
     test    eax, eax
     jz      .rem_next
@@ -12387,21 +12660,24 @@ _pyfasm_load_ext_symbol:
 
 _pyfasm_int_to_str:
     ; RCX = integer
-    ; Returns RAX = pointer to null-terminated string in _pyfasm_int_buf
+    ; Returns RAX = pointer to newly allocated null-terminated string
     push    rbp
     mov     rbp, rsp
     push    rbx
+    push    rsi
     push    rdi
+    sub     rsp, 80
+    and     rsp, -16
 
-    lea     rdi, [_pyfasm_int_buf + 30]
-    mov     byte [rdi + 1], 0
+    lea     rdi, [rbp - 32]
+    mov     byte [rdi], 0
     mov     rax, rcx
 
     test    rax, rax
     jnz     .its_check_neg
+    dec     rdi
     mov     byte [rdi], '0'
-    mov     rax, rdi
-    jmp     .its_done
+    jmp     .its_copy_alloc
 
 .its_check_neg:
     xor     ebx, ebx
@@ -12421,29 +12697,41 @@ _pyfasm_int_to_str:
     shl     rcx, 1
     sub     r8, rcx
     add     r8b, '0'
-    mov     [rdi], r8b
     dec     rdi
+    mov     [rdi], r8b
     mov     rax, rdx
     jmp     .its_loop
 
 .its_finish:
     test    ebx, ebx
-    jz      .its_pos
-    mov     byte [rdi], '-'
+    jz      .its_copy_alloc
     dec     rdi
-.its_pos:
-    inc     rdi
-    mov     rax, rdi
+    mov     byte [rdi], '-'
 
-.its_done:
+.its_copy_alloc:
+    mov     rsi, rdi
+    lea     rcx, [rbp - 32]
+    sub     rcx, rsi
+    inc     rcx
+    mov     rbx, rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     rdx, rax
+    mov     rcx, rbx
+    rep     movsb
+    mov     rax, rdx
+
+    lea     rsp, [rbp - 24]
     pop     rdi
+    pop     rsi
     pop     rbx
-    mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_print_auto:
     ; RCX = value (could be int or string pointer)
+    test    rcx, rcx
+    js      _pyfasm_print_int
     cmp     rcx, 65536
     jb      _pyfasm_print_int
     movzx   eax, byte [rcx]
@@ -12466,7 +12754,7 @@ _pyfasm_print_int:
     push    rbx
     push    rsi
     push    rdi
-    sub     rsp, 64
+    sub     rsp, 80
     and     rsp, -16
 
     mov     rax, rcx
@@ -12474,14 +12762,14 @@ _pyfasm_print_int:
     jns     .positive
 
     ; Negative number
-    push    rax
+    mov     rbx, rax
     lea     rcx, [minus_str]
     call    _pyfasm_print_str
-    pop     rax
+    mov     rax, rbx
     neg     rax
 
 .positive:
-    lea     rdi, [rbp - 48]         ; end of temporary digit buffer
+    lea     rdi, [rbp - 32]         ; end of temporary digit buffer
     mov     byte [rdi], 0           ; null-terminator
     mov     rsi, rax
     mov     r9, 0CCCCCCCCCCCCCCCDh  ; reciprocal multiplier for fast division by 10 (from porth/Lemire)
@@ -12534,8 +12822,11 @@ _pyfasm_print_list:
     jmp     .pl_ret
 
 .pl_not_null:
+    test    rbx, rbx
+    js      .pl_is_int
     cmp     rbx, 65536
     jae     .pl_is_ptr
+.pl_is_int:
     mov     rcx, rbx
     lea     rsp, [rbp - 48]
     pop     r14
@@ -13048,7 +13339,7 @@ _pyfasm_json_parse:
 .jp_null:
     xor     eax, eax
 .jp_ret:
-    add     rsp, 48
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -13592,7 +13883,7 @@ _pyfasm_http_get:
     mov     qword [_pyfasm_http_resp_obj + 24], rax
 
     lea     rax, [_pyfasm_http_resp_obj]
-    add     rsp, 64
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -13618,7 +13909,7 @@ _pyfasm_http_get:
     mov     qword [_pyfasm_http_resp_obj + 24], rax
 
     lea     rax, [_pyfasm_http_resp_obj]
-    add     rsp, 64
+    lea     rsp, [rbp - 56]
     pop     r15
     pop     r14
     pop     r13
@@ -13635,62 +13926,62 @@ _WIN64_CONSOLE_RUNTIME_IMPORTS = """
 section '.idata' import data readable writeable
     library kernel32, 'KERNEL32.DLL'
 
-    import kernel32, \
-           GetStdHandle, 'GetStdHandle', \
-           WriteFile, 'WriteFile', \
-           ReadFile, 'ReadFile', \
-           CreateFileA, 'CreateFileA', \
-           GetFileSize, 'GetFileSize', \
-           SetFilePointer, 'SetFilePointer', \
-           GetTickCount64, 'GetTickCount64', \
-           Sleep, 'Sleep', \
-           VirtualAlloc, 'VirtualAlloc', \
-           VirtualFree, 'VirtualFree', \
-           CreateThread, 'CreateThread', \
-           WaitForSingleObject, 'WaitForSingleObject', \
-           CloseHandle, 'CloseHandle', \
-           GetModuleHandleA, 'GetModuleHandleA', \
-           MultiByteToWideChar, 'MultiByteToWideChar', \
-           WideCharToMultiByte, 'WideCharToMultiByte', \
-           GetCurrentThreadId, 'GetCurrentThreadId', \
-           LoadLibraryA, 'LoadLibraryA', \
-           GetProcAddress, 'GetProcAddress', \
-           FreeLibrary, 'FreeLibrary', \
+    import kernel32, \\
+           GetStdHandle, 'GetStdHandle', \\
+           WriteFile, 'WriteFile', \\
+           ReadFile, 'ReadFile', \\
+           CreateFileA, 'CreateFileA', \\
+           GetFileSize, 'GetFileSize', \\
+           SetFilePointer, 'SetFilePointer', \\
+           GetTickCount64, 'GetTickCount64', \\
+           Sleep, 'Sleep', \\
+           VirtualAlloc, 'VirtualAlloc', \\
+           VirtualFree, 'VirtualFree', \\
+           CreateThread, 'CreateThread', \\
+           WaitForSingleObject, 'WaitForSingleObject', \\
+           CloseHandle, 'CloseHandle', \\
+           GetModuleHandleA, 'GetModuleHandleA', \\
+           MultiByteToWideChar, 'MultiByteToWideChar', \\
+           WideCharToMultiByte, 'WideCharToMultiByte', \\
+           GetCurrentThreadId, 'GetCurrentThreadId', \\
+           LoadLibraryA, 'LoadLibraryA', \\
+           GetProcAddress, 'GetProcAddress', \\
+           FreeLibrary, 'FreeLibrary', \\
            ExitProcess, 'ExitProcess'
 """
 
 _WIN64_NET_RUNTIME_IMPORTS = """
 section '.idata' import data readable writeable
-    library kernel32, 'KERNEL32.DLL', \
+    library kernel32, 'KERNEL32.DLL', \\
             wininet, 'WININET.DLL'
 
-    import kernel32, \
-           GetStdHandle, 'GetStdHandle', \
-           WriteFile, 'WriteFile', \
-           ReadFile, 'ReadFile', \
-           CreateFileA, 'CreateFileA', \
-           GetFileSize, 'GetFileSize', \
-           SetFilePointer, 'SetFilePointer', \
-           GetTickCount64, 'GetTickCount64', \
-           Sleep, 'Sleep', \
-           VirtualAlloc, 'VirtualAlloc', \
-           VirtualFree, 'VirtualFree', \
-           CreateThread, 'CreateThread', \
-           WaitForSingleObject, 'WaitForSingleObject', \
-           CloseHandle, 'CloseHandle', \
-           GetModuleHandleA, 'GetModuleHandleA', \
-           MultiByteToWideChar, 'MultiByteToWideChar', \
-           WideCharToMultiByte, 'WideCharToMultiByte', \
-           GetCurrentThreadId, 'GetCurrentThreadId', \
-           LoadLibraryA, 'LoadLibraryA', \
-           GetProcAddress, 'GetProcAddress', \
-           FreeLibrary, 'FreeLibrary', \
+    import kernel32, \\
+           GetStdHandle, 'GetStdHandle', \\
+           WriteFile, 'WriteFile', \\
+           ReadFile, 'ReadFile', \\
+           CreateFileA, 'CreateFileA', \\
+           GetFileSize, 'GetFileSize', \\
+           SetFilePointer, 'SetFilePointer', \\
+           GetTickCount64, 'GetTickCount64', \\
+           Sleep, 'Sleep', \\
+           VirtualAlloc, 'VirtualAlloc', \\
+           VirtualFree, 'VirtualFree', \\
+           CreateThread, 'CreateThread', \\
+           WaitForSingleObject, 'WaitForSingleObject', \\
+           CloseHandle, 'CloseHandle', \\
+           GetModuleHandleA, 'GetModuleHandleA', \\
+           MultiByteToWideChar, 'MultiByteToWideChar', \\
+           WideCharToMultiByte, 'WideCharToMultiByte', \\
+           GetCurrentThreadId, 'GetCurrentThreadId', \\
+           LoadLibraryA, 'LoadLibraryA', \\
+           GetProcAddress, 'GetProcAddress', \\
+           FreeLibrary, 'FreeLibrary', \\
            ExitProcess, 'ExitProcess'
 
-    import wininet, \
-           InternetOpenA, 'InternetOpenA', \
-           InternetOpenUrlA, 'InternetOpenUrlA', \
-           InternetReadFile, 'InternetReadFile', \
+    import wininet, \\
+           InternetOpenA, 'InternetOpenA', \\
+           InternetOpenUrlA, 'InternetOpenUrlA', \\
+           InternetReadFile, 'InternetReadFile', \\
            InternetCloseHandle, 'InternetCloseHandle'
 """
 

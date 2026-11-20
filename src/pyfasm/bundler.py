@@ -43,6 +43,9 @@ class ProjectBundler:
         entry_rel = Path(entry_script).name
         app_name_safe = "".join(c if c.isalnum() else "_" for c in app_title)
 
+        def _fasm_db_str(s: str) -> str:
+            return "'" + s.replace("'", "', 39, '") + "'"
+
         # Check if project uses free-threaded (No-GIL) Python build
         is_freethreaded = False
         pyver_file = proj_dir_path / ".python-version"
@@ -75,7 +78,11 @@ class ProjectBundler:
                 sh_cmd = (
                     f'APP_DIR="$HOME/.cache/pyfasm/{app_name_safe}"; '
                     f'if [ ! -f "$APP_DIR/.stamp" ]; then '
-                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
+                    f'mkdir -p "$APP_DIR" && '
+                    f'(unzip -oq /proc/self/exe -d "$APP_DIR" 2>/dev/null || '
+                    f'python3 -m zipfile -e /proc/self/exe "$APP_DIR" 2>/dev/null || '
+                    f'tar -xf /proc/self/exe -C "$APP_DIR" 2>/dev/null) && '
+                    f'chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
                     f'exec "$APP_DIR/run.sh"'
                 )
             else:
@@ -96,7 +103,7 @@ segment readable writeable
     sh_path         db '/bin/sh', 0
     sh_arg0         db 'sh', 0
     sh_arg1         db '-c', 0
-    sh_cmd          db '{sh_cmd}', 0
+    sh_cmd          db {_fasm_db_str(sh_cmd)}, 0
     align 8
     argv            dq sh_arg0, sh_arg1, sh_cmd, 0
     env_unbuf       db 'PYTHONUNBUFFERED=1', 0
@@ -126,7 +133,10 @@ start:
                 sh_cmd = (
                     f'APP_DIR="$HOME/Library/Caches/pyfasm/{app_name_safe}"; '
                     f'if [ ! -f "$APP_DIR/.stamp" ]; then '
-                    f'mkdir -p "$APP_DIR" && tar -xf "$0" -C "$APP_DIR" 2>/dev/null && chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
+                    f'mkdir -p "$APP_DIR" && '
+                    f'(unzip -oq "$0" -d "$APP_DIR" 2>/dev/null || '
+                    f'tar -xf "$0" -C "$APP_DIR" 2>/dev/null) && '
+                    f'chmod +x "$APP_DIR/run.sh" 2>/dev/null && touch "$APP_DIR/.stamp"; fi; '
                     f'exec "$APP_DIR/run.sh"'
                 )
             else:
@@ -159,11 +169,11 @@ lc_segment_text:
     dd 72 + 80              ; cmdsize
     db '__TEXT', 0,0,0,0,0,0,0,0,0,0
     dq 0x100000000
-    dq 0x10000
+    dq ((file_size + 4095) / 4096) * 4096
     dq 0
     dq file_size
     dd 7
-    dd 5
+    dd 7
     dd 1
     dd 0
 
@@ -190,6 +200,7 @@ lc_unixthread:
     dq 0,0,0,0,0,0,0,0
     dq 0x100000000 + start
     dq 0
+    dq 0,0,0
 
 sizeof_cmds = $ - commands_start
 
@@ -199,7 +210,7 @@ code_start = $ - mach_header
 sh_path         db '/bin/sh', 0
 sh_arg0         db 'sh', 0
 sh_arg1         db '-c', 0
-sh_cmd          db '{sh_cmd}', 0
+sh_cmd          db {_fasm_db_str(sh_cmd)}, 0
 align 8
 argv            dq sh_arg0, sh_arg1, sh_cmd, 0
 env_unbuf       db 'PYTHONUNBUFFERED=1', 0
@@ -373,9 +384,9 @@ icon _pyfasm_main_icon, _pyfasm_icon_data, '{icon_posix}'
             return win_asm
         else:
             # Directory wrapper mode
-            script_escaped = entry_script.replace("\\", "\\\\")
-            proj_dir = str(proj_dir_path).replace("\\", "\\\\")
-            cmd_run = f'if exist "{proj_venv_win_str}" ("{proj_venv_win_str}" {gil_arg}"{script_escaped}") else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" ("%USERPROFILE%\\.local\\bin\\uv.exe" run python {gil_arg}"{script_escaped}") else (python {gil_arg}"{script_escaped}")' if proj_venv_win_str else f'python {gil_arg}"{script_escaped}"'
+            script_win = str(Path(entry_script).resolve())
+            proj_dir = str(proj_dir_path.resolve())
+            cmd_run = f'if exist "{proj_venv_win_str}" ("{proj_venv_win_str}" {gil_arg}"{script_win}") else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" ("%USERPROFILE%\\.local\\bin\\uv.exe" run python {gil_arg}"{script_win}") else (python {gil_arg}"{script_win}")' if proj_venv_win_str else f'python {gil_arg}"{script_win}"'
             cmd_full_win = f'cmd.exe /c {cmd_run}'
 
             win_asm = f"""; ============================================================
@@ -390,8 +401,8 @@ section '.data' data readable writeable
     env_unbuf_name  db 'PYTHONUNBUFFERED', 0
     env_unbuf_val   db '1', 0
 
-    work_dir        db '{proj_dir}', 0
-    python_cmd      db '{cmd_full_win}', 0
+    work_dir        db {_fasm_db_str(proj_dir)}, 0
+    python_cmd      db {_fasm_db_str(cmd_full_win)}, 0
 
     startup_info    STARTUPINFO
     process_info    PROCESS_INFORMATION
@@ -456,6 +467,21 @@ section '.idata' import data readable writeable
            CloseHandle, 'CloseHandle', \\
            ExitProcess, 'ExitProcess'
 """
+            if icon_path and Path(icon_path).exists():
+                icon_posix = str(Path(icon_path).resolve()).replace("\\", "/")
+                win_asm += f"""
+include 'macro/resource.inc'
+
+section '.rsrc' resource data readable
+
+directory 3, _pyfasm_icons, 14, _pyfasm_group_icons
+
+resource _pyfasm_icons, 1, 0, _pyfasm_icon_data
+resource _pyfasm_group_icons, 1, 0, _pyfasm_main_icon
+
+icon _pyfasm_main_icon, _pyfasm_icon_data, {_fasm_db_str(icon_posix)}
+"""
+            return win_asm
 
     def bundle(
         self,
@@ -520,9 +546,6 @@ section '.idata' import data readable writeable
                 target_norm = "macos"
 
         # Generate Launcher Assembly with unique build stamp
-        if not icon_path and (proj_path / "icon.ico").exists():
-            icon_path = str((proj_path / "icon.ico").resolve())
-
         build_stamp = f".stamp_{int(time.time())}"
         asm_content = self.generate_launcher_asm(
             entry_script=str(entry_path),
@@ -552,7 +575,7 @@ section '.idata' import data readable writeable
                 # 1. Add all .py files and configs
                 skip_dirs = {
                     ".git", "__pycache__", ".pytest_cache",
-                    ".vscode", ".zed", "ini_backups", "logs", ".playwright_charter97_profile", ".kilocode", "FASM", "dist", "build", "fasm_export",
+                    ".vscode", ".zed", "ini_backups", "logs", ".kilocode", "FASM", "dist", "build", "fasm_export",
                     "thumbnail_cache", ".cache", "cache"
                 }
                 if not include_venv:
@@ -572,8 +595,8 @@ section '.idata' import data readable writeable
                             continue
                         if f.endswith(".info.json"):
                             continue
-                        # Skip own output binary
-                        if p.resolve() == out_bin.resolve() or p.resolve() == payload_path.resolve():
+                        # Skip own output binary, payload zip, and intermediate launcher asm
+                        if p.resolve() in (out_bin.resolve(), payload_path.resolve(), asm_file.resolve()):
                             continue
                         rel_path = str(p.relative_to(proj_path)).replace("\\", "/")
                         if rel_path not in added_arcnames:
@@ -581,20 +604,24 @@ section '.idata' import data readable writeable
                             added_arcnames.add(rel_path)
 
                 # 2. Add runner scripts (run.bat and run.sh)
-                entry_rel = entry_path.name
+                try:
+                    entry_rel_posix = str(entry_path.relative_to(proj_path)).replace("\\", "/")
+                except ValueError:
+                    entry_rel_posix = entry_path.name
+                entry_rel_win = entry_rel_posix.replace("/", "\\")
 
                 if is_gui:
                     py_launcher_bat = (
                         f'if exist "%~dp0.venv\\Scripts\\pythonw.exe" (\r\n'
-                        f'    "%~dp0.venv\\Scripts\\pythonw.exe" "{entry_rel}" %*\r\n'
+                        f'    "%~dp0.venv\\Scripts\\pythonw.exe" "{entry_rel_win}" %*\r\n'
                         f') else if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
-                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
+                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel_win}" %*\r\n'
                         f') '
                     )
                 else:
                     py_launcher_bat = (
                         f'if exist "%~dp0.venv\\Scripts\\python.exe" (\r\n'
-                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel}" %*\r\n'
+                        f'    "%~dp0.venv\\Scripts\\python.exe" "{entry_rel_win}" %*\r\n'
                         f') '
                     )
 
@@ -608,11 +635,11 @@ section '.idata' import data readable writeable
                     'set "PYTHONPATH=%~dp0;%PYTHONPATH%"\r\n'
                     f'{py_launcher_bat}'
                     f'else if exist "%USERPROFILE%\\.local\\bin\\uv.exe" (\r\n'
-                    f'    "%USERPROFILE%\\.local\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'
+                    f'    "%USERPROFILE%\\.local\\bin\\uv.exe" run python "{entry_rel_win}" %*\r\n'
                     f') else if exist "%LOCALAPPDATA%\\uv\\bin\\uv.exe" (\r\n'
-                    f'    "%LOCALAPPDATA%\\uv\\bin\\uv.exe" run python "{entry_rel}" %*\r\n'
+                    f'    "%LOCALAPPDATA%\\uv\\bin\\uv.exe" run python "{entry_rel_win}" %*\r\n'
                     f') else (\r\n'
-                    f'    python "{entry_rel}" %*\r\n'
+                    f'    python "{entry_rel_win}" %*\r\n'
                     f')\r\n'
                 )
                 zf.writestr("run.bat", bat_script)
@@ -625,12 +652,12 @@ section '.idata' import data readable writeable
                     'export PYTHONPATH="$DIR:$PYTHONPATH"\n'
                     'cd "$DIR"\n'
                     f'if [ -f "$DIR/.venv/bin/python" ]; then\n'
-                    f'    exec "$DIR/.venv/bin/python" "{entry_rel}" "$@"\n'
+                    f'    exec "$DIR/.venv/bin/python" "{entry_rel_posix}" "$@"\n'
                     f'{venv_check_posix}'
                     f'elif command -v uv >/dev/null 2>&1; then\n'
-                    f'    exec uv run python "{entry_rel}" "$@"\n'
+                    f'    exec uv run python "{entry_rel_posix}" "$@"\n'
                     f'else\n'
-                    f'    exec python3 "{entry_rel}" "$@"\n'
+                    f'    exec python3 "{entry_rel_posix}" "$@"\n'
                     f'fi\n'
                 )
                 zf.writestr("run.sh", sh_script)

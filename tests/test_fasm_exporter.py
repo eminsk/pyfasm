@@ -89,7 +89,6 @@ def test_fasm_exporter_project_bundle(tmp_path: Path):
 
 def test_cli_docs(capsys):
     from pyfasm.cli import main
-    import sys
 
     # Test English docs
     sys.argv = ["pyfasm", "docs"]

@@ -2503,7 +2503,7 @@ def generate_punto_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None)
     return result
 
 
-def generate_excel_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None) -> Dict[str, str]:
+def generate_excel_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None) -> Dict[str, Union[str, bytes]]:
     """
     Returns the modular assembly files dictionary for Excel Viewer Pro (xlsx viewer).
     Supports either pre-existing project asm files or the bundled native templates.
@@ -2514,7 +2514,7 @@ def generate_excel_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None)
         "funcs_data.inc", "grid.inc", "import.inc", "menu.inc", "ribbon.inc",
         "chart.inc", "rsrc.inc", "xlsx_gui64.asm", "app_icon.ico"
     ]
-    result: Dict[str, str] = {}
+    result: Dict[str, Union[str, bytes]] = {}
     
     asm_source: Optional[Path] = None
     if project_dir:
@@ -2533,6 +2533,8 @@ def generate_excel_asm(mod: Any, project_dir: Optional[Union[Path, str]] = None)
             raw = fpath.read_bytes()
             if f == 'xlsx_gui64.asm':
                 result["main.asm"] = raw.decode("latin-1").replace("\r\n", "\n")
+            elif f.lower().endswith((".ico", ".png", ".bmp", ".bin")):
+                result[f] = raw
             else:
                 result[f] = raw.decode("latin-1").replace("\r\n", "\n")
 

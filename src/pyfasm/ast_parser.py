@@ -6,6 +6,7 @@ across single files or complete multi-module project libraries.
 from __future__ import annotations
 import ast
 import re
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set
@@ -90,14 +91,14 @@ class ParsedModule:
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
-        targets = {n.lower() for n in names}
+        targets = {n.lower().replace("-", "_") for n in names}
         for lib in self.detected_libraries:
-            l_low = lib.lower()
-            if l_low in targets or any(l_low.startswith(t) or t in l_low for t in targets):
+            l_low = lib.lower().replace("-", "_")
+            if any(l_low == t or l_low.startswith(t + "_") for t in targets):
                 return True
         for imp in self.imports:
             root = imp.split(".")[0].lower().replace("-", "_")
-            if root in targets or any(root.startswith(t) or t in root for t in targets):
+            if any(root == t or root.startswith(t + "_") for t in targets):
                 return True
         return False
 
@@ -138,6 +139,8 @@ def walk_local_scope(node: ast.AST):
 class ConstantFolder(ast.NodeTransformer):
     """Evaluates compile-time constant expressions (Constant Folding)."""
 
+    _MAX_FOLD_INT = 1 << 62
+
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         self.generic_visit(node)
         if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
@@ -149,13 +152,26 @@ class ConstantFolder(ast.NodeTransformer):
                 elif isinstance(node.op, ast.Sub):
                     res = lv - rv
                 elif isinstance(node.op, ast.Mult):
-                    res = lv * rv
+                    if isinstance(lv, str) and isinstance(rv, int):
+                        if 0 <= rv <= 4096 and len(lv) * rv <= 4096:
+                            res = lv * rv
+                    elif isinstance(rv, str) and isinstance(lv, int):
+                        if 0 <= lv <= 4096 and len(rv) * lv <= 4096:
+                            res = lv * rv
+                    else:
+                        res = lv * rv
                 elif isinstance(node.op, ast.FloorDiv) and rv != 0:
                     res = lv // rv
                 elif isinstance(node.op, ast.Mod) and rv != 0:
                     res = lv % rv
                 elif isinstance(node.op, ast.Pow):
-                    res = lv ** rv
+                    if isinstance(lv, int) and isinstance(rv, int):
+                        if 0 <= rv <= 62:
+                            res = lv ** rv
+                    elif isinstance(lv, (int, float)) and isinstance(rv, (int, float)):
+                        cand = lv ** rv
+                        if not isinstance(cand, complex):
+                            res = cand
                 elif isinstance(node.op, ast.BitAnd):
                     res = lv & rv
                 elif isinstance(node.op, ast.BitOr):
@@ -163,11 +179,18 @@ class ConstantFolder(ast.NodeTransformer):
                 elif isinstance(node.op, ast.BitXor):
                     res = lv ^ rv
                 elif isinstance(node.op, ast.LShift):
-                    res = lv << rv
+                    if isinstance(lv, int) and isinstance(rv, int) and 0 <= rv <= 62:
+                        res = lv << rv
                 elif isinstance(node.op, ast.RShift):
-                    res = lv >> rv
+                    if isinstance(lv, int) and isinstance(rv, int) and 0 <= rv <= 63:
+                        res = lv >> rv
 
-                if res is not None:
+                if res is not None and not isinstance(res, complex):
+                    if isinstance(res, int) and not isinstance(res, bool):
+                        if not (-self._MAX_FOLD_INT <= res <= self._MAX_FOLD_INT):
+                            return node
+                    if isinstance(res, str) and len(res) > 4096:
+                        return node
                     return ast.Constant(value=res)
             except Exception:
                 pass
@@ -178,14 +201,20 @@ class ConstantFolder(ast.NodeTransformer):
         if isinstance(node.operand, ast.Constant):
             v = node.operand.value
             try:
+                res = None
                 if isinstance(node.op, ast.USub):
-                    return ast.Constant(value=-v)
+                    res = -v
                 elif isinstance(node.op, ast.UAdd):
-                    return ast.Constant(value=+v)
+                    res = +v
                 elif isinstance(node.op, ast.Invert):
-                    return ast.Constant(value=~v)
+                    res = ~v
                 elif isinstance(node.op, ast.Not):
-                    return ast.Constant(value=not v)
+                    res = not v
+                if res is not None:
+                    if isinstance(res, int) and not isinstance(res, bool):
+                        if not (-self._MAX_FOLD_INT <= res <= self._MAX_FOLD_INT):
+                            return node
+                    return ast.Constant(value=res)
             except Exception:
                 pass
         return node
@@ -542,12 +571,14 @@ class AstAnalyzer:
         return label
 
     def get_or_create_float(self, val: float) -> str:
+        val_f = float(val)
+        val_bytes = struct.pack("<d", val_f)
         for f in self.floats:
-            if abs(f.value - val) < 1e-12:
+            if struct.pack("<d", f.value) == val_bytes:
                 return f.label
         self._flt_counter += 1
         label = f"_flt_lit_{self._flt_counter}"
-        self.floats.append(FloatLiteral(label=label, value=val))
+        self.floats.append(FloatLiteral(label=label, value=val_f))
         return label
 
     def _detect_project_libraries(self, module: ParsedModule) -> None:
@@ -555,14 +586,54 @@ class AstAnalyzer:
         if not self.project_root or not self.project_root.exists():
             return
 
+        def _add_dep_spec(spec: str) -> None:
+            m = re.match(r"^\s*([a-zA-Z0-9_.-]+)", spec)
+            if m:
+                lib = m.group(1).lower().replace("-", "_").replace(".", "_")
+                if lib not in ("pyfasm", "pyfasm64", "python"):
+                    module.detected_libraries.add(lib)
+
         pyproject = self.project_root / "pyproject.toml"
         if pyproject.exists():
             try:
-                text = pyproject.read_text(encoding="utf-8", errors="ignore")
-                for match in re.finditer(r"['\"]([a-zA-Z0-9_-]+)", text):
-                    lib = match.group(1).lower().replace("-", "_")
-                    if lib not in ("true", "false", "wheel", "pyfasm", "pyfasm64", "version", "description", "name"):
-                        module.detected_libraries.add(lib)
+                raw_bytes = pyproject.read_bytes()
+                parsed_toml = None
+                try:
+                    import tomllib  # Python 3.11+
+                    parsed_toml = tomllib.loads(raw_bytes.decode("utf-8", errors="ignore"))
+                except ImportError:
+                    parsed_toml = None
+
+                if isinstance(parsed_toml, dict):
+                    proj_tbl = parsed_toml.get("project", {})
+                    if isinstance(proj_tbl, dict):
+                        for dep in proj_tbl.get("dependencies", []) or []:
+                            if isinstance(dep, str):
+                                _add_dep_spec(dep)
+                        opt_deps = proj_tbl.get("optional-dependencies", {}) or {}
+                        if isinstance(opt_deps, dict):
+                            for group_list in opt_deps.values():
+                                if isinstance(group_list, list):
+                                    for dep in group_list:
+                                        if isinstance(dep, str):
+                                            _add_dep_spec(dep)
+                    dep_groups = parsed_toml.get("dependency-groups", {}) or {}
+                    if isinstance(dep_groups, dict):
+                        for group_list in dep_groups.values():
+                            if isinstance(group_list, list):
+                                for dep in group_list:
+                                    if isinstance(dep, str):
+                                        _add_dep_spec(dep)
+                    poetry_deps = parsed_toml.get("tool", {}).get("poetry", {}).get("dependencies", {})
+                    if isinstance(poetry_deps, dict):
+                        for dep_name in poetry_deps.keys():
+                            if isinstance(dep_name, str):
+                                _add_dep_spec(dep_name)
+                else:
+                    text = raw_bytes.decode("utf-8", errors="ignore")
+                    for block in re.finditer(r"dependencies\s*=\s*\[(.*?)\]", text, re.S):
+                        for match in re.finditer(r"['\"]([a-zA-Z0-9_.-]+)", block.group(1)):
+                            _add_dep_spec(match.group(1))
             except Exception:
                 pass
 
@@ -572,9 +643,7 @@ class AstAnalyzer:
                 for line in reqs.read_text(encoding="utf-8", errors="ignore").splitlines():
                     line = line.strip().split("#")[0].strip()
                     if line:
-                        match = re.match(r"^([a-zA-Z0-9_-]+)", line)
-                        if match:
-                            module.detected_libraries.add(match.group(1).lower().replace("-", "_"))
+                        _add_dep_spec(line)
             except Exception:
                 pass
 
@@ -582,10 +651,8 @@ class AstAnalyzer:
         if uvlock.exists():
             try:
                 text = uvlock.read_text(encoding="utf-8", errors="ignore")
-                for match in re.finditer(r"['\"]([a-zA-Z0-9_-]+)", text):
-                    lib = match.group(1).lower().replace("-", "_")
-                    if lib not in ("pyfasm", "pyfasm64"):
-                        module.detected_libraries.add(lib)
+                for match in re.finditer(r"^\s*name\s*=\s*['\"]([a-zA-Z0-9_.-]+)['\"]", text, re.M):
+                    _add_dep_spec(match.group(1))
             except Exception:
                 pass
 
@@ -729,7 +796,7 @@ class AstAnalyzer:
 
     def _resolve_local_module(self, mod_name: str, current_dir: Path) -> Optional[Path]:
         """Resolves an imported module name to a local or pure-Python venv file, strictly ignoring pyfasm itself."""
-        if mod_name == "pyfasm" or mod_name.startswith("pyfasm."):
+        if mod_name in ("pyfasm", "pyfasm64") or mod_name.startswith(("pyfasm.", "pyfasm64.")):
             return None
 
         parts = mod_name.split(".")
@@ -778,13 +845,15 @@ class AstAnalyzer:
             if self._is_binary_extension_module(real_path.parent) or self._is_binary_extension_module(real_path):
                 return
 
-        # Never add pyfasm source itself
-        if "pyfasm" in real_path.parts and "src" in real_path.parts:
+        # Never add pyfasm / pyfasm64 source itself
+        if ("pyfasm" in real_path.parts or "pyfasm64" in real_path.parts) and "src" in real_path.parts:
             try:
                 import pyfasm
-                pyfasm_pkg_dir = Path(pyfasm.__file__).parent.resolve()
-                if pyfasm_pkg_dir in real_path.parents or real_path == pyfasm_pkg_dir:
-                    return
+                import pyfasm64
+                for pkg_mod in (pyfasm, pyfasm64):
+                    pkg_dir = Path(pkg_mod.__file__).parent.resolve()
+                    if pkg_dir in real_path.parents or real_path == pkg_dir:
+                        return
             except Exception:
                 pass
 
@@ -823,7 +892,7 @@ class AstAnalyzer:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "pyfasm" or alias.name.startswith("pyfasm."):
+                    if alias.name in ("pyfasm", "pyfasm64") or alias.name.startswith(("pyfasm.", "pyfasm64.")):
                         continue
                     dep = self._resolve_local_module(alias.name, real_path.parent)
                     if dep and dep != real_path:
@@ -836,7 +905,7 @@ class AstAnalyzer:
                         if dep and dep != real_path:
                             self._parse_file_recursive(dep, module, is_entry=False)
                 elif mod_name:
-                    if mod_name == "pyfasm" or mod_name.startswith("pyfasm."):
+                    if mod_name in ("pyfasm", "pyfasm64") or mod_name.startswith(("pyfasm.", "pyfasm64.")):
                         continue
                     dep = self._resolve_local_module(mod_name, real_path.parent)
                     if dep and dep != real_path:
@@ -1516,7 +1585,7 @@ class AstAnalyzer:
                 if isinstance(usage_node, ast.Call):
                     if isinstance(usage_node.func, ast.Attribute):
                         attr_name = usage_node.func.attr
-                        if attr_name in ("get", "keys", "values", "items", "pop", "update", "setdefault") and isinstance(usage_node.func.value, ast.Name):
+                        if attr_name in ("get", "keys", "values", "items", "update", "setdefault") and isinstance(usage_node.func.value, ast.Name):
                             vname = usage_node.func.value.id
                             if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
                                 local_vars[vname].var_type = TYPE_DICT

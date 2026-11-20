@@ -15,11 +15,7 @@ class FasmRunner:
     """Manages discovery and invocation of Flat Assembler (FASM)."""
 
     DEFAULT_SEARCH_PATHS = [
-        r"C:\proekts\fasm-modern-sdk\bin\fasm.exe",
-        r"D:\proekts\asm\fasm-modern-sdk\bin\fasm.exe",
-        r"C:\asm\hdd\FASM.EXE",
         r"C:\FASM\FASM.EXE",
-        r"C:\asm\FASM.EXE",
         r"C:\Program Files\FASM\fasm.exe",
         "/usr/bin/fasm",
         "/usr/local/bin/fasm",
@@ -30,8 +26,10 @@ class FasmRunner:
         self.include_path = self._locate_include(include_path)
 
     def _locate_fasm(self, explicit_path: Optional[str]) -> str:
-        if explicit_path and os.path.exists(explicit_path):
-            return str(Path(explicit_path).resolve())
+        env_fasm = os.environ.get("PYFASM_FASM_PATH") or os.environ.get("FASM_PATH")
+        for cand_override in (explicit_path, env_fasm):
+            if cand_override and os.path.exists(cand_override):
+                return str(Path(cand_override).resolve())
 
         # 1. Check package bundled bin (e.g. site-packages/pyfasm/bin)
         pkg_bin_dir = Path(__file__).resolve().parent / "bin"
@@ -87,8 +85,6 @@ class FasmRunner:
 
         # Check fasm-modern-sdk paths
         sdk_candidates = [
-            Path("C:/proekts/fasm-modern-sdk/bin"),
-            Path("D:/proekts/asm/fasm-modern-sdk/bin"),
             Path.home() / "fasm-modern-sdk" / "bin",
         ]
         for sdk_bin in sdk_candidates:
@@ -111,12 +107,24 @@ class FasmRunner:
             if os.path.exists(p):
                 return str(Path(p).resolve())
 
-        # Check user cache ~/.pyfasm/fasm
+        # Check user cache ~/.pyfasm/fasm (including extracted SDK subdirectories)
         user_fasm_dir = Path.home() / ".pyfasm" / "fasm"
-        for cand_name in ("fasm.exe", "FASM.EXE", "fasm", "fasm.x64", "fasm.darwin"):
-            cand = user_fasm_dir / cand_name
-            if cand.exists():
-                return str(cand.resolve())
+        if user_fasm_dir.exists():
+            if os.name == "nt":
+                cached_names = ("fasm.exe", "FASM.EXE")
+            elif sys.platform == "darwin":
+                cached_names = ("fasm.darwin", "fasm")
+            else:
+                cached_names = ("fasm.x64", "fasm")
+            for cand_name in cached_names:
+                for cand in user_fasm_dir.rglob(cand_name):
+                    if cand.is_file():
+                        if os.name != "nt":
+                            try:
+                                os.chmod(cand, 0o755)
+                            except Exception:
+                                pass
+                        return str(cand.resolve())
 
         # Auto-download on demand if not found
         try:
@@ -128,8 +136,32 @@ class FasmRunner:
             "FASM executable not found! Please install FASM or specify its path."
         )
 
-    def _auto_download_fasm(self, target_dir: Path) -> str:
+    @staticmethod
+    def _download_with_timeout(url: str, dest: Path, timeout: int = 30) -> None:
         import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "pyfasm64"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out_f:
+            shutil.copyfileobj(resp, out_f)
+
+    @staticmethod
+    def _safe_extract_zip(zf, target_dir: Path) -> None:
+        base = target_dir.resolve()
+        for member in zf.infolist():
+            dest = (base / member.filename).resolve()
+            if dest == base or base in dest.parents:
+                zf.extract(member, base)
+
+    @staticmethod
+    def _safe_extract_tar(tf, target_dir: Path) -> None:
+        base = target_dir.resolve()
+        for member in tf.getmembers():
+            if member.issym() or member.islnk():
+                continue
+            dest = (base / member.name).resolve()
+            if dest == base or base in dest.parents:
+                tf.extract(member, base)
+
+    def _auto_download_fasm(self, target_dir: Path) -> str:
         import zipfile
         import tarfile
 
@@ -142,14 +174,14 @@ class FasmRunner:
             url = f"{base_url}/fasm-modern-sdk-windows-x64.zip"
             zip_dest = target_dir / "fasm-modern-sdk-windows.zip"
             try:
-                urllib.request.urlretrieve(url, zip_dest)
+                self._download_with_timeout(url, zip_dest)
                 with zipfile.ZipFile(zip_dest, "r") as zf:
-                    zf.extractall(target_dir)
+                    self._safe_extract_zip(zf, target_dir)
             except Exception:
                 url_fb = "https://flatassembler.net/fasmw17332.zip"
-                urllib.request.urlretrieve(url_fb, zip_dest)
+                self._download_with_timeout(url_fb, zip_dest)
                 with zipfile.ZipFile(zip_dest, "r") as zf:
-                    zf.extractall(target_dir)
+                    self._safe_extract_zip(zf, target_dir)
 
             for cand in target_dir.rglob("fasm.exe"):
                 return str(cand.resolve())
@@ -160,15 +192,13 @@ class FasmRunner:
             url = f"{base_url}/fasm-modern-sdk-macos-x64.tar.gz"
             tgz_dest = target_dir / "fasm-modern-sdk-macos.tar.gz"
             try:
-                urllib.request.urlretrieve(url, tgz_dest)
+                self._download_with_timeout(url, tgz_dest)
                 with tarfile.open(tgz_dest, "r:gz") as tf:
-                    tf.extractall(target_dir)
+                    self._safe_extract_tar(tf, target_dir)
             except Exception:
                 url_fb = "https://raw.githubusercontent.com/STLVNUB/fasm-osx/master/fasm"
                 dest = target_dir / "fasm"
-                req = urllib.request.Request(url_fb, headers={"User-Agent": "pyfasm"})
-                with open(dest, "wb") as f:
-                    f.write(urllib.request.urlopen(req).read())
+                self._download_with_timeout(url_fb, dest)
                 try:
                     os.chmod(dest, 0o755)
                 except Exception:
@@ -194,14 +224,14 @@ class FasmRunner:
             url = f"{base_url}/fasm-modern-sdk-linux-x64.tar.gz"
             tgz_dest = target_dir / "fasm-modern-sdk-linux.tar.gz"
             try:
-                urllib.request.urlretrieve(url, tgz_dest)
+                self._download_with_timeout(url, tgz_dest)
                 with tarfile.open(tgz_dest, "r:gz") as tf:
-                    tf.extractall(target_dir)
+                    self._safe_extract_tar(tf, target_dir)
             except Exception:
                 url_fb = "https://flatassembler.net/fasm-1.73.32.tgz"
-                urllib.request.urlretrieve(url_fb, tgz_dest)
+                self._download_with_timeout(url_fb, tgz_dest)
                 with tarfile.open(tgz_dest, "r:gz") as tf:
-                    tf.extractall(target_dir)
+                    self._safe_extract_tar(tf, target_dir)
 
             for cand in target_dir.rglob("fasm.x64"):
                 if cand.is_file():
@@ -221,8 +251,11 @@ class FasmRunner:
         raise FileNotFoundError("Could not download FASM Modern SDK from eminsk/fasm-modern-sdk")
 
     def _locate_include(self, explicit_include: Optional[str]) -> str:
+        env_inc = os.environ.get("PYFASM_INCLUDE_PATH")
         if explicit_include and os.path.exists(explicit_include):
             inc_path = Path(explicit_include).resolve()
+        elif env_inc and os.path.exists(env_inc):
+            inc_path = Path(env_inc).resolve()
         else:
             fasm_dir = Path(self.fasm_path).parent
             pkg_inc = Path(__file__).resolve().parent / "include"
@@ -234,8 +267,7 @@ class FasmRunner:
                 fasm_dir.parent / "include",
                 fasm_dir.parent / "include" / "core",
                 repo_inc,
-                Path("C:/proekts/fasm-modern-sdk/include"),
-                Path("D:/proekts/asm/fasm-modern-sdk/include"),
+                Path.home() / "fasm-modern-sdk" / "include",
                 Path.cwd() / "asm" / "INCLUDE",
                 Path.home() / ".pyfasm" / "fasm" / "INCLUDE",
                 fasm_dir,
@@ -258,13 +290,17 @@ class FasmRunner:
                 inc_path = fasm_dir.resolve()
 
         if os.name != "nt" and inc_path.exists() and inc_path.is_dir():
-            self._ensure_case_folded_include(inc_path)
+            if not self._ensure_case_folded_include(inc_path):
+                mirror = Path.home() / ".cache" / "pyfasm" / "include"
+                if self._build_case_folded_mirror(inc_path, mirror):
+                    inc_path = mirror
 
         return str(inc_path)
 
     @staticmethod
-    def _ensure_case_folded_include(base_inc: Path) -> None:
+    def _ensure_case_folded_include(base_inc: Path) -> bool:
         """Creates symlinks for case-insensitive include resolution on case-sensitive filesystems (Linux)."""
+        ok = True
         try:
             for root, dirs, files in os.walk(base_inc):
                 r_path = Path(root)
@@ -276,7 +312,7 @@ class FasmRunner:
                             try:
                                 os.symlink(d, target)
                             except Exception:
-                                pass
+                                ok = False
                 for f in files:
                     low_f = f.lower()
                     if low_f != f:
@@ -285,9 +321,41 @@ class FasmRunner:
                             try:
                                 os.symlink(f, target)
                             except Exception:
-                                pass
+                                ok = False
         except Exception:
-            pass
+            return False
+        return ok
+
+    @staticmethod
+    def _build_case_folded_mirror(src_inc: Path, dst_mirror: Path) -> bool:
+        """Creates a writable case-folded symlink mirror when include dir is read-only."""
+        try:
+            src_inc = src_inc.resolve()
+            dst_mirror.mkdir(parents=True, exist_ok=True)
+            for root, dirs, files in os.walk(src_inc):
+                rel = Path(root).relative_to(src_inc)
+                for d in dirs:
+                    (dst_mirror / rel / d).mkdir(parents=True, exist_ok=True)
+                    low_d = d.lower()
+                    if low_d != d:
+                        link_d = dst_mirror / rel / low_d
+                        if not link_d.exists():
+                            try:
+                                os.symlink(d, link_d)
+                            except Exception:
+                                pass
+                for f in files:
+                    src_f = Path(root) / f
+                    for name_variant in {f, f.lower()}:
+                        dst_f = dst_mirror / rel / name_variant
+                        if not dst_f.exists():
+                            try:
+                                os.symlink(src_f, dst_f)
+                            except Exception:
+                                pass
+            return True
+        except Exception:
+            return False
 
     def assemble(
         self,
@@ -330,6 +398,7 @@ class FasmRunner:
                 arch_res = subprocess.run(
                     ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
                     env=env,
+                    cwd=str(asm_path.parent),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -352,6 +421,7 @@ class FasmRunner:
                     arch_res = subprocess.run(
                         ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
                         env=env,
+                        cwd=str(asm_path.parent),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,

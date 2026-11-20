@@ -6,13 +6,21 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from pyfasm import __version__
 from pyfasm.compiler import PyFasmCompiler
 
 
 def main() -> int:
+    invoked = Path(sys.argv[0]).stem.lower() if sys.argv else "pyfasm64"
+    prog_name = "pyfasm" if invoked == "pyfasm" else "pyfasm64"
     parser = argparse.ArgumentParser(
-        prog="pyfasm",
-        description="PyFASM: Ahead-of-Time (AOT) Python to Pure FASM x64 Native Compiler & Bundler (Zero-GIL)"
+        prog=prog_name,
+        description="PyFASM64: Ahead-of-Time (AOT) Python to Pure FASM x64 Native Compiler & Bundler (Zero-GIL)"
+    )
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -21,8 +29,8 @@ def main() -> int:
     p_compile = subparsers.add_parser("compile", help="Compile a Python file or project directory to a single native x64 binary")
     p_compile.add_argument("source", help="Path to input Python source file (.py) or project directory")
     p_compile.add_argument("-o", "--output", help="Path to output binary (.exe, .dll, .elf, .macho, or .bin)")
-    p_compile.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
-    p_compile.add_argument("--run", action="store_true", help="Execute binary immediately after successful build (win64 only)")
+    p_compile.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_compile.add_argument("--run", action="store_true", help="Execute compiled binary immediately after successful build")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
     p_compile.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
     p_compile.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources, window, and taskbar")
@@ -31,7 +39,8 @@ def main() -> int:
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
     p_asm.add_argument("source", help="Path to input Python source file (.py) or project directory")
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
-    p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple)")
+    p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_asm.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources")
 
     # Subcommand: bundle
     p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 monolithic executable")
@@ -189,6 +198,9 @@ def main() -> int:
             if not entry_file:
                 py_files = sorted(list(src.glob("*.py")))
                 entry_file = py_files[0] if py_files else None
+            if not entry_file:
+                print(f"[PyFASM ERROR] No Python source files (.py) found in directory: {args.source}", file=sys.stderr)
+                return 1
             project_dir = src
             src_file = entry_file
         else:
@@ -200,7 +212,7 @@ def main() -> int:
 
         analyzer = AstAnalyzer(project_root=project_dir)
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
-        codegen = X64CodeGen(parsed_mod, target=args.target)
+        codegen = X64CodeGen(parsed_mod, target=args.target, icon_path=args.icon)
         asm_code = codegen.generate()
 
         if args.output:

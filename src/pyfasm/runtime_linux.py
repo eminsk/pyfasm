@@ -105,6 +105,8 @@ _pyfasm_print_newline:
 
 _pyfasm_str_len:
     ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .sl_zero
     push    rdi
     mov     rdi, rcx
     xor     eax, eax
@@ -114,6 +116,9 @@ _pyfasm_str_len:
     dec     rcx
     mov     rax, rcx
     pop     rdi
+    ret
+.sl_zero:
+    xor     eax, eax
     ret
 
 _pyfasm_print_int:
@@ -160,6 +165,7 @@ _pyfasm_print_int:
     mov     rdi, 1                  ; stdout
     syscall
 
+    add     rsp, 48
     pop     rdi
     pop     rsi
     pop     rbx
@@ -205,15 +211,47 @@ _pyfasm_print_float:
     mov     rdx, 1
     syscall
 
-    ; Fraction (6 decimals)
+    ; Fraction (6 decimals with leading zeros)
     movsd   xmm0, [rsp + 32]
-    cvtsi2sd xmm2, [rsp + 40]
+    cvtsi2sd xmm2, qword [rsp + 40]
     subsd   xmm0, xmm2
     mulsd   xmm0, [flt_1m]
+    mov     rax, 3FE0000000000000h
+    movq    xmm1, rax
+    addsd   xmm0, xmm1
     cvttsd2si rax, xmm0
-    mov     rcx, rax
+    test    rax, rax
+    jns     .frac_nonneg
+    xor     eax, eax
+.frac_nonneg:
+    cmp     rax, 1000000
+    jl      .frac_check_zero
+    mov     rax, 999999
+.frac_check_zero:
+    test    rax, rax
+    jnz     .frac_padded
+    xor     ecx, ecx
     call    _pyfasm_print_int
-
+    jmp     .flt_done
+.frac_padded:
+    lea     r8, [rsp + 22]
+    mov     byte [r8], 0
+    mov     r9, 10
+    mov     ecx, 6
+.frac_digit_loop:
+    xor     rdx, rdx
+    div     r9
+    add     dl, '0'
+    dec     r8
+    mov     [r8], dl
+    dec     ecx
+    jnz     .frac_digit_loop
+    mov     rax, 1
+    mov     rdi, 1
+    mov     rsi, r8
+    mov     rdx, 6
+    syscall
+.flt_done:
     mov     rsp, rbp
     pop     rbp
     ret
@@ -273,6 +311,7 @@ _pyfasm_sleep_ms:
     ; RCX = milliseconds -> sys_nanosleep
     push    rbp
     mov     rbp, rsp
+    push    rbx
     sub     rsp, 32
 
     ; sec = ms / 1000
@@ -290,6 +329,8 @@ _pyfasm_sleep_ms:
     mov     rax, 35                 ; sys_nanosleep
     syscall
 
+    add     rsp, 32
+    pop     rbx
     mov     rsp, rbp
     pop     rbp
     ret

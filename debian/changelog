@@ -1,3 +1,13 @@
+python3-pyfasm64 (0.3.3-1) stable; urgency=medium
+
+  * Release PyFASM64 0.3.3.
+  * Fixed Win64/Linux/macOS runtime ABI epilogues, callee-saved register preservation, and dictionary/set probing.
+  * Added dummy-safe PE64 .reloc section for simultaneous DLL loading and ASLR compatibility.
+  * Fixed Python floor division (//) and modulo (%) sign rounding, print_float leading zeros, and exact IEEE-754 float pooling.
+  * Fixed --no-asm cross-directory builds, Bundler --dir-mode launcher generation, and PEP 561 py.typed / __main__.py support.
+
+ -- eminsk <M_N_N@tut.by>  Fri, 20 Nov 2026 09:50:00 -0500
+
 python3-pyfasm64 (0.1.14-1) stable; urgency=medium
 
   * Release PyFASM64 0.1.14.
