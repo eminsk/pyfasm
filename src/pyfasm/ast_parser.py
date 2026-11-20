@@ -502,7 +502,7 @@ class GeneratorExpLifter(ast.NodeTransformer):
             name=fn_name,
             args=ast.arguments(
                 posonlyargs=[],
-                args=[ast.arg(arg=name) for name in fn_param_names],
+                args=[ast.arg(arg=name, annotation=None, type_comment=None) for name in fn_param_names],
                 vararg=None,
                 kwonlyargs=[],
                 kw_defaults=[],
@@ -1164,7 +1164,9 @@ class AstAnalyzer:
                     break
 
         if not init_fn and fields:
-            synth_args = [ast.arg(arg="self")] + [ast.arg(arg=f) for f in fields]
+            synth_args = [ast.arg(arg="self", annotation=None, type_comment=None)] + [
+                ast.arg(arg=f, annotation=None, type_comment=None) for f in fields
+            ]
             assign_stmts = [
                 ast.Assign(
                     targets=[ast.Attribute(value=ast.Name(id="self", ctx=ast.Load()), attr=f, ctx=ast.Store())],
@@ -1394,11 +1396,12 @@ class AstAnalyzer:
         for idx, arg in enumerate(node.args.args):
             arg_name = arg.arg
             arg_type = TYPE_INT
-            if arg.annotation:
-                if isinstance(arg.annotation, ast.Name):
-                    arg_type = resolve_type(arg.annotation.id)
-                elif isinstance(arg.annotation, ast.Constant) and isinstance(arg.annotation.value, str):
-                    arg_type = resolve_type(arg.annotation.value)
+            ann = getattr(arg, "annotation", None)
+            if ann:
+                if isinstance(ann, ast.Name):
+                    arg_type = resolve_type(ann.id)
+                elif isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+                    arg_type = resolve_type(ann.value)
             elif arg_name in ("st", "s", "str", "string", "text", "txt", "msg", "prompt", "pattern", "subpattern", "word", "line"):
                 arg_type = TYPE_STR
 

@@ -500,3 +500,31 @@ def test_asm_files_written_without_py310_only_write_text_newline():
                 "src/pyfasm/fasm_exporter.py", "src/pyfasm/codegen_x64.py", "src/pyfasm/cli.py"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert not re.search(r"write_text\([^)]*newline\s*=\s*[\"']", text), rel
+
+
+def test_synthetic_ast_args_have_annotation_for_py38(tmp_path: Path):
+    import ast
+    from pyfasm.ast_parser import GeneratorExpLifter
+
+    tree = ast.parse("total = sum(x * 2 for x in nums if x > k)\n")
+    lifter = GeneratorExpLifter()
+    lifter.visit(tree)
+    assert len(lifter.generators) == 1
+    for fn_arg in lifter.generators[0].args.args:
+        assert hasattr(fn_arg, "annotation")
+        assert fn_arg.annotation is None
+
+    cls_src = tmp_path / "cls_fields.py"
+    cls_src.write_text(
+        "class Point:\n"
+        "    x: int\n"
+        "    y: int\n\n"
+        "def main() -> int:\n"
+        "    p = Point(3, 4)\n"
+        "    return p.x + p.y\n",
+        encoding="utf-8",
+    )
+    mod = AstAnalyzer().parse_file(cls_src)
+    assert "Point___init__" in mod.functions
+    init_args = [a.name for a in mod.functions["Point___init__"].args]
+    assert init_args == ["self", "x", "y"]
