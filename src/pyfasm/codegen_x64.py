@@ -703,6 +703,34 @@ class X64CodeGen:
             return node.value
         return None
 
+    def _extract_kwarg_int(self, call: ast.Call, kw_name: str, default: int = 0) -> int:
+        node = self._extract_kwarg(call, kw_name)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant) and isinstance(node.operand.value, int):
+            return -node.operand.value
+        return default
+
+    def _extract_padding(self, call: ast.Call, kw_name: str, default: int = 4) -> int:
+        node = self._extract_kwarg(call, kw_name)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        elif isinstance(node, (ast.Tuple, ast.List)) and node.elts:
+            first = node.elts[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, int):
+                return first.value
+        return default
+
+    def _extract_parent_container_node(self, call: ast.Call) -> Optional[ast.AST]:
+        master_kw = self._extract_kwarg(call, "master")
+        if master_kw is not None:
+            return master_kw
+        if call.args:
+            first = call.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, (str, int, float, bool))):
+                return first
+        return None
+
     def _emit_string_pointer(self, reg: str, text: str) -> None:
         label = None
         for s in self.module.string_literals:
@@ -1247,29 +1275,15 @@ class X64CodeGen:
         btn_id = self.gui_control_id
         self.gui_control_id += 1
 
-        is_so = btn_text is not None and any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
-        if is_so and btn_text is not None:
-            lower_txt = btn_text.lower()
-            if any(k in lower_txt for k in ("search", "найти")):
-                x, y, w, h = 690, 55, 115, 35
-                btn_id = 1001
-            elif any(k in lower_txt for k in ("clear", "очистить", "✕", "x")):
-                x, y, w, h = 815, 55, 85, 35
-                btn_id = 1002
-            elif len(btn_text) <= 12 and self.gui_chip_count < 12:
-                x = 30 + (self.gui_chip_count % 9) * 92
-                y = 102
-                w = 85
-                h = 28
-                btn_id = 1100 + self.gui_chip_count
-                self.gui_chip_count += 1
-            else:
-                x = 30 + ((btn_id - 1000) % 4) * 140
-                y = 60 + ((btn_id - 1000) // 4) * 45
-                w = 130
-                h = 32
+        w = self._extract_kwarg_int(call, "width", 160)
+        h = self._extract_kwarg_int(call, "height", 36)
+
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
         else:
-            x, y, w, h = 0, 0, 180, 36
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
 
         if dyn_text_node is not None:
             self._generate_expr(dyn_text_node)
@@ -1277,24 +1291,22 @@ class X64CodeGen:
         else:
             self._emit_string_pointer("rcx", btn_text or "Button")
 
-        if x or y:
-            self.emit(f"mov rdx, {x}")
-            self.emit(f"mov r8, {y}")
-        else:
-            self.emit("xor edx, edx", "auto layout X")
-            self.emit("xor r8d, r8d", "auto layout Y")
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
         self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
         if has_cb:
             self.emit("pop r10", "restore button callback pointer")
-        self.emit("sub rsp, 64")
+        self.emit("sub rsp, 80")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {btn_id}")
         if has_cb:
             self.emit("mov [rsp + 48], r10")
         else:
             self.emit("mov qword [rsp + 48], 0")
+        self.emit("mov [rsp + 56], r11", "parent container HWND")
         self.emit("call _pyfasm_create_button")
-        self.emit("add rsp, 64")
+        self.emit("add rsp, 80")
 
     def _generate_checkbox_control(self, call: ast.Call, target_name: str) -> None:
         chk_text = (
@@ -1322,22 +1334,33 @@ class X64CodeGen:
         chk_id = self.gui_control_id
         self.gui_control_id += 1
 
-        w, h = 220, 30
+        w = self._extract_kwarg_int(call, "width", 220)
+        h = self._extract_kwarg_int(call, "height", 30)
+
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
+        else:
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
+
         self._emit_string_pointer("rcx", chk_text)
         self.emit("xor edx, edx", "auto layout X")
         self.emit("xor r8d, r8d", "auto layout Y")
         self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
         if has_cb:
             self.emit("pop r10", "restore checkbox callback pointer")
-        self.emit("sub rsp, 64")
+        self.emit("sub rsp, 80")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {chk_id}")
         if has_cb:
             self.emit("mov [rsp + 48], r10")
         else:
             self.emit("mov qword [rsp + 48], 0")
+        self.emit("mov [rsp + 56], r11", "parent container HWND")
         self.emit("call _pyfasm_create_checkbox")
-        self.emit("add rsp, 64")
+        self.emit("add rsp, 80")
 
         val_node = self._extract_kwarg(call, "value")
         if val_node is not None:
@@ -1365,37 +1388,30 @@ class X64CodeGen:
         edit_id = self.gui_edit_id
         self.gui_edit_id += 1
 
-        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
-        if is_so:
-            lower_txt = edit_text.lower()
-            if "filter" in lower_txt or "filter" in target_name.lower():
-                x, y, w, h = 30, 138, 400, 30
-                edit_id = 102
-            else:
-                x, y, w, h = 30, 55, 650, 35
-                edit_id = 101
+        w = self._extract_kwarg_int(call, "width", 320)
+        h = self._extract_kwarg_int(call, "height", 36)
 
-            if edit_text:
-                self._emit_string_pointer("rcx", edit_text)
-            else:
-                self.emit("xor ecx, ecx")
-            self.emit(f"mov rdx, {x}")
-            self.emit(f"mov r8, {y}")
-            self.emit(f"mov r9, {w}")
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
         else:
-            w, h = 380, 34
-            if edit_text:
-                self._emit_string_pointer("rcx", edit_text)
-            else:
-                self.emit("xor ecx, ecx")
-            self.emit("xor edx, edx", "auto layout X")
-            self.emit("xor r8d, r8d", "auto layout Y")
-            self.emit(f"mov r9, {w}")
-        self.emit("sub rsp, 64")
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
+
+        if edit_text:
+            self._emit_string_pointer("rcx", edit_text)
+        else:
+            self.emit("xor ecx, ecx")
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
+        self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
+        self.emit("sub rsp, 80")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {edit_id}")
+        self.emit("mov [rsp + 48], r11", "parent container HWND")
         self.emit("call _pyfasm_create_edit")
-        self.emit("add rsp, 64")
+        self.emit("add rsp, 80")
 
     def _generate_label_control(self, call: ast.Call, target_name: str) -> None:
         lbl_text = (
@@ -1418,45 +1434,75 @@ class X64CodeGen:
             else:
                 lbl_text = "Label"
 
-        is_so = lbl_text is not None and any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
-        if is_so and lbl_text is not None:
-            x, y, w, h = 30, 20, 350, 28
-            lower_txt = lbl_text.lower()
-            if any(k in lower_txt for k in ("ready", "searching", "found", "status")):
-                x, y, w, h = 30, 630, 920, 25
-            elif any(k in lower_txt for k in ("⚡", "so", "pro", "search pro", "title")):
-                x, y, w, h = 30, 18, 400, 30
-            self._emit_string_pointer("rcx", lbl_text)
-            self.emit(f"mov rdx, {x}")
-            self.emit(f"mov r8, {y}")
-            self.emit(f"mov r9, {w}")
-        else:
-            w, h = 450, 26
-            if dyn_lbl_node is not None:
-                self._generate_expr(dyn_lbl_node)
-                self.emit("mov rcx, rax", "dynamic label text")
-            else:
-                self._emit_string_pointer("rcx", lbl_text or "Label")
-            self.emit("xor edx, edx", "auto layout X")
-            self.emit("xor r8d, r8d", "auto layout Y")
-            self.emit(f"mov r9, {w}")
-        self.emit("sub rsp, 48")
-        self.emit(f"mov qword [rsp + 32], {h}")
-        self.emit("call _pyfasm_create_label")
-        self.emit("add rsp, 48")
+        w = self._extract_kwarg_int(call, "width", 350)
+        h = self._extract_kwarg_int(call, "height", 26)
 
-    def _generate_listbox_control(self, call: ast.Call, target_name: str) -> None:
-        x, y, w, h = 30, 175, 920, 440
-        list_id = 3001
-        self.emit("xor ecx, ecx")
-        self.emit(f"mov rdx, {x}")
-        self.emit(f"mov r8, {y}")
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
+        else:
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
+
+        if dyn_lbl_node is not None:
+            self._generate_expr(dyn_lbl_node)
+            self.emit("mov rcx, rax", "dynamic label text")
+        else:
+            self._emit_string_pointer("rcx", lbl_text or "Label")
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
         self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
         self.emit("sub rsp, 64")
         self.emit(f"mov qword [rsp + 32], {h}")
-        self.emit(f"mov qword [rsp + 40], {list_id}")
-        self.emit("call _pyfasm_create_listbox")
+        self.emit("mov [rsp + 40], r11", "parent container HWND")
+        self.emit("call _pyfasm_create_label")
         self.emit("add rsp, 64")
+
+    def _generate_listbox_control(self, call: ast.Call, target_name: str) -> None:
+        w = self._extract_kwarg_int(call, "width", 450)
+        h = self._extract_kwarg_int(call, "height", 240)
+        list_id = 3001
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
+        else:
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
+        self.emit("xor ecx, ecx")
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
+        self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
+        self.emit("sub rsp, 80")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {list_id}")
+        self.emit("mov [rsp + 48], r11", "parent container HWND")
+        self.emit("call _pyfasm_create_listbox")
+        self.emit("add rsp, 80")
+
+    def _generate_textbox_control(self, call: ast.Call, target_name: str) -> None:
+        w = self._extract_kwarg_int(call, "width", 350)
+        h = self._extract_kwarg_int(call, "height", 190)
+        edit_id = self.gui_edit_id
+        self.gui_edit_id += 1
+        parent_node = self._extract_parent_container_node(call)
+        if parent_node is not None:
+            self._generate_expr(parent_node)
+            self.emit("push rax", "parent container HWND")
+        else:
+            self.emit("push qword [_pyfasm_h_wnd]", "parent container HWND")
+        self.emit("xor ecx, ecx")
+        self.emit("xor edx, edx", "auto layout X")
+        self.emit("xor r8d, r8d", "auto layout Y")
+        self.emit(f"mov r9, {w}")
+        self.emit("pop r11", "parent HWND")
+        self.emit("sub rsp, 80")
+        self.emit(f"mov qword [rsp + 32], {h}")
+        self.emit(f"mov qword [rsp + 40], {edit_id}")
+        self.emit("mov [rsp + 48], r11", "parent container HWND")
+        self.emit("call _pyfasm_create_textbox")
+        self.emit("add rsp, 80")
 
     def _get_runtime_header(self) -> str:
         if self.target in ("win64", "dll"):
@@ -1840,7 +1886,7 @@ include 'functions.inc'
             self.emit("call _pyfasm_init_tray", "initialize native background system tray icon")
             self.emit(f"mov rax, [rbp - {self_slot}]")
             self.emit("mov [_pyfasm_last_gui_instance], rax", "store tray instance pointer")
-        elif is_gui and self.target in ("win64", "dll"):
+        elif is_gui and self.target in ("win64", "dll", "linux", "macos", "apple", "myos"):
             self.emit("call _pyfasm_init_gui", "initialize native GUI system")
             self.emit("call _pyfasm_ensure_window", "ensure native Win32 window is created")
             self.emit(f"mov rax, [rbp - {self_slot}]")
@@ -6658,7 +6704,7 @@ include 'functions.inc'
 
         # Native GUI window geometry & resize handling
         if attr_name in ("geometry", "resize", "setFixedSize", "minsize", "maxsize"):
-            if attr_name in ("resize", "setFixedSize") and len(call.args) >= 2 and self.target in ("win64", "dll"):
+            if attr_name in ("resize", "setFixedSize") and len(call.args) >= 2 and self.target in ("win64", "dll", "linux", "macos", "apple", "myos"):
                 self._generate_expr(call.args[1])
                 self.emit("push rax", "save height")
                 self._generate_expr(call.args[0])
@@ -6668,7 +6714,7 @@ include 'functions.inc'
                 self.emit("call _pyfasm_resize_window")
                 self.emit("add rsp, 32")
                 return
-            if attr_name == "geometry" and call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str) and self.target in ("win64", "dll"):
+            if attr_name == "geometry" and call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str) and self.target in ("win64", "dll", "linux", "macos", "apple", "myos"):
                 m_geo = re.match(r"^\s*(\d+)\s*x\s*(\d+)", call.args[0].value)
                 if m_geo:
                     w, h = int(m_geo.group(1)), int(m_geo.group(2))
@@ -6911,10 +6957,10 @@ include 'functions.inc'
                 self.emit("mov rax, r12")
                 return
 
-        # Check Win32 Native GUI controls
+        # Check Native GUI controls
         is_gui_app = "gui" in self.features or getattr(self.module, "is_modern_gui", False) or getattr(self.module, "is_gui_app", False) or (self.module.ui_spec and not self.module.ui_spec.is_empty())
 
-        if self.target in ("win64", "dll") and is_gui_app:
+        if self.target in ("win64", "dll", "linux", "macos", "apple", "myos") and is_gui_app:
             recv_cls = self.resolve_instance_class(call.func.value) if isinstance(call.func, ast.Attribute) else None
             curr_cls = getattr(self.current_func, "class_name", None)
             is_user_class_method = bool(
@@ -7364,9 +7410,129 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
                 return
 
+            # Layout directives & geometry management
+            if attr_name == "grid" and isinstance(call.func, ast.Attribute):
+                row_val = self._extract_kwarg_int(call, "row", 0)
+                col_val = self._extract_kwarg_int(call, "column", 0) or self._extract_kwarg_int(call, "col", 0)
+                rowspan_val = self._extract_kwarg_int(call, "rowspan", 1)
+                colspan_val = self._extract_kwarg_int(call, "colspan", 1)
+                padx_val = self._extract_padding(call, "padx", 4)
+                pady_val = self._extract_padding(call, "pady", 4)
+                sticky_str = self._get_kwarg_string_val(call, "sticky") or ""
+                sticky_mask = 0
+                s_lower = sticky_str.lower()
+                if "n" in s_lower: sticky_mask |= 1
+                if "s" in s_lower: sticky_mask |= 2
+                if "e" in s_lower: sticky_mask |= 4
+                if "w" in s_lower: sticky_mask |= 8
+                if not sticky_mask and sticky_str:
+                    sticky_mask = 15
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "widget HWND")
+                self.emit(f"mov rdx, {row_val}", "row")
+                self.emit(f"mov r8, {col_val}", "col")
+                self.emit(f"mov r9, {sticky_mask}", "sticky mask")
+                self.emit("sub rsp, 64")
+                self.emit(f"mov qword [rsp + 32], {padx_val}")
+                self.emit(f"mov qword [rsp + 40], {pady_val}")
+                self.emit(f"mov qword [rsp + 48], {colspan_val}")
+                self.emit(f"mov qword [rsp + 56], {rowspan_val}")
+                self.emit("call _pyfasm_widget_set_grid")
+                self.emit("add rsp, 64")
+                return
+
+            if attr_name == "grid_columnconfigure" and isinstance(call.func, ast.Attribute):
+                col_nodes = []
+                if call.args:
+                    first = call.args[0]
+                    if isinstance(first, (ast.Tuple, ast.List)):
+                        col_nodes = [elt.value for elt in first.elts if isinstance(elt, ast.Constant) and isinstance(elt.value, int)]
+                    elif isinstance(first, ast.Constant) and isinstance(first.value, int):
+                        col_nodes = [first.value]
+                if not col_nodes:
+                    col_nodes = [0]
+                weight_val = self._extract_kwarg_int(call, "weight", 0)
+                minsize_val = self._extract_kwarg_int(call, "minsize", 0)
+                self._generate_expr(call.func.value)
+                self.emit("push rax", "container HWND")
+                for c in col_nodes:
+                    self.emit("mov rcx, [rsp]", "container HWND")
+                    self.emit(f"mov rdx, {c}", "col index")
+                    self.emit(f"mov r8, {weight_val}", "weight")
+                    self.emit(f"mov r9, {minsize_val}", "minsize")
+                    self.emit("sub rsp, 32")
+                    self.emit("call _pyfasm_grid_columnconfigure")
+                    self.emit("add rsp, 32")
+                self.emit("pop rax")
+                return
+
+            if attr_name == "grid_rowconfigure" and isinstance(call.func, ast.Attribute):
+                row_nodes = []
+                if call.args:
+                    first = call.args[0]
+                    if isinstance(first, (ast.Tuple, ast.List)):
+                        row_nodes = [elt.value for elt in first.elts if isinstance(elt, ast.Constant) and isinstance(elt.value, int)]
+                    elif isinstance(first, ast.Constant) and isinstance(first.value, int):
+                        row_nodes = [first.value]
+                if not row_nodes:
+                    row_nodes = [0]
+                weight_val = self._extract_kwarg_int(call, "weight", 0)
+                minsize_val = self._extract_kwarg_int(call, "minsize", 0)
+                self._generate_expr(call.func.value)
+                self.emit("push rax", "container HWND")
+                for r in row_nodes:
+                    self.emit("mov rcx, [rsp]", "container HWND")
+                    self.emit(f"mov rdx, {r}", "row index")
+                    self.emit(f"mov r8, {weight_val}", "weight")
+                    self.emit(f"mov r9, {minsize_val}", "minsize")
+                    self.emit("sub rsp, 32")
+                    self.emit("call _pyfasm_grid_rowconfigure")
+                    self.emit("add rsp, 32")
+                self.emit("pop rax")
+                return
+
+            if attr_name == "pack" and isinstance(call.func, ast.Attribute):
+                side_str = self._get_kwarg_string_val(call, "side") or "top"
+                fill_str = self._get_kwarg_string_val(call, "fill") or "none"
+                expand_val = self._extract_kwarg_int(call, "expand", 0)
+                padx_val = self._extract_padding(call, "padx", 4)
+                pady_val = self._extract_padding(call, "pady", 4)
+                side_code = 0 if side_str == "top" else (1 if side_str == "bottom" else (2 if side_str == "left" else 3))
+                fill_code = 0 if fill_str == "none" else (1 if fill_str == "x" else (2 if fill_str == "y" else 3))
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "widget HWND")
+                self.emit(f"mov rdx, {side_code}", "side")
+                self.emit(f"mov r8, {fill_code}", "fill")
+                self.emit(f"mov r9, {expand_val}", "expand")
+                self.emit("sub rsp, 48")
+                self.emit(f"mov qword [rsp + 32], {padx_val}")
+                self.emit(f"mov qword [rsp + 40], {pady_val}")
+                self.emit("call _pyfasm_widget_set_pack")
+                self.emit("add rsp, 48")
+                return
+
+            if attr_name == "place" and isinstance(call.func, ast.Attribute):
+                x_val = self._extract_kwarg_int(call, "x", 0)
+                y_val = self._extract_kwarg_int(call, "y", 0)
+                w_val = self._extract_kwarg_int(call, "width", 0)
+                h_val = self._extract_kwarg_int(call, "height", 0)
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "widget HWND")
+                self.emit(f"mov rdx, {x_val}", "x")
+                self.emit(f"mov r8, {y_val}", "y")
+                self.emit(f"mov r9, {w_val}", "width")
+                self.emit("sub rsp, 48")
+                self.emit(f"mov qword [rsp + 32], {h_val}")
+                self.emit("call _pyfasm_widget_set_place")
+                self.emit("add rsp, 48")
+                return
+
+            if attr_name == "get_tk_widget" and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.func.value)
+                return
+
             # 5. Widget layout / visual configuration directives (safe no-op)
-            if attr_name in ("pack", "grid", "place", "pack_propagate", "grid_propagate",
-                             "grid_columnconfigure", "grid_rowconfigure", "focus_set", "select_range",
+            if attr_name in ("pack_propagate", "grid_propagate", "focus_set", "select_range",
                              "update_idletasks", "iconbitmap", "wm_iconphoto",
                              "set_appearance_mode", "set_default_color_theme", "set_widget_scaling",
                              "bind", "bind_all", "protocol", "title", "geometry", "minsize", "maxsize",
@@ -7412,21 +7578,74 @@ include 'functions.inc'
                 return
 
             # 11. Scrollable frame / list / tabview
-            if any(k in call_name_lower for k in ("ctkscrollableframe", "scrollableframe", "ctktabview", "tabview", "listbox", "qlistwidget", "listview")) or any(k in func_dump_lower for k in ("scrollableframe", "tabview", "listbox")):
+            if any(k in call_name_lower for k in ("ctktabview", "tabview", "listbox", "qlistwidget", "listview", "ctkscrollableframe", "scrollableframe")) or any(k in func_dump_lower for k in ("tabview", "listbox", "scrollableframe")):
                 self._generate_listbox_control(call, call_name_lower)
                 return
 
-            # 12. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox, Flet & Custom controls)
+            # 12. Textbox / Multi-line edit
+            if any(k in call_name_lower for k in ("ctktextbox", "textbox")):
+                self._generate_textbox_control(call, call_name_lower)
+                return
+
+            # 13. Canvas / Matplotlib FigureCanvasTkAgg
+            if any(k == call_name_lower or k in call_name_lower.split(".") for k in ("figurecanvastkagg", "ctkcanvas", "canvas", "tkcanvas")):
+                parent_node = self._extract_kwarg(call, "master")
+                if parent_node is None and len(call.args) > 1:
+                    parent_node = call.args[1]
+                elif parent_node is None and call.args:
+                    first = call.args[0]
+                    if not (isinstance(first, ast.Constant) and isinstance(first.value, (str, int, float, bool))):
+                        parent_node = first
+                if parent_node is not None:
+                    self._generate_expr(parent_node)
+                    self.emit("mov rcx, rax", "parent container HWND")
+                else:
+                    self.emit("mov rcx, [_pyfasm_h_wnd]", "default parent HWND")
+                w_val = self._extract_kwarg_int(call, "width", 640)
+                h_val = self._extract_kwarg_int(call, "height", 540)
+                self.emit(f"mov rdx, {w_val}", "canvas width")
+                self.emit(f"mov r8, {h_val}", "canvas height")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_create_canvas")
+                self.emit("add rsp, 32")
+                return
+
+            # 14. Frames & Cards (CTkFrame, Frame, Card, QWidget, container, etc.)
             if any(k == call_name_lower or k in call_name_lower.split(".") for k in (
-                "ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton",
-                "ctktextbox", "textbox", "canvas", "ctkcanvas", "tkcanvas",
-                "container", "card", "row", "column", "stack", "divider", "verticaldivider",
-                "icon", "image", "appbar", "slider", "ctkslider", "progressbar", "ctkprogressbar",
-                "progressring", "tabs", "tab", "combobox", "ctkcombobox", "optionmenu", "ctkoptionmenu",
-                "scrollableframe", "ctkscrollableframe", "floatingactionbutton"
+                "ctkframe", "frame", "card", "qwidget",
+                "container", "row", "column", "stack"
+            )):
+                parent_node = self._extract_kwarg(call, "master")
+                if parent_node is None and call.args:
+                    first = call.args[0]
+                    if not (isinstance(first, ast.Constant) and isinstance(first.value, (str, int, float, bool))):
+                        parent_node = first
+                if parent_node is not None:
+                    self._generate_expr(parent_node)
+                    self.emit("mov rcx, rax", "parent container HWND")
+                else:
+                    self.emit("mov rcx, [_pyfasm_h_wnd]", "default parent HWND")
+                w_val = self._extract_kwarg_int(call, "width", 380)
+                h_val = self._extract_kwarg_int(call, "height", 600)
+                radius_val = self._extract_kwarg_int(call, "corner_radius", 16)
+                self.emit(f"mov rdx, {w_val}", "frame width")
+                self.emit(f"mov r8, {h_val}", "frame height")
+                self.emit(f"mov r9, {radius_val}", "corner radius")
+                self.emit("sub rsp, 48")
+                self.emit("mov qword [rsp + 32], 0", "fg_color")
+                self.emit("call _pyfasm_create_frame")
+                self.emit("add rsp, 48")
+                return
+
+            # 15. Other auxiliary controls
+            if any(k == call_name_lower or k in call_name_lower.split(".") for k in (
+                "figure", "segmentedbutton", "ctksegmentedbutton",
+                "divider", "verticaldivider", "icon", "image", "appbar", "slider", "ctkslider",
+                "progressbar", "ctkprogressbar", "progressring", "tabs", "tab",
+                "combobox", "ctkcombobox", "optionmenu", "ctkoptionmenu", "floatingactionbutton"
             )):
                 if "gui" in self.features or "tray" in self.features or getattr(self.module, "is_gui_app", False):
-                    self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
+                    self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for auxiliary control")
                 else:
                     self.emit("xor eax, eax", "dummy container handle")
                 return

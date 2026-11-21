@@ -15,16 +15,68 @@ jmp _pyfasm_entry_point
 
 
 def get_myos_runtime_data() -> str:
+    from pyfasm.runtime_common import get_common_runtime_data
     return """
 align 8
 crlf_str        db 13, 10, 0
-minus_str       db '-', 0
-"""
+
+; --- Universal MyOS 10 LFB Framebuffer GUI & Geometry Engine Data ---
+_pyfasm_h_wnd           dq 1
+_pyfasm_last_label_hwnd dq 0
+_pyfasm_last_edit_hwnd  dq 0
+_pyfasm_last_btn_hwnd   dq 0
+_pyfasm_last_list_hwnd  dq 0
+_pyfasm_ctrl_count      dq 0
+_pyfasm_ctrl_hwnds      rq 128
+_pyfasm_ctrl_ids        rd 128
+_pyfasm_ctrl_callbacks  rq 128
+_pyfasm_layout_count    dq 0
+_pyfasm_layout_table    rb 256 * 64
+_pyfasm_container_cfg_count dq 0
+_pyfasm_container_cfg_table rb 32 * 272
+_pyfasm_col_widths      rd 32
+_pyfasm_row_heights     rd 32
+_pyfasm_col_pos         rd 32
+_pyfasm_row_pos         rd 32
+_pyfasm_edit_buf        rb 2048
+_pyfasm_list_items      rb 128 * 64
+_pyfasm_gui_list_count  dq 0
+_pyfasm_gui_list_sel    dq 0
+_pyfasm_chk_state       dq 0
+_pyfasm_win_title       db 'PyFASM MyOS 10 App', 0
+_pyfasm_lfb_base        dq 0xFD000000   ; Default VESA / GOP 32bpp Framebuffer Base in MyOS
+_pyfasm_lfb_width       dd 1024
+_pyfasm_lfb_height      dd 768
+_pyfasm_lfb_pitch       dd 4096
+align 16
+_pyfasm_myos_heap_ptr   dq _pyfasm_myos_heap_base
+_pyfasm_myos_heap_base  rb 16 * 1024 * 1024
+""" + get_common_runtime_data()
 
 
 def get_myos_runtime_code() -> str:
     """Returns native MyOS routines: Serial port I/O & VGA framebuffer output."""
+    from pyfasm.runtime_common import get_common_runtime_code
     return """
+_pyfasm_alloc:
+    ; RCX = bytes to allocate
+    push    rbx
+    add     rcx, 15
+    and     rcx, -16
+    mov     rax, [_pyfasm_myos_heap_ptr]
+    test    rax, rax
+    jnz     .alloc_ok
+    lea     rax, [_pyfasm_myos_heap_base]
+.alloc_ok:
+    lea     rbx, [rax + rcx]
+    mov     [_pyfasm_myos_heap_ptr], rbx
+    pop     rbx
+    ret
+
+_pyfasm_free:
+    xor     eax, eax
+    ret
+
 _pyfasm_init_io:
     ; COM1 Serial Port Init (0x3F8) for debugging in QEMU / MyOS
     mov     dx, 03F9h
@@ -57,6 +109,24 @@ _pyfasm_print_char:
     out     dx, al
     ret
 
+_pyfasm_str_len:
+    ; RCX = pointer to string
+    test    rcx, rcx
+    jz      .sl_zero
+    push    rdi
+    mov     rdi, rcx
+    xor     eax, eax
+    mov     rcx, -1
+    repne   scasb
+    not     rcx
+    dec     rcx
+    mov     rax, rcx
+    pop     rdi
+    ret
+.sl_zero:
+    xor     eax, eax
+    ret
+
 _pyfasm_print_str:
     ; RCX = pointer to string
     test    rcx, rcx
@@ -86,39 +156,17 @@ _pyfasm_print_newline:
     pop     rax
     ret
 
-_pyfasm_print_int:
-    ; RCX = signed integer
-    push    rbx
-    push    rdx
-    push    rdi
+_pyfasm_print_float:
+    ; XMM0 = double
+    push    rbp
+    mov     rbp, rsp
     sub     rsp, 32
-    mov     rax, rcx
-    test    rax, rax
-    jns     .pos
-    push    rax
-    mov     cl, '-'
-    call    _pyfasm_print_char
-    pop     rax
-    neg     rax
-.pos:
-    lea     rdi, [rsp + 24]
-    mov     byte [rdi], 0
-    mov     rbx, 10
-.digits:
-    xor     rdx, rdx
-    div     rbx
-    add     dl, '0'
-    dec     rdi
-    mov     [rdi], dl
-    test    rax, rax
-    jnz     .digits
-
-    mov     rcx, rdi
+    movq    rcx, xmm0
+    call    _pyfasm_float_to_str
+    mov     rcx, rax
     call    _pyfasm_print_str
-    add     rsp, 32
-    pop     rdi
-    pop     rdx
-    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_get_tick_count:
@@ -156,4 +204,390 @@ _pyfasm_atomic_sub:
     lock sub qword [rcx], rdx
     mov     rax, [rcx]
     ret
-"""
+
+_pyfasm_init_gui:
+    mov     qword [_pyfasm_h_wnd], 1
+    mov     rax, 1
+    ret
+
+_pyfasm_set_window_title:
+    mov     rax, 1
+    ret
+
+_pyfasm_create_window:
+    mov     rax, 1
+    mov     [_pyfasm_h_wnd], rax
+    ret
+
+_pyfasm_register_widget:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 32
+
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .reg_done
+
+    test    rdx, rdx
+    jnz     .reg_p_ok
+    mov     rdx, [_pyfasm_h_wnd]
+.reg_p_ok:
+    mov     rax, [_pyfasm_layout_count]
+    xor     ecx, ecx
+.chk_loop:
+    cmp     rcx, rax
+    jge     .add_new
+    shl     rcx, 6
+    lea     rbx, [_pyfasm_layout_table + rcx]
+    shr     rcx, 6
+    cmp     [rbx], rsi
+    je      .update_existing
+    inc     rcx
+    jmp     .chk_loop
+
+.add_new:
+    cmp     rax, 256
+    jge     .reg_done
+    mov     rcx, rax
+    shl     rcx, 6
+    lea     rbx, [_pyfasm_layout_table + rcx]
+    inc     qword [_pyfasm_layout_count]
+
+    mov     [rbx + 0], rsi
+    mov     [rbx + 8], rdx
+    mov     dword [rbx + 16], r8d
+    mov     dword [rbx + 20], 0
+    mov     dword [rbx + 24], 0
+    mov     dword [rbx + 28], 0
+    mov     dword [rbx + 32], 0
+    mov     dword [rbx + 36], 1
+    mov     dword [rbx + 40], 1
+    mov     dword [rbx + 44], 4
+    mov     dword [rbx + 48], 4
+    mov     dword [rbx + 52], r9d
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 56], eax
+    jmp     .reg_done
+
+.update_existing:
+    mov     [rbx + 8], rdx
+    mov     dword [rbx + 16], r8d
+    mov     dword [rbx + 52], r9d
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 56], eax
+
+.reg_done:
+    add     rsp, 32
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_widget_set_grid:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jz      .grid_done
+
+    mov     rax, [_pyfasm_layout_count]
+    xor     r10d, r10d
+.grid_find:
+    cmp     r10, rax
+    jge     .grid_not_found
+    mov     r11, r10
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    cmp     [rbx], rcx
+    je      .grid_found
+    inc     r10
+    jmp     .grid_find
+
+.grid_not_found:
+    cmp     rax, 256
+    jge     .grid_done
+    mov     r11, rax
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    inc     qword [_pyfasm_layout_count]
+    mov     [rbx], rcx
+    mov     r11, [_pyfasm_h_wnd]
+    mov     [rbx + 8], r11
+    mov     dword [rbx + 16], 0
+    mov     dword [rbx + 52], 120
+    mov     dword [rbx + 56], 32
+
+.grid_found:
+    mov     dword [rbx + 20], 1
+    mov     dword [rbx + 24], edx
+    mov     dword [rbx + 28], r8d
+    mov     dword [rbx + 32], r9d
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 44], eax
+    mov     eax, dword [rbp + 56]
+    mov     dword [rbx + 48], eax
+    mov     eax, dword [rbp + 64]
+    test    eax, eax
+    jnz     .grid_cs_ok
+    mov     eax, 1
+.grid_cs_ok:
+    mov     dword [rbx + 36], eax
+    mov     eax, dword [rbp + 72]
+    test    eax, eax
+    jnz     .grid_rs_ok
+    mov     eax, 1
+.grid_rs_ok:
+    mov     dword [rbx + 40], eax
+
+.grid_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_grid_columnconfigure:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jnz     .gcc_c_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.gcc_c_ok:
+    cmp     rdx, 32
+    jae     .gcc_done
+
+    mov     rax, [_pyfasm_container_cfg_count]
+    xor     r10d, r10d
+.gcc_find:
+    cmp     r10, rax
+    jge     .gcc_new
+    mov     r11, r10
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    cmp     [rbx], rcx
+    je      .gcc_set
+    inc     r10
+    jmp     .gcc_find
+
+.gcc_new:
+    cmp     rax, 32
+    jge     .gcc_done
+    mov     r11, rax
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    inc     qword [_pyfasm_container_cfg_count]
+    push    rdi
+    mov     rdi, rbx
+    xor     eax, eax
+    mov     ecx, 34
+    rep     stosq
+    pop     rdi
+    mov     [rbx], rcx
+
+.gcc_set:
+    mov     dword [rbx + 8 + rdx*4], r8d
+
+.gcc_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_grid_rowconfigure:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jnz     .grc_c_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.grc_c_ok:
+    cmp     rdx, 32
+    jae     .grc_done
+
+    mov     rax, [_pyfasm_container_cfg_count]
+    xor     r10d, r10d
+.grc_find:
+    cmp     r10, rax
+    jge     .grc_new
+    mov     r11, r10
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    cmp     [rbx], rcx
+    je      .grc_set
+    inc     r10
+    jmp     .grc_find
+
+.grc_new:
+    cmp     rax, 32
+    jge     .grc_done
+    mov     r11, rax
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    inc     qword [_pyfasm_container_cfg_count]
+    push    rdi
+    mov     rdi, rbx
+    xor     eax, eax
+    mov     ecx, 34
+    rep     stosq
+    pop     rdi
+    mov     [rbx], rcx
+
+.grc_set:
+    mov     dword [rbx + 136 + rdx*4], r8d
+
+.grc_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_widget_set_pack:
+    ret
+
+_pyfasm_widget_set_place:
+    ret
+
+_pyfasm_apply_layout:
+    ret
+
+_pyfasm_create_frame:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 100
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_canvas:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 200
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_label:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 300
+    mov     [_pyfasm_last_label_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_edit:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 400
+    mov     [_pyfasm_last_edit_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_textbox:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 500
+    mov     [_pyfasm_last_edit_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_button:
+    mov     rax, [_pyfasm_ctrl_count]
+    cmp     rax, 128
+    jge     .btn_reg_skip
+    mov     r10, [rbp + 56]
+    mov     r11, [rbp + 64]
+    mov     dword [_pyfasm_ctrl_ids + rax*4], r10d
+    mov     qword [_pyfasm_ctrl_callbacks + rax*8], r11
+.btn_reg_skip:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 600
+    mov     [_pyfasm_last_btn_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_checkbox:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 700
+    mov     [_pyfasm_last_btn_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_create_listbox:
+    mov     rax, [_pyfasm_ctrl_count]
+    add     rax, 800
+    mov     [_pyfasm_last_list_hwnd], rax
+    inc     qword [_pyfasm_ctrl_count]
+    ret
+
+_pyfasm_register_hotkey:
+    mov     rax, 1
+    ret
+
+_pyfasm_get_edit_text:
+    lea     rax, [_pyfasm_edit_buf]
+    ret
+
+_pyfasm_set_text:
+    ret
+
+_pyfasm_checkbox_get:
+    mov     rax, [_pyfasm_chk_state]
+    ret
+
+_pyfasm_checkbox_set:
+    mov     [_pyfasm_chk_state], rdx
+    ret
+
+_pyfasm_listbox_append:
+    ret
+
+_pyfasm_listbox_clear:
+    ret
+
+_pyfasm_listbox_get_selected:
+    lea     rax, [_pyfasm_edit_buf]
+    ret
+
+_pyfasm_canvas_create_line:
+    ret
+
+_pyfasm_canvas_create_text:
+    ret
+
+_pyfasm_wnd_proc:
+    xor     eax, eax
+    ret
+
+_pyfasm_run_window_loop:
+    ; Execute registered button callback if available
+    mov     rcx, [_pyfasm_ctrl_count]
+    xor     rax, rax
+.cb_loop:
+    cmp     rax, rcx
+    jge     .cb_done
+    mov     rdx, qword [_pyfasm_ctrl_callbacks + rax*8]
+    test    rdx, rdx
+    jz      .next_cb
+    push    rax
+    push    rcx
+    call    rdx
+    pop     rcx
+    pop     rax
+    jmp     .cb_done
+.next_cb:
+    inc     rax
+    jmp     .cb_loop
+.cb_done:
+    xor     eax, eax
+    ret
+
+_pyfasm_message_box:
+    mov     rcx, rsi
+    call    _pyfasm_print_str
+    ret
+""" + get_common_runtime_code()

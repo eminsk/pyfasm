@@ -152,6 +152,34 @@ section '.data' data readable writeable
     wszSegoeUI              du 'Segoe UI', 0
     wszConsolas             du 'Consolas', 0
 
+    ; --- PyFASM Universal Geometry Engine & Layout SDK Data ---
+    align 8
+    _pyfasm_card_class_w    du 'PyFasmCardClassW', 0
+    _pyfasm_canvas_class_w  du 'PyFasmCanvasClassW', 0
+    _pyfasm_hbr_canvas      dq 0
+    _pyfasm_hpen_card_border dq 0
+
+    ; Layout Descriptors Table (capacity 256 widgets, 64 bytes per entry)
+    align 16
+    _pyfasm_layout_count    dq 0
+    align 16
+    _pyfasm_layout_table    rb 256 * 64
+
+    ; Container Configuration Table (capacity 32 containers, 272 bytes per entry)
+    align 16
+    _pyfasm_container_cfg_count dq 0
+    align 16
+    _pyfasm_container_cfg_table rb 32 * 272
+
+    ; Temporary geometry calculation buffers (32 cols, 32 rows)
+    align 16
+    _pyfasm_col_widths      rd 32
+    _pyfasm_row_heights     rd 32
+    _pyfasm_col_pos         rd 32
+    _pyfasm_row_pos         rd 32
+    align 16
+    _pyfasm_layout_rc       rb 32
+
     ; Dark Theme GDI Brushes & Attributes
     align 8
     _pyfasm_dark_mode_val   dd 1
@@ -7849,6 +7877,31 @@ _pyfasm_init_gui:
     lea     rcx, [_pyfasm_wc]
     call    [RegisterClassExW]
 
+    ; Create Canvas Background Brush
+    mov     ecx, 001E1616h
+    call    [CreateSolidBrush]
+    mov     [_pyfasm_hbr_canvas], rax
+
+    ; Setup WNDCLASSEXW for Card (PyFasmCardClassW)
+    lea     rax, [_pyfasm_card_wnd_proc]
+    mov     qword [_pyfasm_wc + 8], rax
+    mov     rax, [_pyfasm_hbr_card]
+    mov     qword [_pyfasm_wc + 48], rax
+    lea     rax, [_pyfasm_card_class_w]
+    mov     qword [_pyfasm_wc + 64], rax
+    lea     rcx, [_pyfasm_wc]
+    call    [RegisterClassExW]
+
+    ; Setup WNDCLASSEXW for Canvas (PyFasmCanvasClassW)
+    lea     rax, [_pyfasm_canvas_wnd_proc]
+    mov     qword [_pyfasm_wc + 8], rax
+    mov     rax, [_pyfasm_hbr_canvas]
+    mov     qword [_pyfasm_wc + 48], rax
+    lea     rax, [_pyfasm_canvas_class_w]
+    mov     qword [_pyfasm_wc + 64], rax
+    lea     rcx, [_pyfasm_wc]
+    call    [RegisterClassExW]
+
     ; Also register ANSI class fallback
     lea     rax, [_pyfasm_wnd_class]
     mov     qword [_pyfasm_wc + 64], rax
@@ -8879,86 +8932,1249 @@ _pyfasm_apply_font:
     pop     rbp
     ret
 
-_pyfasm_create_label:
-    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h
+_pyfasm_register_widget:
+    ; RCX = hwnd, RDX = parent, R8 = widget_type, R9 = req_w, [rsp+40] = req_h
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 112
-    and     rsp, -16
-    mov     [rsp + 96], rcx
-    mov     [rsp + 104], rdx
-    mov     [rsp + 80], r8
-    mov     [rsp + 72], r9
+    push    rbx
+    push    rsi
+    sub     rsp, 32
 
-    ; If modern split-view is active and label is targeted at header (y < 60),
-    ; avoid creating overlapping duplicate controls over the header bar
-    cmp     qword [_pyfasm_h_listbox], 0
-    jz      .do_create_label_body
-    cmp     qword [rsp + 80], 60
-    jae     .do_create_label_body
-    xor     eax, eax
+    mov     rsi, rcx        ; hwnd
+    test    rsi, rsi
+    jz      .reg_done
+
+    test    rdx, rdx
+    jnz     .reg_p_ok
+    mov     rdx, [_pyfasm_h_wnd]
+.reg_p_ok:
+    mov     rax, [_pyfasm_layout_count]
+    xor     ecx, ecx
+.chk_loop:
+    cmp     rcx, rax
+    jge     .add_new
+    shl     rcx, 6          ; rcx * 64
+    lea     rbx, [_pyfasm_layout_table + rcx]
+    shr     rcx, 6
+    cmp     [rbx], rsi
+    je      .update_existing
+    inc     rcx
+    jmp     .chk_loop
+
+.add_new:
+    cmp     rax, 256
+    jge     .reg_done
+    mov     rcx, rax
+    shl     rcx, 6
+    lea     rbx, [_pyfasm_layout_table + rcx]
+    inc     qword [_pyfasm_layout_count]
+
+    mov     [rbx + 0], rsi      ; hwnd
+    mov     [rbx + 8], rdx      ; parent_hwnd
+    mov     dword [rbx + 16], r8d ; widget_type
+    mov     dword [rbx + 20], 0   ; layout_mode (0 = none)
+    mov     dword [rbx + 24], 0   ; row
+    mov     dword [rbx + 28], 0   ; col
+    mov     dword [rbx + 32], 0   ; sticky
+    mov     dword [rbx + 36], 1   ; colspan
+    mov     dword [rbx + 40], 1   ; rowspan
+    mov     dword [rbx + 44], 4   ; padx
+    mov     dword [rbx + 48], 4   ; pady
+    mov     dword [rbx + 52], r9d ; req_w
+    mov     eax, dword [rbp + 48] ; req_h
+    mov     dword [rbx + 56], eax
+    mov     dword [rbx + 60], 0
+    jmp     .reg_done
+
+.update_existing:
+    mov     [rbx + 8], rdx      ; update parent
+    mov     dword [rbx + 16], r8d ; update widget_type
+    mov     dword [rbx + 52], r9d ; update req_w
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 56], eax
+
+.reg_done:
+    add     rsp, 32
+    pop     rsi
+    pop     rbx
     mov     rsp, rbp
     pop     rbp
     ret
-.do_create_label_body:
-    mov     rax, [rbp + 48]
-    test    rax, rax
-    jnz     .lbl_h_ok
-    mov     rax, 25
-.lbl_h_ok:
-    mov     [rsp + 64], rax
+
+_pyfasm_widget_set_grid:
+    ; RCX = widget HWND, RDX = row, R8 = col, R9 = sticky
+    ; [rbp+48] = padx, [rbp+56] = pady, [rbp+64] = colspan, [rbp+72] = rowspan
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jz      .grid_done
+
+    mov     rax, [_pyfasm_layout_count]
+    xor     r10d, r10d
+.grid_find:
+    cmp     r10, rax
+    jge     .grid_not_found
+    mov     r11, r10
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    cmp     [rbx], rcx
+    je      .grid_found
+    inc     r10
+    jmp     .grid_find
+
+.grid_not_found:
+    cmp     rax, 256
+    jge     .grid_done
+    mov     r11, rax
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    inc     qword [_pyfasm_layout_count]
+    mov     [rbx], rcx
+    mov     r11, [_pyfasm_h_wnd]
+    mov     [rbx + 8], r11
+    mov     dword [rbx + 16], 0
+    mov     dword [rbx + 52], 120
+    mov     dword [rbx + 56], 32
+
+.grid_found:
+    mov     dword [rbx + 20], 1   ; layout_mode = 1 (grid)
+    mov     dword [rbx + 24], edx ; row
+    mov     dword [rbx + 28], r8d ; col
+    mov     dword [rbx + 32], r9d ; sticky
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 44], eax ; padx
+    mov     eax, dword [rbp + 56]
+    mov     dword [rbx + 48], eax ; pady
+    mov     eax, dword [rbp + 64]
+    test    eax, eax
+    jnz     .grid_cs_ok
+    mov     eax, 1
+.grid_cs_ok:
+    mov     dword [rbx + 36], eax ; colspan
+    mov     eax, dword [rbp + 72]
+    test    eax, eax
+    jnz     .grid_rs_ok
+    mov     eax, 1
+.grid_rs_ok:
+    mov     dword [rbx + 40], eax ; rowspan
+
+.grid_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_grid_columnconfigure:
+    ; RCX = container HWND, RDX = col index, R8 = weight, R9 = minsize
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jnz     .gcc_c_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.gcc_c_ok:
+    cmp     rdx, 32
+    jae     .gcc_done
+
+    mov     rax, [_pyfasm_container_cfg_count]
+    xor     r10d, r10d
+.gcc_find:
+    cmp     r10, rax
+    jge     .gcc_new
+    mov     r11, r10
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    cmp     [rbx], rcx
+    je      .gcc_set
+    inc     r10
+    jmp     .gcc_find
+
+.gcc_new:
+    cmp     rax, 32
+    jge     .gcc_done
+    mov     r11, rax
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    inc     qword [_pyfasm_container_cfg_count]
+    push    rdi
+    mov     rdi, rbx
+    xor     eax, eax
+    mov     ecx, 34
+    rep     stosq
+    pop     rdi
+    mov     [rbx], rcx
+
+.gcc_set:
+    mov     dword [rbx + 8 + rdx*4], r8d
+
+.gcc_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_grid_rowconfigure:
+    ; RCX = container HWND, RDX = row index, R8 = weight, R9 = minsize
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jnz     .grc_c_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.grc_c_ok:
+    cmp     rdx, 32
+    jae     .grc_done
+
+    mov     rax, [_pyfasm_container_cfg_count]
+    xor     r10d, r10d
+.grc_find:
+    cmp     r10, rax
+    jge     .grc_new
+    mov     r11, r10
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    cmp     [rbx], rcx
+    je      .grc_set
+    inc     r10
+    jmp     .grc_find
+
+.grc_new:
+    cmp     rax, 32
+    jge     .grc_done
+    mov     r11, rax
+    imul    r11, 272
+    lea     rbx, [_pyfasm_container_cfg_table + r11]
+    inc     qword [_pyfasm_container_cfg_count]
+    push    rdi
+    mov     rdi, rbx
+    xor     eax, eax
+    mov     ecx, 34
+    rep     stosq
+    pop     rdi
+    mov     [rbx], rcx
+
+.grc_set:
+    mov     dword [rbx + 136 + rdx*4], r8d
+
+.grc_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_widget_set_pack:
+    ; RCX = widget HWND, RDX = side, R8 = fill, R9 = expand, [rbp+48] = padx, [rbp+56] = pady
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jz      .pack_done
+
+    mov     rax, [_pyfasm_layout_count]
+    xor     r10d, r10d
+.pack_find:
+    cmp     r10, rax
+    jge     .pack_done
+    mov     r11, r10
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    cmp     [rbx], rcx
+    je      .pack_found
+    inc     r10
+    jmp     .pack_find
+
+.pack_found:
+    mov     dword [rbx + 20], 2 ; layout_mode = pack
+    mov     dword [rbx + 24], edx ; side
+    mov     dword [rbx + 28], r8d ; fill
+    mov     dword [rbx + 32], r9d ; expand
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 44], eax
+    mov     eax, dword [rbp + 56]
+    mov     dword [rbx + 48], eax
+
+.pack_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_widget_set_place:
+    ; RCX = widget HWND, RDX = x, R8 = y, R9 = width, [rbp+48] = height
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+
+    test    rcx, rcx
+    jz      .place_done
+
+    mov     rax, [_pyfasm_layout_count]
+    xor     r10d, r10d
+.place_find:
+    cmp     r10, rax
+    jge     .place_done
+    mov     r11, r10
+    shl     r11, 6
+    lea     rbx, [_pyfasm_layout_table + r11]
+    cmp     [rbx], rcx
+    je      .place_found
+    inc     r10
+    jmp     .place_find
+
+.place_found:
+    mov     dword [rbx + 20], 3 ; layout_mode = place
+    mov     dword [rbx + 24], edx ; x
+    mov     dword [rbx + 28], r8d ; y
+    mov     dword [rbx + 52], r9d ; width
+    mov     eax, dword [rbp + 48]
+    mov     dword [rbx + 56], eax ; height
+
+.place_done:
+    add     rsp, 32
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_apply_layout:
+    ; RCX = container HWND (if 0, uses [_pyfasm_h_wnd])
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 128
+    and     rsp, -16
+
+    test    rcx, rcx
+    jnz     .al_cont_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.al_cont_ok:
+    test    rcx, rcx
+    jz      .al_exit
+    mov     [rsp + 64], rcx
+
+    lea     rdx, [rsp + 80]
+    call    [GetClientRect]
+    test    eax, eax
+    jz      .al_exit
+
+    mov     eax, dword [rsp + 88]
+    sub     eax, dword [rsp + 80]
+    mov     [rsp + 96], eax
+    cmp     eax, 10
+    jl      .al_exit
+
+    mov     eax, dword [rsp + 92]
+    sub     eax, dword [rsp + 84]
+    mov     [rsp + 100], eax
+    cmp     eax, 10
+    jl      .al_exit
+
+    lea     rdi, [_pyfasm_col_widths]
+    xor     eax, eax
+    mov     ecx, 32
+    rep     stosd
+    lea     rdi, [_pyfasm_row_heights]
+    xor     eax, eax
+    mov     ecx, 32
+    rep     stosd
+
+    mov     r14, [_pyfasm_container_cfg_count]
+    xor     r15, r15
+    xor     r12, r12
+.find_cfg:
+    cmp     r15, r14
+    jge     .cfg_done
+    mov     rax, r15
+    imul    rax, 272
+    lea     rax, [_pyfasm_container_cfg_table + rax]
+    mov     rdx, [rsp + 64]
+    cmp     [rax], rdx
+    jne     .next_cfg
+    mov     r12, rax
+    jmp     .cfg_done
+.next_cfg:
+    inc     r15
+    jmp     .find_cfg
+.cfg_done:
+
+    mov     r14, [_pyfasm_layout_count]
+    xor     r15, r15
+.pass1_loop:
+    cmp     r15, r14
+    jge     .pass1_done
+    mov     rax, r15
+    shl     rax, 6
+    lea     rbx, [_pyfasm_layout_table + rax]
+
+    mov     rdx, [rsp + 64]
+    cmp     [rbx + 8], rdx
+    jne     .pass1_next
+
+    cmp     dword [rbx + 20], 1
+    jne     .pass1_next
+
+    mov     ecx, dword [rbx + 28]
+    cmp     ecx, 32
+    jae     .pass1_row
+    cmp     dword [rbx + 36], 1
+    jne     .pass1_row
+    mov     eax, dword [rbx + 52]
+    add     eax, dword [rbx + 44]
+    add     eax, dword [rbx + 44]
+    cmp     eax, dword [_pyfasm_col_widths + rcx*4]
+    jle     .pass1_row
+    mov     dword [_pyfasm_col_widths + rcx*4], eax
+
+.pass1_row:
+    mov     ecx, dword [rbx + 24]
+    cmp     ecx, 32
+    jae     .pass1_next
+    cmp     dword [rbx + 40], 1
+    jne     .pass1_next
+    mov     eax, dword [rbx + 56]
+    add     eax, dword [rbx + 48]
+    add     eax, dword [rbx + 48]
+    cmp     eax, dword [_pyfasm_row_heights + rcx*4]
+    jle     .pass1_next
+    mov     dword [_pyfasm_row_heights + rcx*4], eax
+
+.pass1_next:
+    inc     r15
+    jmp     .pass1_loop
+.pass1_done:
+
+    xor     esi, esi
+    xor     edi, edi
+    xor     ecx, ecx
+.sum_cols:
+    cmp     ecx, 32
+    jge     .sum_cols_done
+    xor     eax, eax
+    test    r12, r12
+    jz      .no_c_wt
+    mov     eax, dword [r12 + 8 + rcx*4]
+.no_c_wt:
+    test    eax, eax
+    jnz     .has_c_wt
+    add     edi, dword [_pyfasm_col_widths + rcx*4]
+    jmp     .next_sum_col
+.has_c_wt:
+    add     esi, eax
+.next_sum_col:
+    inc     ecx
+    jmp     .sum_cols
+.sum_cols_done:
+
+    test    esi, esi
+    jz      .cols_pos_calc
+    mov     eax, dword [rsp + 96]
+    sub     eax, edi
+    jle     .cols_pos_calc
+    mov     r13d, eax
+    xor     ecx, ecx
+.distrib_cols:
+    cmp     ecx, 32
+    jge     .cols_pos_calc
+    mov     eax, dword [r12 + 8 + rcx*4]
+    test    eax, eax
+    jz      .next_distrib_col
+    imul    rax, r13
+    xor     edx, edx
+    div     rsi
+    mov     dword [_pyfasm_col_widths + rcx*4], eax
+.next_distrib_col:
+    inc     ecx
+    jmp     .distrib_cols
+
+.cols_pos_calc:
+    mov     dword [_pyfasm_col_pos], 0
+    mov     ecx, 1
+.cpos_loop:
+    cmp     ecx, 32
+    jge     .cpos_done
+    mov     eax, dword [_pyfasm_col_pos + (rcx-1)*4]
+    add     eax, dword [_pyfasm_col_widths + (rcx-1)*4]
+    mov     dword [_pyfasm_col_pos + rcx*4], eax
+    inc     ecx
+    jmp     .cpos_loop
+.cpos_done:
+
+    xor     esi, esi
+    xor     edi, edi
+    xor     ecx, ecx
+.sum_rows:
+    cmp     ecx, 32
+    jge     .sum_rows_done
+    xor     eax, eax
+    test    r12, r12
+    jz      .no_r_wt
+    mov     eax, dword [r12 + 136 + rcx*4]
+.no_r_wt:
+    test    eax, eax
+    jnz     .has_r_wt
+    add     edi, dword [_pyfasm_row_heights + rcx*4]
+    jmp     .next_sum_row
+.has_r_wt:
+    add     esi, eax
+.next_sum_row:
+    inc     ecx
+    jmp     .sum_rows
+.sum_rows_done:
+
+    test    esi, esi
+    jz      .rows_pos_calc
+    mov     eax, dword [rsp + 100]
+    sub     eax, edi
+    jle     .rows_pos_calc
+    mov     r13d, eax
+    xor     ecx, ecx
+.distrib_rows:
+    cmp     ecx, 32
+    jge     .rows_pos_calc
+    mov     eax, dword [r12 + 136 + rcx*4]
+    test    eax, eax
+    jz      .next_distrib_row
+    imul    rax, r13
+    xor     edx, edx
+    div     rsi
+    mov     dword [_pyfasm_row_heights + rcx*4], eax
+.next_distrib_row:
+    inc     ecx
+    jmp     .distrib_rows
+
+.rows_pos_calc:
+    mov     dword [_pyfasm_row_pos], 0
+    mov     ecx, 1
+.rpos_loop:
+    cmp     ecx, 32
+    jge     .rpos_done
+    mov     eax, dword [_pyfasm_row_pos + (rcx-1)*4]
+    add     eax, dword [_pyfasm_row_heights + (rcx-1)*4]
+    mov     dword [_pyfasm_row_pos + rcx*4], eax
+    inc     ecx
+    jmp     .rpos_loop
+.rpos_done:
+
+    mov     r14, [_pyfasm_layout_count]
+    xor     r15, r15
+.pass2_loop:
+    cmp     r15, r14
+    jge     .pass2_done
+    mov     rax, r15
+    shl     rax, 6
+    lea     rbx, [_pyfasm_layout_table + rax]
+
+    mov     rdx, [rsp + 64]
+    cmp     [rbx + 8], rdx
+    jne     .pass2_next
+
+    mov     eax, dword [rbx + 20]
+    cmp     eax, 1
+    je      .p2_grid
+    cmp     eax, 3
+    je      .p2_place
+    jmp     .pass2_next
+
+.p2_place:
+    mov     rcx, [rbx]
+    xor     edx, edx
+    movsxd  r8, dword [rbx + 24]
+    movsxd  r9, dword [rbx + 28]
+    movsxd  rax, dword [rbx + 52]
+    mov     [rsp + 32], rax
+    movsxd  rax, dword [rbx + 56]
+    mov     [rsp + 40], rax
+    mov     qword [rsp + 48], 14h
+    call    [SetWindowPos]
+    jmp     .check_child_frame
+
+.p2_grid:
+    mov     r10d, dword [rbx + 28]
+    cmp     r10d, 32
+    jae     .pass2_next
+    mov     r11d, dword [rbx + 24]
+    cmp     r11d, 32
+    jae     .pass2_next
+
+    mov     eax, dword [_pyfasm_col_pos + r10*4]
+    add     eax, dword [rbx + 44]
+    mov     [rsp + 104], eax
+
+    mov     eax, dword [_pyfasm_row_pos + r11*4]
+    add     eax, dword [rbx + 48]
+    mov     [rsp + 108], eax
+
+    mov     ecx, dword [rbx + 36]
+    test    ecx, ecx
+    jnz     .cs_ok
+    mov     ecx, 1
+.cs_ok:
+    xor     edx, edx
+    mov     r8d, r10d
+.w_sum:
+    test    ecx, ecx
+    jz      .w_sum_done
+    cmp     r8d, 32
+    jae     .w_sum_done
+    add     edx, dword [_pyfasm_col_widths + r8*4]
+    inc     r8d
+    dec     ecx
+    jmp     .w_sum
+.w_sum_done:
+    sub     edx, dword [rbx + 44]
+    sub     edx, dword [rbx + 44]
+    cmp     edx, 4
+    jge     .w_cell_ok
+    mov     edx, 4
+.w_cell_ok:
+    mov     [rsp + 112], edx
+
+    mov     ecx, dword [rbx + 40]
+    test    ecx, ecx
+    jnz     .rs_ok
+    mov     ecx, 1
+.rs_ok:
+    xor     edx, edx
+    mov     r8d, r11d
+.h_sum:
+    test    ecx, ecx
+    jz      .h_sum_done
+    cmp     r8d, 32
+    jae     .h_sum_done
+    add     edx, dword [_pyfasm_row_heights + r8*4]
+    inc     r8d
+    dec     ecx
+    jmp     .h_sum
+.h_sum_done:
+    sub     edx, dword [rbx + 48]
+    sub     edx, dword [rbx + 48]
+    cmp     edx, 4
+    jge     .h_cell_ok
+    mov     edx, 4
+.h_cell_ok:
+    mov     [rsp + 116], edx
+
+    mov     r8d, dword [rbx + 32]
+    mov     eax, [rsp + 104]
+    mov     edx, [rsp + 112]
+    test    r8d, 4
+    jz      .chk_w_only
+    test    r8d, 8
+    jnz     .x_calc_done
+    mov     edx, dword [rbx + 52]
+    cmp     edx, [rsp + 112]
+    jle     .e_fit
+    mov     edx, [rsp + 112]
+.e_fit:
+    mov     eax, [rsp + 104]
+    add     eax, [rsp + 112]
+    sub     eax, edx
+    jmp     .x_calc_done
+.chk_w_only:
+    test    r8d, 8
+    jz      .center_x
+    mov     edx, dword [rbx + 52]
+    cmp     edx, [rsp + 112]
+    jle     .x_calc_done
+    mov     edx, [rsp + 112]
+    jmp     .x_calc_done
+.center_x:
+    mov     edx, dword [rbx + 52]
+    cmp     edx, [rsp + 112]
+    jle     .cx_fit
+    mov     edx, [rsp + 112]
+.cx_fit:
+    mov     eax, [rsp + 112]
+    sub     eax, edx
+    shr     eax, 1
+    add     eax, [rsp + 104]
+.x_calc_done:
+    mov     [rsp + 104], eax
+    mov     [rsp + 112], edx
+
+    mov     eax, [rsp + 108]
+    mov     edx, [rsp + 116]
+    test    r8d, 1
+    jz      .chk_s_only
+    test    r8d, 2
+    jnz     .y_calc_done
+    mov     edx, dword [rbx + 56]
+    cmp     edx, [rsp + 116]
+    jle     .y_calc_done
+    mov     edx, [rsp + 116]
+    jmp     .y_calc_done
+.chk_s_only:
+    test    r8d, 2
+    jz      .center_y
+    mov     edx, dword [rbx + 56]
+    cmp     edx, [rsp + 116]
+    jle     .s_fit
+    mov     edx, [rsp + 116]
+.s_fit:
+    mov     eax, [rsp + 108]
+    add     eax, [rsp + 116]
+    sub     eax, edx
+    jmp     .y_calc_done
+.center_y:
+    mov     edx, dword [rbx + 56]
+    cmp     edx, [rsp + 116]
+    jle     .cy_fit
+    mov     edx, [rsp + 116]
+.cy_fit:
+    mov     eax, [rsp + 116]
+    sub     eax, edx
+    shr     eax, 1
+    add     eax, [rsp + 108]
+.y_calc_done:
+    mov     [rsp + 108], eax
+    mov     [rsp + 116], edx
+
+    mov     rcx, [rbx]
+    xor     edx, edx
+    movsxd  r8, dword [rsp + 104]
+    movsxd  r9, dword [rsp + 108]
+    movsxd  rax, dword [rsp + 112]
+    mov     [rsp + 32], rax
+    movsxd  rax, dword [rsp + 116]
+    mov     [rsp + 40], rax
+    mov     qword [rsp + 48], 14h
+    call    [SetWindowPos]
+
+.check_child_frame:
+    cmp     dword [rbx + 16], 2
+    jne     .pass2_next
+    mov     rcx, [rbx]
+    call    _pyfasm_apply_layout
+
+.pass2_next:
+    inc     r15
+    jmp     .pass2_loop
+.pass2_done:
+
+.al_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_frame:
+    ; RCX = parent_hwnd, RDX = w, R8 = h, R9 = corner_radius, [rbp+48] = fg_color
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 128
+    and     rsp, -16
 
     call    _pyfasm_ensure_window
 
-    mov     rcx, [rsp + 96]
-    lea     rdx, [_pyfasm_wide_buf]
-    mov     r8, 1024
-    call    _pyfasm_utf8_to_wide
-
-    mov     r10, [rsp + 104]
-    test    r10, r10
-    jnz     .lbl_x_ok
-    mov     r10, [_pyfasm_layout_curr_x]
-.lbl_x_ok:
-    mov     r11, [rsp + 80]
-    test    r11, r11
-    jnz     .lbl_y_ok
-    mov     r11, [_pyfasm_layout_curr_y]
-    add     qword [_pyfasm_layout_curr_y], 32
-.lbl_y_ok:
-    mov     rax, [rsp + 72]
-    test    rax, rax
-    jnz     .lbl_w_ok
-    mov     rax, 400
-.lbl_w_ok:
+    test    rcx, rcx
+    jnz     .cf_p_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.cf_p_ok:
+    mov     [rsp + 64], rcx
+    test    rdx, rdx
+    jnz     .cf_w_ok
+    mov     rdx, 380
+.cf_w_ok:
+    mov     [rsp + 72], rdx
+    test    r8, r8
+    jnz     .cf_h_ok
+    mov     r8, 550
+.cf_h_ok:
+    mov     [rsp + 80], r8
 
     xor     ecx, ecx
-    lea     rdx, [szStaticClassW]
-    lea     r8, [_pyfasm_wide_buf]
-    mov     r9d, 50000000h          ; WS_CHILD | WS_VISIBLE | SS_LEFT
-    mov     [rsp + 32], r10
-    mov     [rsp + 40], r11
+    lea     rdx, [_pyfasm_card_class_w]
+    xor     r8, r8
+    mov     r9d, 56000000h      ; WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    mov     rax, [rsp + 72]
     mov     [rsp + 48], rax
-    mov     rax, [rsp + 64]
+    mov     rax, [rsp + 80]
     mov     [rsp + 56], rax
-    mov     rax, [_pyfasm_h_wnd]
+    mov     rax, [rsp + 64]
     mov     [rsp + 64], rax
     mov     qword [rsp + 72], 0
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
-    mov     [_pyfasm_last_label_hwnd], rax
-    mov     rcx, rax
-    call    _pyfasm_apply_font
+    mov     [rsp + 96], rax
 
-    mov     rax, [_pyfasm_last_label_hwnd]
+    mov     rcx, rax
+    mov     rdx, [rsp + 64]
+    mov     r8, 2
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 80]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 96]
     mov     rsp, rbp
     pop     rbp
     ret
 
-_pyfasm_create_edit:
-    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
+_pyfasm_create_canvas:
+    ; RCX = parent_hwnd, RDX = w, R8 = h
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 128
+    and     rsp, -16
+
+    call    _pyfasm_ensure_window
+
+    test    rcx, rcx
+    jnz     .cca_p_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.cca_p_ok:
+    mov     [rsp + 64], rcx
+    test    rdx, rdx
+    jnz     .cca_w_ok
+    mov     rdx, 600
+.cca_w_ok:
+    mov     [rsp + 72], rdx
+    test    r8, r8
+    jnz     .cca_h_ok
+    mov     r8, 500
+.cca_h_ok:
+    mov     [rsp + 80], r8
+
+    xor     ecx, ecx
+    lea     rdx, [_pyfasm_canvas_class_w]
+    xor     r8, r8
+    mov     r9d, 56000000h      ; WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    mov     rax, [rsp + 72]
+    mov     [rsp + 48], rax
+    mov     rax, [rsp + 80]
+    mov     [rsp + 56], rax
+    mov     rax, [rsp + 64]
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 0
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     [rsp + 96], rax
+
+    mov     rcx, rax
+    mov     rdx, [rsp + 64]
+    mov     r8, 6
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 80]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 96]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_card_wnd_proc:
+    ; RCX = hWnd, RDX = uMsg, R8 = wParam, R9 = lParam
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 128
+    and     rsp, -16
+
+    mov     [rsp + 64], rcx
+    mov     [rsp + 72], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 88], r9
+
+    cmp     edx, 000Fh          ; WM_PAINT
+    je      .cwp_paint
+    cmp     edx, 0014h          ; WM_ERASEBKGND
+    je      .cwp_erasebkgnd
+    cmp     edx, 0111h          ; WM_COMMAND
+    je      .cwp_command
+    cmp     edx, 0138h          ; WM_CTLCOLORSTATIC
+    je      .cwp_ctlcolor
+    cmp     edx, 0133h          ; WM_CTLCOLOREDIT
+    je      .cwp_ctlcolor
+    cmp     edx, 0135h          ; WM_CTLCOLORBTN
+    je      .cwp_ctlcolor
+
+    call    [DefWindowProcW]
+    jmp     .cwp_exit
+
+.cwp_erasebkgnd:
+    mov     eax, 1
+    jmp     .cwp_exit
+
+.cwp_command:
+    mov     rcx, [rsp + 64]
+    call    [GetParent]
+    test    rax, rax
+    jz      .cwp_cmd_zero
+    mov     rcx, rax
+    mov     edx, 0111h
+    mov     r8, [rsp + 80]
+    mov     r9, [rsp + 88]
+    call    [SendMessageW]
+.cwp_cmd_zero:
+    xor     eax, eax
+    jmp     .cwp_exit
+
+.cwp_ctlcolor:
+    mov     rcx, [rsp + 80]
+    mov     edx, 00ECE8E1h
+    call    [SetTextColor]
+    mov     rcx, [rsp + 80]
+    mov     edx, 1
+    call    [SetBkMode]
+    mov     rax, [_pyfasm_hbr_card]
+    test    rax, rax
+    jnz     .cwp_exit
+    mov     rax, [_pyfasm_hbr_bg]
+    jmp     .cwp_exit
+
+.cwp_paint:
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 96]
+    call    [BeginPaint]
+    test    rax, rax
+    jz      .cwp_paint_done
+    mov     rbx, rax
+
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 32]
+    call    [GetClientRect]
+
+    mov     rcx, rbx
+    lea     rdx, [rsp + 32]
+    mov     r8, [_pyfasm_hbr_card]
+    test    r8, r8
+    jnz     .cwp_fill
+    mov     r8, [_pyfasm_hbr_bg]
+.cwp_fill:
+    call    [FillRect]
+
+    mov     rcx, rbx
+    mov     rdx, [_pyfasm_hpen_slate]
+    test    rdx, rdx
+    jz      .cwp_end_paint
+    call    [SelectObject]
+    mov     rsi, rax
+
+    mov     rcx, rbx
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9, r9
+    call    [MoveToEx]
+
+    mov     rcx, rbx
+    mov     edx, dword [rsp + 40]
+    dec     edx
+    xor     r8d, r8d
+    call    [LineTo]
+
+    mov     rcx, rbx
+    mov     edx, dword [rsp + 40]
+    dec     edx
+    mov     r8d, dword [rsp + 44]
+    dec     r8d
+    call    [LineTo]
+
+    mov     rcx, rbx
+    xor     edx, edx
+    mov     r8d, dword [rsp + 44]
+    dec     r8d
+    call    [LineTo]
+
+    mov     rcx, rbx
+    xor     edx, edx
+    xor     r8d, r8d
+    call    [LineTo]
+
+    mov     rcx, rbx
+    mov     rdx, rsi
+    call    [SelectObject]
+
+.cwp_end_paint:
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 96]
+    call    [EndPaint]
+
+.cwp_paint_done:
+    xor     eax, eax
+
+.cwp_exit:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_wnd_proc:
+    ; RCX = hWnd, RDX = uMsg, R8 = wParam, R9 = lParam
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 160
+    and     rsp, -16
+
+    mov     [rsp + 64], rcx
+    mov     [rsp + 72], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 88], r9
+
+    cmp     edx, 000Fh          ; WM_PAINT
+    je      .cv_paint
+    cmp     edx, 0014h          ; WM_ERASEBKGND
+    je      .cv_erasebkgnd
+
+    call    [DefWindowProcW]
+    jmp     .cv_exit
+
+.cv_erasebkgnd:
+    mov     eax, 1
+    jmp     .cv_exit
+
+.cv_paint:
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 96]
+    call    [BeginPaint]
+    test    rax, rax
+    jz      .cv_paint_done
+    mov     rbx, rax
+
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 32]
+    call    [GetClientRect]
+
+    mov     r12d, dword [rsp + 40]
+    mov     r13d, dword [rsp + 44]
+    cmp     r12d, 20
+    jl      .cv_endpaint
+    cmp     r13d, 20
+    jl      .cv_endpaint
+
+    ; Background #16161e
+    mov     ecx, 001E1616h
+    call    [CreateSolidBrush]
+    mov     rsi, rax
+    mov     rcx, rbx
+    lea     rdx, [rsp + 32]
+    mov     r8, rsi
+    call    [FillRect]
+    mov     rcx, rsi
+    call    [DeleteObject]
+
+    ; Grid lines (#24283b)
+    mov     ecx, 0
+    mov     edx, 1
+    mov     r8d, 003B2824h
+    call    [CreatePen]
+    mov     r14, rax
+    mov     rcx, rbx
+    mov     rdx, r14
+    call    [SelectObject]
+    mov     r15, rax
+
+    mov     esi, 50
+.vgrid_loop:
+    cmp     esi, r12d
+    jge     .vgrid_done
+    mov     rcx, rbx
+    movsxd  rdx, esi
+    xor     r8d, r8d
+    xor     r9, r9
+    call    [MoveToEx]
+    mov     rcx, rbx
+    movsxd  rdx, esi
+    movsxd  r8, r13d
+    call    [LineTo]
+    add     esi, 60
+    jmp     .vgrid_loop
+.vgrid_done:
+
+    mov     esi, 40
+.hgrid_loop:
+    cmp     esi, r13d
+    jge     .hgrid_done
+    mov     rcx, rbx
+    xor     edx, edx
+    movsxd  r8, esi
+    xor     r9, r9
+    call    [MoveToEx]
+    mov     rcx, rbx
+    movsxd  rdx, r12d
+    movsxd  r8, esi
+    call    [LineTo]
+    add     esi, 45
+    jmp     .hgrid_loop
+.hgrid_done:
+
+    mov     rcx, rbx
+    mov     rdx, r15
+    call    [SelectObject]
+    mov     rcx, r14
+    call    [DeleteObject]
+
+    ; Coordinate axes (#565f89)
+    mov     ecx, 0
+    mov     edx, 2
+    mov     r8d, 00895F56h
+    call    [CreatePen]
+    mov     r14, rax
+    mov     rcx, rbx
+    mov     rdx, r14
+    call    [SelectObject]
+    mov     r15, rax
+
+    mov     esi, r13d
+    shr     esi, 1
+    mov     rcx, rbx
+    mov     edx, 40
+    movsxd  r8, esi
+    xor     r9, r9
+    call    [MoveToEx]
+    mov     rcx, rbx
+    mov     edx, r12d
+    sub     edx, 40
+    movsxd  r8, esi
+    call    [LineTo]
+
+    mov     edi, r12d
+    shr     edi, 1
+    mov     rcx, rbx
+    movsxd  rdx, edi
+    mov     r8d, 30
+    xor     r9, r9
+    call    [MoveToEx]
+    mov     rcx, rbx
+    movsxd  rdx, edi
+    mov     r8d, r13d
+    sub     r8d, 30
+    call    [LineTo]
+
+    mov     rcx, rbx
+    mov     rdx, r15
+    call    [SelectObject]
+    mov     rcx, r14
+    call    [DeleteObject]
+
+    ; Dynamic math curve (#7aa2f7)
+    mov     ecx, 0
+    mov     edx, 3
+    mov     r8d, 00F7A27Ah
+    call    [CreatePen]
+    mov     r14, rax
+    mov     rcx, rbx
+    mov     rdx, r14
+    call    [SelectObject]
+    mov     r15, rax
+
+    mov     esi, 50
+    mov     rcx, rbx
+    movsxd  rdx, esi
+    mov     r8d, r13d
+    shr     r8d, 1
+    add     r8d, 120
+    xor     r9, r9
+    call    [MoveToEx]
+
+.curve_loop:
+    cmp     esi, r12d
+    jge     .curve_done
+    mov     eax, esi
+    mov     ecx, r12d
+    shr     ecx, 1
+    sub     eax, ecx
+    imul    eax, eax
+    cdq
+    mov     ecx, 260
+    idiv    ecx
+    mov     r8d, r13d
+    shr     r8d, 1
+    add     r8d, 120
+    sub     r8d, eax
+    cmp     r8d, 20
+    jge     .c_ymin_ok
+    mov     r8d, 20
+.c_ymin_ok:
+    mov     ecx, r13d
+    sub     ecx, 20
+    cmp     r8d, ecx
+    jle     .c_ymax_ok
+    mov     r8d, ecx
+.c_ymax_ok:
+    mov     rcx, rbx
+    movsxd  rdx, esi
+    call    [LineTo]
+    add     esi, 4
+    jmp     .curve_loop
+.curve_done:
+
+    mov     rcx, rbx
+    mov     rdx, r15
+    call    [SelectObject]
+    mov     rcx, r14
+    call    [DeleteObject]
+
+.cv_endpaint:
+    mov     rcx, [rsp + 64]
+    lea     rdx, [rsp + 96]
+    call    [EndPaint]
+
+.cv_paint_done:
+    xor     eax, eax
+
+.cv_exit:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_label:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = parent_hwnd
     push    rbp
     mov     rbp, rsp
     sub     rsp, 128
@@ -8969,90 +10185,74 @@ _pyfasm_create_edit:
     mov     [rsp + 72], r9
     mov     rax, [rbp + 48]
     test    rax, rax
-    jnz     .edt_h_ok
-    mov     rax, 35
-.edt_h_ok:
+    jnz     .lbl_h_ok
+    mov     rax, 24
+.lbl_h_ok:
     mov     [rsp + 64], rax
     mov     rax, [rbp + 56]
     test    rax, rax
-    jnz     .edt_id_ok
-    mov     rax, 100
-.edt_id_ok:
+    jnz     .lbl_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.lbl_p_ok:
     mov     [rsp + 112], rax
 
     call    _pyfasm_ensure_window
 
-    ; Check if search edit already created in split view
-    cmp     qword [rsp + 112], 101      ; Search Entry ID
-    jne     .chk_filter_id
-    cmp     qword [_pyfasm_h_search_edit], 0
-    jz      .do_create_edt
-    mov     rax, [_pyfasm_h_search_edit]
-    mov     rsp, rbp
-    pop     rbp
-    ret
-
-.chk_filter_id:
-    cmp     qword [rsp + 112], 102      ; Filter Entry ID
-    jne     .do_create_edt
-    cmp     qword [_pyfasm_h_filter_edit], 0
-    jz      .do_create_edt
-    mov     rax, [_pyfasm_h_filter_edit]
-    mov     rsp, rbp
-    pop     rbp
-    ret
-
-.do_create_edt:
     mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .lbl_empty_txt
     lea     rdx, [_pyfasm_wide_buf]
     mov     r8, 1024
     call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .lbl_txt_ready
+.lbl_empty_txt:
+    xor     r8, r8
+.lbl_txt_ready:
 
     mov     r10, [rsp + 104]
-    test    r10, r10
-    jnz     .edt_x_ok
-    mov     r10, [_pyfasm_layout_curr_x]
-.edt_x_ok:
     mov     r11, [rsp + 80]
-    test    r11, r11
-    jnz     .edt_y_ok
-    mov     r11, [_pyfasm_layout_curr_y]
-    add     qword [_pyfasm_layout_curr_y], 42
-.edt_y_ok:
     mov     rax, [rsp + 72]
     test    rax, rax
-    jnz     .edt_w_ok
-    mov     rax, 600
-.edt_w_ok:
+    jnz     .lbl_w_ok
+    mov     rax, 300
+.lbl_w_ok:
 
-    mov     ecx, 200h               ; WS_EX_CLIENTEDGE
-    lea     rdx, [szEditClassW]
-    lea     r8, [_pyfasm_wide_buf]
-    mov     r9d, 50810080h          ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
+    xor     ecx, ecx
+    lea     rdx, [szStaticClassW]
+    mov     r9d, 50000000h      ; WS_CHILD | WS_VISIBLE | SS_LEFT
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
     mov     rax, [rsp + 64]
     mov     [rsp + 56], rax
-    mov     rax, [_pyfasm_h_wnd]
-    mov     [rsp + 64], rax
     mov     rax, [rsp + 112]
-    mov     [rsp + 72], rax
+    mov     [rsp + 64], rax
+    mov     qword [rsp + 72], 0
     mov     rax, [_pyfasm_h_inst]
     mov     [rsp + 80], rax
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
-    mov     [_pyfasm_last_edit_hwnd], rax
+    mov     [_pyfasm_last_label_hwnd], rax
+    mov     [rsp + 120], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    mov     rax, [_pyfasm_last_edit_hwnd]
+    mov     rcx, [rsp + 120]
+    mov     rdx, [rsp + 112]
+    xor     r8d, r8d
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 120]
     mov     rsp, rbp
     pop     rbp
     ret
 
-_pyfasm_create_button:
-    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn
+_pyfasm_create_edit:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = parent_hwnd
     push    rbp
     mov     rbp, rsp
     sub     rsp, 144
@@ -9063,8 +10263,178 @@ _pyfasm_create_button:
     mov     [rsp + 72], r9
     mov     rax, [rbp + 48]
     test    rax, rax
+    jnz     .edt_h_ok
+    mov     rax, 32
+.edt_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .edt_id_ok
+    mov     rax, 100
+.edt_id_ok:
+    mov     [rsp + 112], rax
+    mov     rax, [rbp + 64]
+    test    rax, rax
+    jnz     .edt_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.edt_p_ok:
+    mov     [rsp + 120], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .edt_empty_txt
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .edt_txt_ready
+.edt_empty_txt:
+    xor     r8, r8
+.edt_txt_ready:
+
+    mov     r10, [rsp + 104]
+    mov     r11, [rsp + 80]
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .edt_w_ok
+    mov     rax, 300
+.edt_w_ok:
+
+    mov     ecx, 200h           ; WS_EX_CLIENTEDGE
+    lea     rdx, [szEditClassW]
+    mov     r9d, 50810080h      ; WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
+    mov     rax, [rsp + 120]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 112]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     [_pyfasm_last_edit_hwnd], rax
+    mov     [rsp + 128], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    mov     rcx, [rsp + 128]
+    mov     rdx, [rsp + 120]
+    mov     r8, 1
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 128]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_textbox:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = parent_hwnd
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 144
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
+    jnz     .tb_h_ok
+    mov     rax, 180
+.tb_h_ok:
+    mov     [rsp + 64], rax
+    mov     rax, [rbp + 56]
+    test    rax, rax
+    jnz     .tb_id_ok
+    mov     rax, 100
+.tb_id_ok:
+    mov     [rsp + 112], rax
+    mov     rax, [rbp + 64]
+    test    rax, rax
+    jnz     .tb_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.tb_p_ok:
+    mov     [rsp + 120], rax
+
+    call    _pyfasm_ensure_window
+
+    mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .tb_empty_txt
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8, 1024
+    call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .tb_txt_ready
+.tb_empty_txt:
+    xor     r8, r8
+.tb_txt_ready:
+
+    mov     r10, [rsp + 104]
+    mov     r11, [rsp + 80]
+    mov     rax, [rsp + 72]
+    test    rax, rax
+    jnz     .tb_w_ok
+    mov     rax, 340
+.tb_w_ok:
+
+    mov     ecx, 200h           ; WS_EX_CLIENTEDGE
+    lea     rdx, [szEditClassW]
+    mov     r9d, 50A10844h      ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL
+    mov     [rsp + 32], r10
+    mov     [rsp + 40], r11
+    mov     [rsp + 48], rax
+    mov     rax, [rsp + 64]
+    mov     [rsp + 56], rax
+    mov     rax, [rsp + 120]
+    mov     [rsp + 64], rax
+    mov     rax, [rsp + 112]
+    mov     [rsp + 72], rax
+    mov     rax, [_pyfasm_h_inst]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0
+    call    [CreateWindowExW]
+    mov     [_pyfasm_last_edit_hwnd], rax
+    mov     [rsp + 128], rax
+    mov     rcx, rax
+    call    _pyfasm_apply_font
+
+    mov     rcx, [rsp + 128]
+    mov     rdx, [rsp + 120]
+    mov     r8, 1
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 128]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_create_button:
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn, [rbp+72] = parent_hwnd
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 160
+    and     rsp, -16
+    mov     [rsp + 96], rcx
+    mov     [rsp + 104], rdx
+    mov     [rsp + 80], r8
+    mov     [rsp + 72], r9
+    mov     rax, [rbp + 48]
+    test    rax, rax
     jnz     .btn_h_ok
-    mov     rax, 35
+    mov     rax, 34
 .btn_h_ok:
     mov     [rsp + 64], rax
     mov     rax, [rbp + 56]
@@ -9076,62 +10446,44 @@ _pyfasm_create_button:
     mov     [rsp + 112], rax
     mov     rax, [rbp + 64]
     mov     [rsp + 120], rax
+    mov     rax, [rbp + 72]
+    test    rax, rax
+    jnz     .btn_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.btn_p_ok:
+    mov     [rsp + 128], rax
 
     call    _pyfasm_ensure_window
 
-    ; Check if Search or Clear button already created
-    cmp     qword [rsp + 112], 1001      ; Search Button ID
-    jne     .chk_clear_id
-    cmp     qword [_pyfasm_h_search_btn], 0
-    jz      .do_create_btn
-    mov     rax, [_pyfasm_h_search_btn]
-    mov     rsp, rbp
-    pop     rbp
-    ret
-
-.chk_clear_id:
-    cmp     qword [rsp + 112], 1002      ; Clear Button ID
-    jne     .do_create_btn
-    cmp     qword [_pyfasm_h_clear_btn], 0
-    jz      .do_create_btn
-    mov     rax, [_pyfasm_h_clear_btn]
-    mov     rsp, rbp
-    pop     rbp
-    ret
-
-.do_create_btn:
     mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .btn_empty_txt
     lea     rdx, [_pyfasm_wide_buf]
     mov     r8, 1024
     call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .btn_txt_ready
+.btn_empty_txt:
+    xor     r8, r8
+.btn_txt_ready:
 
     mov     r10, [rsp + 104]
-    test    r10, r10
-    jnz     .btn_x_ok
-    mov     r10, [_pyfasm_layout_curr_x]
-.btn_x_ok:
     mov     r11, [rsp + 80]
-    test    r11, r11
-    jnz     .btn_y_ok
-    mov     r11, [_pyfasm_layout_curr_y]
-    add     qword [_pyfasm_layout_curr_y], 42
-.btn_y_ok:
     mov     rax, [rsp + 72]
     test    rax, rax
     jnz     .btn_w_ok
-    mov     rax, 110
+    mov     rax, 120
 .btn_w_ok:
 
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
-    lea     r8, [_pyfasm_wide_buf]
-    mov     r9d, 50010000h          ; WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
+    mov     r9d, 50010000h      ; WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
     mov     rax, [rsp + 64]
     mov     [rsp + 56], rax
-    mov     rax, [_pyfasm_h_wnd]
+    mov     rax, [rsp + 128]
     mov     [rsp + 64], rax
     mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
@@ -9140,32 +10492,40 @@ _pyfasm_create_button:
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
     mov     [_pyfasm_last_btn_hwnd], rax
+    mov     [rsp + 136], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    ; Register control id, hwnd, and optional button callback
     mov     rcx, [_pyfasm_ctrl_count]
     cmp     rcx, 128
-    jge     .skip_btn_cb_reg
+    jge     .skip_btn_cb
     mov     r8, [rsp + 112]
     mov     r9, [rsp + 120]
     mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
     mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
-    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rax, [rsp + 136]
     mov     qword [_pyfasm_ctrl_hwnds + rcx*8], rax
     inc     qword [_pyfasm_ctrl_count]
-.skip_btn_cb_reg:
+.skip_btn_cb:
 
-    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rcx, [rsp + 136]
+    mov     rdx, [rsp + 128]
+    mov     r8, 3
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 136]
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_create_checkbox:
-    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn
+    ; RCX = text, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = callback_fn, [rbp+72] = parent_hwnd
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 144
+    sub     rsp, 160
     and     rsp, -16
     mov     [rsp + 96], rcx
     mov     [rsp + 104], rdx
@@ -9174,7 +10534,7 @@ _pyfasm_create_checkbox:
     mov     rax, [rbp + 48]
     test    rax, rax
     jnz     .chk_h_ok
-    mov     rax, 30
+    mov     rax, 28
 .chk_h_ok:
     mov     [rsp + 64], rax
     mov     rax, [rbp + 56]
@@ -9186,41 +10546,44 @@ _pyfasm_create_checkbox:
     mov     [rsp + 112], rax
     mov     rax, [rbp + 64]
     mov     [rsp + 120], rax
+    mov     rax, [rbp + 72]
+    test    rax, rax
+    jnz     .chk_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.chk_p_ok:
+    mov     [rsp + 128], rax
 
     call    _pyfasm_ensure_window
 
     mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .chk_empty_txt
     lea     rdx, [_pyfasm_wide_buf]
     mov     r8, 1024
     call    _pyfasm_utf8_to_wide
+    lea     r8, [_pyfasm_wide_buf]
+    jmp     .chk_txt_ready
+.chk_empty_txt:
+    xor     r8, r8
+.chk_txt_ready:
 
     mov     r10, [rsp + 104]
-    test    r10, r10
-    jnz     .chk_x_ok
-    mov     r10, [_pyfasm_layout_curr_x]
-.chk_x_ok:
     mov     r11, [rsp + 80]
-    test    r11, r11
-    jnz     .chk_y_ok
-    mov     r11, [_pyfasm_layout_curr_y]
-    add     qword [_pyfasm_layout_curr_y], 36
-.chk_y_ok:
     mov     rax, [rsp + 72]
     test    rax, rax
     jnz     .chk_w_ok
-    mov     rax, 220
+    mov     rax, 200
 .chk_w_ok:
 
     xor     ecx, ecx
     lea     rdx, [szButtonClassW]
-    lea     r8, [_pyfasm_wide_buf]
-    mov     r9d, 50010003h          ; WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX
+    mov     r9d, 50010003h      ; WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
     mov     rax, [rsp + 64]
     mov     [rsp + 56], rax
-    mov     rax, [_pyfasm_h_wnd]
+    mov     rax, [rsp + 128]
     mov     [rsp + 64], rax
     mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
@@ -9229,32 +10592,40 @@ _pyfasm_create_checkbox:
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
     mov     [_pyfasm_last_btn_hwnd], rax
+    mov     [rsp + 136], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    ; Register control id, hwnd, and optional checkbox callback
     mov     rcx, [_pyfasm_ctrl_count]
     cmp     rcx, 128
-    jge     .skip_chk_cb_reg
+    jge     .skip_chk_cb
     mov     r8, [rsp + 112]
     mov     r9, [rsp + 120]
     mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
     mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
-    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rax, [rsp + 136]
     mov     qword [_pyfasm_ctrl_hwnds + rcx*8], rax
     inc     qword [_pyfasm_ctrl_count]
-.skip_chk_cb_reg:
+.skip_chk_cb:
 
-    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     rcx, [rsp + 136]
+    mov     rdx, [rsp + 128]
+    mov     r8, 4
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 136]
     mov     rsp, rbp
     pop     rbp
     ret
 
 _pyfasm_create_listbox:
-    ; RCX = 0, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id
+    ; RCX = 0, RDX = x, R8 = y, R9 = w, [rbp+48] = h, [rbp+56] = id, [rbp+64] = parent_hwnd
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 128
+    sub     rsp, 144
     and     rsp, -16
     mov     [rsp + 104], rdx
     mov     [rsp + 80], r8
@@ -9262,7 +10633,7 @@ _pyfasm_create_listbox:
     mov     rax, [rbp + 48]
     test    rax, rax
     jnz     .lb_h_ok
-    mov     rax, 420
+    mov     rax, 240
 .lb_h_ok:
     mov     [rsp + 64], rax
     mov     rax, [rbp + 56]
@@ -9271,45 +10642,33 @@ _pyfasm_create_listbox:
     mov     rax, 3001
 .lb_id_ok:
     mov     [rsp + 112], rax
+    mov     rax, [rbp + 64]
+    test    rax, rax
+    jnz     .lb_p_ok
+    mov     rax, [_pyfasm_h_wnd]
+.lb_p_ok:
+    mov     [rsp + 120], rax
 
     call    _pyfasm_ensure_window
 
-    ; If main listbox already exists, reuse it to prevent huge gray overlapping rectangle!
-    cmp     qword [_pyfasm_h_listbox], 0
-    jz      .do_create_lb
-    mov     rax, [_pyfasm_h_listbox]
-    mov     rsp, rbp
-    pop     rbp
-    ret
-
-.do_create_lb:
     mov     r10, [rsp + 104]
-    test    r10, r10
-    jnz     .lb_x_ok
-    mov     r10, [_pyfasm_layout_curr_x]
-.lb_x_ok:
     mov     r11, [rsp + 80]
-    test    r11, r11
-    jnz     .lb_y_ok
-    mov     r11, [_pyfasm_layout_curr_y]
-    add     qword [_pyfasm_layout_curr_y], 430
-.lb_y_ok:
     mov     rax, [rsp + 72]
     test    rax, rax
     jnz     .lb_w_ok
-    mov     rax, 920
+    mov     rax, 400
 .lb_w_ok:
 
-    mov     ecx, 200h               ; WS_EX_CLIENTEDGE
+    mov     ecx, 200h           ; WS_EX_CLIENTEDGE
     lea     rdx, [szListBoxClassW]
     xor     r8, r8
-    mov     r9d, 50A10141h          ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_HASSTRINGS
+    mov     r9d, 50A10141h      ; WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_HASSTRINGS
     mov     [rsp + 32], r10
     mov     [rsp + 40], r11
     mov     [rsp + 48], rax
     mov     rax, [rsp + 64]
     mov     [rsp + 56], rax
-    mov     rax, [_pyfasm_h_wnd]
+    mov     rax, [rsp + 120]
     mov     [rsp + 64], rax
     mov     rax, [rsp + 112]
     mov     [rsp + 72], rax
@@ -9318,10 +10677,19 @@ _pyfasm_create_listbox:
     mov     qword [rsp + 88], 0
     call    [CreateWindowExW]
     mov     [_pyfasm_last_list_hwnd], rax
+    mov     [rsp + 128], rax
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    mov     rax, [_pyfasm_last_list_hwnd]
+    mov     rcx, [rsp + 128]
+    mov     rdx, [rsp + 120]
+    mov     r8, 5
+    mov     r9, [rsp + 72]
+    mov     rax, [rsp + 64]
+    mov     [rsp + 32], rax
+    call    _pyfasm_register_widget
+
+    mov     rax, [rsp + 128]
     mov     rsp, rbp
     pop     rbp
     ret
@@ -9775,13 +11143,22 @@ _pyfasm_run_window_loop:
     and     rsp, -16
 
     cmp     qword [_pyfasm_h_wnd], 0
-    jne     .start_msg_loop
+    jne     .start_msg_loop_ready
 
     ; Window was not created yet, create it now!
     xor     ecx, ecx
     xor     edx, edx
     xor     r8d, r8d
     call    _pyfasm_create_window
+
+.start_msg_loop_ready:
+    mov     rcx, [_pyfasm_h_wnd]
+    call    _pyfasm_apply_layout
+    mov     rcx, [_pyfasm_h_wnd]
+    mov     edx, 5                  ; SW_SHOW
+    call    [ShowWindow]
+    mov     rcx, [_pyfasm_h_wnd]
+    call    [UpdateWindow]
 
 .start_msg_loop:
     lea     rcx, [_pyfasm_msg]
@@ -9821,6 +11198,8 @@ _pyfasm_wnd_proc:
 
     cmp     edx, 2                  ; WM_DESTROY
     je      .wnd_destroy
+    cmp     edx, 5                  ; WM_SIZE (0x0005)
+    je      .wnd_size
     cmp     edx, 14h                ; WM_ERASEBKGND (0x0014)
     je      .wnd_erasebkgnd
     cmp     edx, 2Ch                ; WM_MEASUREITEM (0x002C)
@@ -9841,6 +11220,16 @@ _pyfasm_wnd_proc:
     je      .wnd_hotkey
 
     call    [DefWindowProcW]
+    jmp     .wnd_proc_ret
+
+.wnd_size:
+    mov     rcx, [_pyfasm_h_wnd]
+    call    _pyfasm_apply_layout
+    mov     rcx, [_pyfasm_h_wnd]
+    xor     edx, edx
+    mov     r8d, 1
+    call    [InvalidateRect]
+    xor     eax, eax
     jmp     .wnd_proc_ret
 
 .wnd_erasebkgnd:
@@ -11748,7 +13137,9 @@ section '.idata' import data readable writeable
            AdjustWindowRectEx, 'AdjustWindowRectEx', \\
            InvalidateRect, 'InvalidateRect', \\
            BeginPaint, 'BeginPaint', \\
-           EndPaint, 'EndPaint'
+           EndPaint, 'EndPaint', \\
+           GetParent, 'GetParent', \\
+           SetParent, 'SetParent'
 
     import gdi32, \\
            CreateSolidBrush, 'CreateSolidBrush', \\
