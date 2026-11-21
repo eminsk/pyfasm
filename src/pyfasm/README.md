@@ -7,82 +7,47 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pyfasm64?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pyfasm64/)
 [![CI](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eminsk/pyfasm/actions/workflows/ci.yml)
-[![Conda-Forge PR](https://img.shields.io/github/pulls/detail/state/conda-forge/staged-recipes/35444?label=Conda-Forge%20PR&logo=condaforge)](https://github.com/conda-forge/staged-recipes/pull/35444)
+[![Conda-Forge](https://img.shields.io/conda/vn/conda-forge/pyfasm64.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm64)
 [![Debian Package](https://img.shields.io/github/v/release/eminsk/pyfasm?include_prereleases&label=Debian%20.deb&logo=debian)](https://github.com/eminsk/pyfasm/releases)
 [![Python: 3.8 - 3.16](https://img.shields.io/badge/Python-3.8%20--%203.16-blue.svg?style=flat)](https://python.org)
 [![No-GIL: 3.13t - 3.16t](https://img.shields.io/badge/No--GIL-3.13t%20--%203.16t-success.svg?style=flat)](https://peps.python.org/pep-0703/)
-[![PyPy: 3.8 - 3.12](https://img.shields.io/badge/PyPy-3.8%20--%203.12-yellow.svg?style=flat)](https://pypy.org)
 [![Targets: Windows | Linux | macOS | DLL](https://img.shields.io/badge/Targets-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20DLL-purple.svg?style=flat)]()
 [![Backend: Flat Assembler x64](https://img.shields.io/badge/Backend-FASM%20x64%20v1.73.36-red.svg?style=flat)](https://flatassembler.net)
-[![FASM Forum](https://img.shields.io/badge/FASM%20Board-Official%20Topic-blue.svg)](https://board.flatassembler.net/topic.php?t=24431)
-[![GitHub Stars](https://img.shields.io/github/stars/eminsk/pyfasm?style=flat&logo=github)](https://github.com/eminsk/pyfasm/stargazers)
-[![GitHub Issues](https://img.shields.io/github/issues/eminsk/pyfasm?style=flat&color=red&logo=github)](https://github.com/eminsk/pyfasm/issues)
-[![GitHub Discussions](https://img.shields.io/badge/Discussions-Join_Community-blue?style=flat&logo=github)](https://github.com/eminsk/pyfasm/discussions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](https://github.com/eminsk/pyfasm/blob/main/LICENSE)
-[![Donate USDT](https://img.shields.io/badge/Donate-USDT_(TRC20)-26A17B?style=flat&logo=tether&logoColor=white)](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P)
-
-> ### 🤝 Community, Issues & Support
-> - 🐛 **Found a bug, compiler issue, or edge case?** Please [Open an Issue](https://github.com/eminsk/pyfasm/issues) — bug reports and platform patches are tracked and resolved quickly!
-> - 💬 **Questions, cross-compilation ideas, or new architectures?** Join our [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions).
-> - 🏛️ **Official Community Topic:** [Flat Assembler Board (board.flatassembler.net)](https://board.flatassembler.net/topic.php?t=24431)
-> - ⭐ **Find PyFASM64 useful?** Give it a star on GitHub — it helps more developers discover the compiler!
-> - 📖 **Documentation:** Read online on GitHub, or use the CLI: `pyfasm64 docs` (English) or `pyfasm64 docs --ru` (Russian).
-> - ☕ **Support development (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
-
-**PyFASM64** (package: `pyfasm64`, legacy alias: `pyfasm`) is a high-performance cross-platform native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It generates tiny, self-contained standalone binaries with **zero runtime overhead**, **no virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
-
-It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (3.13t–3.16t)**, and **PyPy (3.8–3.12)**. PyFASM64 produces native binaries without external dependencies across native target formats: **Windows** (`.exe`, `.dll`), **Linux** (ELF64), and **Apple macOS** (Mach-O 64).
-
-> 💡 **100% Backward Compatibility**: PyFASM64 preserves every existing capability and workflow of classic PyFASM:
-> - **Dual CLI Commands**: Both `pyfasm64` and `pyfasm` commands are installed and supported out of the box.
-> - **Dual Python Imports**: Both `import pyfasm64` and `import pyfasm` work seamlessly.
-> - **Zero Breaking Changes**: All compiler options, multi-module imports, targets (`win64`, `linux`, `macos`, `dll`), benchmarks, and the native bundler operate with complete backward compatibility.
 
 ---
 
-## What's New in v1.0.0 (Production Release Milestone)
+**PyFASM64** (package: `pyfasm64`, alias: `pyfasm`) is an industrial-grade native compiler that translates Python code directly into pure **x86_64 Flat Assembler (FASM)** machine code. It produces ultra-compact, self-contained standalone executables and shared libraries with **zero runtime overhead**, **no Python virtual machine**, and **complete elimination of the Global Interpreter Lock (Zero-GIL)**.
 
-- **Native Python GUI Ecosystem Parity**:
-  - Direct native Win64 compilation for `tkinter`, `customtkinter`, `PyQt5`, `PyQt6` / `PySide6`, and `flet`.
-  - Native Windows GDI controls (labels, buttons, entry inputs, checkboxes, sliders, canvases), dark-mode styling, dynamic geometry / layout management, window resize/show/destroy lifecycle, and event callbacks.
-  - Native `StringVar` data binding and Canvas vector drawing (`create_line`, `create_rectangle`, `create_oval`, `create_text`).
-- **Native 2D Game Engine (`pygame`)**:
-  - Full native x86-64 GDI double-buffered backbuffer rendering with zero external DLLs or heavyweight runtime engines.
-  - `pygame.display` (`set_mode`, `set_caption`, `flip`, `update`), `pygame.event` (`get`, `poll`, `QUIT`, `KEYDOWN`, `KEYUP`, `MOUSEBUTTONDOWN`, `MOUSEBUTTONUP`), and `pygame.key` (`get_pressed`, arrow keys, space, escape, WASD).
-  - High-performance `pygame.Rect` geometry and collision engine (`colliderect`, `collidepoint`, `contains`, `clamp`, `inflate`, `x`, `y`, `w`, `h`, `centerx`, `centery`, `right`, `bottom`).
-  - Native `pygame.draw` (antialiased/solid `rect`, `circle`, `line`, `polygon`), `pygame.time.Clock` (`tick` with microsecond-accurate Win32 timer pacing), and `pygame.font` raster text blitting.
-- **Native Async Web APIs (`FastAPI` & `uvicorn`)**:
-  - Direct native compilation of FastAPI applications (`FastAPI()`, `@app.get(...)`, `@app.post(...)`, `@app.put(...)`, `@app.delete(...)`, `uvicorn.run(app, host=..., port=...)`).
-  - High-throughput native Win64 Winsock2 non-blocking/threaded HTTP/1.1 server.
-  - Native RFC-8259 JSON parser & serializer for complex request bodies and responses (dictionaries, lists, floats, ints, booleans, nulls, and nested structures) with automated memory inspection and Content-Length multi-chunk streaming.
-- **Recursive Nested Closures & Function Aliases**:
-  - Support for recursive nested functions (`def _fib(n): ... _fib(n-1)`), mutually-recursive sibling functions (`is_even` / `is_odd`), and capturing closures without `W3001` / `E3001` unresolved symbol diagnostics.
-  - Function-alias type propagation across variable assignments (`fn = my_func; res = fn(...)`).
-- **Reflected Binary Magic Methods & Advanced F-String Format Specifiers**:
-  - Full support for reflected dunders (`__radd__`, `__rsub__`, `__rmul__`, `__rtruediv__`, `__rfloordiv__`, `__rmod__`) and `__abs__`.
-  - Comprehensive f-string format specifications (`:.Nf`, `:N.Mf`, `:x`, `:X`, `:b`, `:o`, `:0Nd`, `:Nd`) and `!r` `repr()` conversions.
-- **Production Milestone**: 100% test suite pass rate (152/152 tests) across CPython 3.8–3.16 and Free-Threaded No-GIL Python.
+```
+Python Source Code (3.8 – 3.16t)
+        │
+        ▼ (AST Analysis & Type Propagation)
+Semantic Intermediate Representation
+        │
+        ▼ (Target Selector: Windows / Linux / macOS)
+Pure x86_64 FASM Assembly (No libc / No VM)
+        │
+        ▼ (Bundled FASM Modern SDK Assembler)
+Standalone Native Binary (.exe / .elf / .macho / .dll) [~2.5 KB]
+```
 
 ---
 
-## What's New in v0.4.0
+## Highlights in v1.1.0
 
-- **v0.4.0 Full UTF-8/Cyrillic Identifiers & Strings, Polymorphic OOP, Dunders & Lexical Closures**:
-  - Collision-free Cyrillic/Unicode identifiers for classes, functions, and variables, plus UTF-8 codepoint `len()`, indexing `s[i]` (including negative indices), slicing `s[start:stop:step]`, and Cyrillic `.upper()`/`.lower()` (including `Ё`/`ё`).
-  - Memory-address-free printing and formatting across typed/heterogeneous lists, 2D lists, tuples, dicts, sets, loops, f-strings, `str()`/`int()`/`float()` casts, and `.split()`.
-  - Production OOP with runtime class tags (`PYFCLSTG`), polymorphic virtual method dispatch (`_pyfasm_vcall_*`), `@staticmethod`, `@classmethod` (with dynamic `cls(...)`), `isinstance()`/`issubclass()`, and wired dunders (`__call__`, `__bool__`, `__neg__`/`__pos__`/`__invert__`, `__iadd__`..`__ixor__`, `__enter__`/`__exit__`, `__iter__`/`__next__` + `StopIteration`).
-  - Real lexical closures (`PYFCLOSU`) for capturing `lambda` and nested `def` functions (including recursive/mutually-recursive nested functions and function-alias type inference) across direct calls, higher-order indirect calls, `map()`, and `filter()`.
-- **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`, reflected binary dunders `__radd__`..`__rmod__`, `__abs__`), `try`/`except`, `with`, `match`/`case`, `input()`, f-string `!r` & format specifiers (`:.Nf`, `:x`, `:X`, `:b`, `:o`, `:0Nd`), and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
-- **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
-- **Native Win32 Desktop GUI, 2D Games & Web Frameworks**: Compiles `tkinter`, `customtkinter`, `PyQt5`, `PyQt6`/`PySide6`, `flet`, `pystray`, `pygame` (double-buffered GDI backbuffer + event/input/Rect engine), and `FastAPI`/`uvicorn` (Winsock2 HTTP/1.1 + RFC-8259 JSON server) directly to native Win64 binaries.
-- **v0.3.4 Windows UTF-8 Console & F-String Fixes**:
-  - Automatic Windows console UTF-8 (`CP_UTF8` / `WriteConsoleW` / `ReadConsoleW`) with pipe-safe `WriteFile` / `ReadFile` fallback so Cyrillic and Unicode `input()` / `print()` render cleanly without mojibake.
-  - Proper `TYPE_STR` inference for `input()`, full `+` string concatenation for `ast.JoinedStr` f-strings, and native `float` (`_pyfasm_float_to_str`) / `__str__` formatting inside f-strings.
-- **v0.3.3 Runtime, ABI, Diagnostics & Packaging Hardening**:
-  - Full Microsoft x64 callee-saved register preservation in generated functions and Win64/Linux/macOS runtime routines, plus dummy-safe PE64 `.reloc` sections for ASLR and simultaneous multi-DLL loading via `ctypes`.
-  - Exact Python floor division (`//`) and modulo (`%`) sign semantics, exact IEEE-754 float literal pooling, zero-padded `print_float`, thread-safe heap-allocated `str(int)`, and bounded dictionary/set probing with tombstone reuse.
-  - Structured rustc/clang-style compiler diagnostics (`error[E1001]`–`E4002`, `warning[W2004]`–`W3001`), pre-flight validation command `pyfasm64 check`, and `--strict` mode.
-  - PEP 561 `py.typed` markers, `python -m pyfasm64` / `python -m pyfasm` execution, `pyfasm64 --version`, and reliable `--no-asm` / `--dir-mode` builds.
+* **Python 3.14 & 3.15 Native Support**:
+  * PEP 695 `type` aliases (`type Vector = list[int]`) and generic functions/classes (`def f[T](x: T):`).
+  * High-performance SIMD/scalar `math.sumprod(p, q)`, chunking with `itertools.batched(seq, n)`, and zero-overhead `os.cpu_count()`.
+  * Compile-time version folding: expressions like `sys.version_info >= (3, 14)` evaluate during compilation, pruning dead branches before emitting machine code.
+* **Dynamic Python Version Detection**:
+  * Automatically inspects the host Python environment (e.g. Python 3.15.2 Free-Threaded) and emits tailored constants for `sys.version`, `sys.version_info`, `sys.platform`, and `sys.byteorder`.
+  * `sys._is_gil_enabled()` natively returns `0`.
+* **Zero Hardcoded Overrides**:
+  * All applications (including complex CustomTkinter, Flet, Tkinter, and PyQt GUI layouts) compile authentically and directly from source AST to native machine instructions.
+* **Expanded CLI Flags**:
+  * Added `--gui` / `-w` (Win32 GUI subsystem), `--console` / `-c` (console subsystem), `--python-version` / `--py-ver`, `--optimize` / `-O`, and `--verbose` / `-v`.
+* **Full Changelog**: See [CHANGELOG.md](https://github.com/eminsk/pyfasm/blob/main/CHANGELOG.md) for full history.
 
 ---
 
@@ -100,8 +65,8 @@ Starting with **v0.1.14**, PyFASM64 bundles and deeply integrates the **FASM Mod
    - `data_structures.inc`: Dynamic array vectors, string buffers, and hash tables.
    - `syntax_color.inc`: Lexical tokenization and realtime syntax highlighting engine.
 3. **Unicode & UTF-8 / UTF-16LE Engine**:
-   - Integrated native runtime conversion (`_pyfasm_utf8_to_wide`), eliminating Windows Mojibake (corrupted Chinese characters in GUI labels, textboxes, and buttons).
-   - GUI control collision prevention: automatically reuses existing window handles to avoid duplicate listboxes or overlapping frames.
+   - Integrated native runtime conversion (`_pyfasm_utf8_to_wide`), eliminating Windows Mojibake.
+   - GUI control collision prevention: automatically reuses existing window handles to avoid duplicate controls.
 4. **Built-in Interactive Documentation**:
    - View English documentation: `pyfasm docs`
    - View Russian documentation: `pyfasm docs --ru`
@@ -109,70 +74,84 @@ Starting with **v0.1.14**, PyFASM64 bundles and deeply integrates the **FASM Mod
 
 ---
 
-## Key Features
+## Quickstart
 
-* **True Zero-GIL Multithreading**:
-  * Compiled executables run directly on bare metal without any Python VM or interpreter lock.
-  * Native OS kernel threads (`CreateThread` on Windows, `sys_clone` on Linux) run concurrently across all physical CPU cores at 100% capacity.
-  * Hardware atomic memory operations via x86_64 CPU instructions (`lock add`, `lock sub`).
-* **Ultra-Compact Binary Footprint**:
-  * Standalone executables range from **512 bytes** (flat bare-metal binary) to **2.5 KB** (PE64 / ELF64 / Mach-O 64).
-  * Absolutely zero external dependencies: no `python.exe`, no MSVCRT, no libc/glibc, and no external dynamic linkers required.
-* **Bare-Metal Execution Speed**:
-  * Pure x86_64 assembly performance on par with hand-tuned C and assembly.
-  * Fibonacci calculation ($N=40$): **0 ms**.
-  * Sieve of Eratosthenes (100,000 prime numbers): **0 ms**.
-  * 8 parallel threads executing 2,000,000 atomic operations: **47 ms**.
-* **Comprehensive Cross-Platform Targets**:
-  * `--target win64`: Standalone Windows 64-bit PE64 Console executables (`.exe`).
-  * `--target dll`: Windows 64-bit Dynamic Link Libraries (`.dll`) callable instantly from Python via `ctypes` or from C/C++.
-  * `--target linux`: Native Linux x86-64 ELF64 executables (`.elf`) using pure kernel syscalls (`sys_write`, `sys_exit`, `sys_mmap`, `sys_nanosleep`) with zero libc dependency.
-  * `--target macos` / `--target apple`: Apple macOS x86-64 Mach-O 64-bit executables (`.macho`) using direct Darwin BSD kernel syscalls.
-* **Multi-Module Single-File Compilation**:
-  * Automatically discovers and compiles all internal modules, subpackages, and libraries in a project into a **single standalone machine code binary** (`.exe`, `.elf`, `.macho`).
-  * Recursively traverses local `import` and `from ... import ...` statements, registers aliases, and prevents circular dependencies while strictly skipping external/virtualenv directories.
-* **Cross-Platform Project Bundler (`pyfasm64 bundle`)**:
-  * Bundles complex Python applications into native standalone launcher executables for **Windows** (`.exe`), **Linux** (`.elf`), and **Apple macOS** (`.macho`) that automatically discover virtual environments and launch in Free-Threaded (No-GIL) mode when available.
+### 1. Installation
+
+```bash
+# Recommended with uv:
+uv add pyfasm64
+
+# Or using standard pip:
+pip install pyfasm64
+```
+
+### 2. Five-Second Compilation
+
+Create a Python script `hello.py`:
+
+```python
+def main() -> int:
+    name: str = "World"
+    print(f"Hello, {name}! Compiled with PyFASM64.")
+    return 0
+```
+
+Compile and run directly to a 2.5 KB native binary:
+
+```bash
+uv run pyfasm64 compile hello.py --run
+```
 
 ---
 
-## Compiler Architecture
+## Command-Line Interface (`pyfasm64` / `pyfasm`)
 
-PyFASM64 is architected from the ground up as a retargetable, zero-runtime compiler with distinct frontend, semantic, and platform code-generation layers:
+Both `pyfasm64` and `pyfasm` CLI commands are available:
 
+### `pyfasm64 compile`
+
+```bash
+pyfasm64 compile <source> [OPTIONS]
 ```
-                    ┌────────────────────────────┐
-                    │     Python Source Code     │
-                    │   (Python 3.8 - 3.16t)     │
-                    └─────────────┬──────────────┘
-                                  │
-                                  ▼ (Python ast parser)
-                    ┌────────────────────────────┐
-                    │   Abstract Syntax Tree     │
-                    └─────────────┬──────────────┘
-                                  │
-                                  ▼ (AstAnalyzer)
-                    ┌────────────────────────────┐
-                    │   Semantic & Type Analysis │
-                    │   (int, ptr, str, stack)   │
-                    └─────────────┬──────────────┘
-                                  │
-                                  ▼ (Target ABI & Syscall Selector)
-              ┌───────────────────┼───────────────────┐
-              ▼                   ▼                   ▼
-    ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
-    │  Windows PE64     │ │   Linux ELF64     │ │ Apple macOS Mach-O│
-    │  - Microsoft x64  │ │   - System V ABI  │ │   - Darwin BSD    │
-    │  - Shadow Space   │ │   - Pure Syscalls │ │   - 0x2000000 Sys │
-    └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘
-              │                   │                   │
-              └───────────────────┼───────────────────┘
-                                  ▼ (FASM Modern SDK Assembler v1.73.36)
-              ┌───────────────────┼───────────────────┐
-              ▼                   ▼                   ▼
-    [ Windows PE64 .exe ]  [ Linux ELF64 .elf ] [ Apple Mach-O .macho ]
-         (~2.5 KB)               (~1.8 KB)           (~2.4 KB)
-```
+
+| Option | Flag | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `<source>` | | *required* | Path to Python file or project directory |
+| `--output` | `-o` | `<stem>.<ext>` | Output binary path (`.exe`, `.dll`, `.elf`, `.macho`) |
+| `--target` | | `win64` | Target platform: `win64`, `dll`, `linux`, `macos` |
+| `--gui` | `-w`, `--windowed` | *auto* | Force Win32 GUI windowed subsystem (no console window) |
+| `--console` | `-c` | *auto* | Force standard console subsystem |
+| `--python-version` | `--py-ver` | *host* | Target Python version (e.g. `3.14`, `3.15`) |
+| `--optimize` | `-O` | `False` | Enable assembly peephole optimizations |
+| `--verbose` | `-v` | `False` | Verbose compilation diagnostics |
+| `--run` | | `False` | Execute binary immediately upon compilation |
+| `--icon` | | `None` | Path to `.ico` for Windows PE `.rsrc` icon embedding |
+| `--strict` | | `False` | Promote compiler warnings (`W2004`–`W3001`) to hard errors |
+| `--export-fasm` | `-f` | `None` | Export self-contained FASM project with build scripts |
+| `--no-asm` | | `False` | Clean intermediate assembly files after build |
+
+### Auxiliary Commands
+
+* **`pyfasm64 check <source> [--strict]`**: Run syntax, semantic, and type diagnostics without generating machine code.
+* **`pyfasm64 emit-asm <source> [-o out.asm]`**: Emit readable, commented x86-64 FASM assembly to stdout or file.
+* **`pyfasm64 bundle <project_dir> -o App.exe`**: Bundle entire multi-file project into a single native executable.
+* **`pyfasm64 clean [--apps | --all]`**: Clean local build artifacts and global caches.
+* **`pyfasm64 docs [--ru] [--open]`**: Interactive documentation viewer in terminal or browser.
+
+---
+
+## Supported Ecosystem & Features
+
+| Domain | Supported Features & Libraries | Native Implementation |
+| :--- | :--- | :--- |
+| **Desktop GUI** | `tkinter`, `customtkinter`, `PyQt5`, `PyQt6`, `flet` | Native Win32 GDI controls, Dark Fluent styling, dynamic layout, Edit message routing |
+| **2D Games** | `pygame` (`display`, `event`, `draw`, `Rect`, `Clock`, `font`) | Zero-dependency GDI double-buffered graphics backbuffer |
+| **Web & APIs** | `fastapi`, `uvicorn` (`@app.get`, `@app.post`, JSON payloads) | High-throughput Winsock2 HTTP/1.1 server, RFC-8259 JSON parser |
+| **Python 3.14 / 3.15** | `TypeAlias`, `def f[T]()`, `sumprod`, `batched`, `cpu_count` | Compile-time branch evaluation, SIMD dot products, PEB processor query |
+| **Zero-GIL Concurrency**| `spawn_thread`, `wait_thread`, `atomic_add`, `atomic_sub` | OS kernel threads (`CreateThread` / `sys_clone`), hardware `lock` instructions |
+| **Object Orientation** | `class`, `super()`, `@property`, `@staticmethod`, `@classmethod` | Polymorphic virtual method tables, class tags, reflected dunders (`__radd__`, etc.) |
+| **Memory & Buffers** | `alloc_memory`, `free_memory`, `buf[i]` | Direct OS page allocation (`VirtualAlloc` / `sys_mmap`), raw pointer indexing |
 
 ---
 
@@ -180,252 +159,62 @@ PyFASM64 is architected from the ground up as a retargetable, zero-runtime compi
 
 | Architectural Aspect | Windows x86-64 | Linux x86-64 | Apple macOS x86-64 |
 | :--- | :--- | :--- | :--- |
-| **Binary Format** | PE32+ (PE64) Console / DLL | ELF64 Executable (Type 3) | Mach-O 64 (`MH_MAGIC_64`) |
-| **Magic Header** | `MZ` (0x5A4D) / `PE\0\0` | `\x7fELF` (0x464C457F) | `0xFEEDFACF` (Little-Endian) |
-| **ABI Calling Convention** | Microsoft x64 ABI | System V AMD64 ABI | System V AMD64 ABI |
-| **Register Parameters** | `RCX`, `RDX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` | `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` |
-| **Stack Shadow Space** | 32 bytes reserved by caller | None (128-byte Red Zone) | None (128-byte Red Zone) |
-| **Kernel Interface** | Win32 API (`kernel32.dll`) | Direct Linux Kernel Syscalls | Direct Darwin BSD Syscalls |
-| **Standard Output** | `GetStdHandle` + `WriteFile` | `syscall` (rax = 1 `sys_write`) | `syscall` (rax = `0x2000004`) |
-| **Process Termination** | `ExitProcess` (code in RCX) | `syscall` (rax = 60 `sys_exit`) | `syscall` (rax = `0x2000001`) |
-| **Memory Allocation** | `VirtualAlloc` (MEM_COMMIT) | `syscall` (rax = 9 `sys_mmap`) | `syscall` (rax = `0x20000C5`) |
-| **High-Precision Time**| `GetTickCount` / RDTSC | `sys_nanosleep` (35) / RDTSC | `sys_nanosleep` (`0x20000EB`) / RDTSC |
-| **Runtime Dependencies** | None (kernel32 only) | **Zero libc / Zero glibc** | **Zero libSystem / Zero dyld**|
+| **Binary Format** | PE32+ (PE64) Console / GUI / DLL | ELF64 Executable (Type 3) | Mach-O 64 (`MH_MAGIC_64`) |
+| **ABI Calling Convention** | Microsoft x64 ABI (Shadow Space) | System V AMD64 ABI | System V AMD64 ABI |
+| **Kernel Interface** | Win32 API (`kernel32.dll`, `user32.dll`) | Direct Linux Kernel Syscalls | Direct Darwin BSD Syscalls |
+| **External Dependencies** | None (OS system libraries only) | **Zero libc / Zero glibc** | **Zero libSystem / Zero dyld** |
+| **Typical Binary Size** | **~2.5 KB** | **~1.8 KB** | **~2.4 KB** |
 
 ---
 
-## Installation
+## Performance Benchmarks
 
-### Via PyPI (Official Python Package Index)
+Tested on AMD Ryzen / Intel Core x86_64:
 
-[![PyPI - Version](https://img.shields.io/pypi/v/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfasm64?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/pyfasm64/)
-
-```bash
-# Using uv (recommended)
-uv add pyfasm64
-
-# Using standard pip
-pip install pyfasm64
-```
-
-### Via Conda (`conda-forge` organization channel)
-
-[![Conda-Forge](https://img.shields.io/conda/vn/conda-forge/pyfasm64.svg?style=flat&logo=condaforge)](https://anaconda.org/conda-forge/pyfasm64)
-
-```bash
-# Using standard conda
-conda install -c conda-forge pyfasm64
-
-# Or using mamba
-mamba install -c conda-forge pyfasm64
-
-# Or using pixi
-pixi add pyfasm64
-```
-
-### Via Debian / Ubuntu PPA (`eminsk/ppa`)
-
-[![Debian / Ubuntu PPA](https://img.shields.io/badge/Ubuntu%20PPA-eminsk%2Fppa-orange.svg?style=flat)](https://launchpad.net/~eminsk/+archive/ubuntu/ppa)
-
-```bash
-sudo add-apt-repository ppa:eminsk/ppa
-sudo apt update
-sudo apt install python3-pyfasm64
-```
-*(Also satisfies dependencies requiring `python3-pyfasm`)*
-
-Alternatively, download the latest `python3-pyfasm64_*.deb` from the [GitHub Releases](https://github.com/eminsk/pyfasm/releases) page:
-
-```bash
-sudo dpkg -i python3-pyfasm64_*.deb
-```
-
-### From Source
-
-```bash
-git clone https://github.com/eminsk/pyfasm.git
-cd pyfasm
-uv sync
-```
-
----
-
-## CLI Usage
-
-Both `pyfasm64` and `pyfasm` CLI commands are available and identical in syntax and options:
-
-### 1. View Built-in Documentation & Version
-
-```bash
-# Print compiler version:
-uv run pyfasm64 --version
-uv run python -m pyfasm64 --version
-
-# View primary English documentation:
-uv run pyfasm64 docs
-
-# View Russian documentation:
-uv run pyfasm64 docs --ru
-
-# Open in default markdown viewer / editor:
-uv run pyfasm64 docs --open
-```
-
-### 2. Compile and Run on Windows (PE64)
-
-```bash
-# Compile to native Windows x64 .exe and execute immediately:
-uv run pyfasm64 compile examples/01_hello.py --run
-
-# Or using the classic pyfasm alias:
-uv run pyfasm compile examples/01_hello.py --run
-
-# Compile parallel multithreading benchmark:
-uv run pyfasm64 compile examples/04_multithread_parallel.py --run
-```
-
-### 3. Compile for Linux (ELF64)
-
-```bash
-# Generates native Linux x86-64 ELF executable using direct kernel syscalls:
-uv run pyfasm64 compile examples/01_hello.py -o hello_linux.elf --target linux
-```
-
-### 4. Compile for Apple macOS (Mach-O 64)
-
-```bash
-# Generates native Apple macOS x86-64 Mach-O binary using Darwin BSD syscalls:
-uv run pyfasm64 compile examples/01_hello.py -o hello_mac.macho --target macos
-```
-
-### 5. Compile Multi-Module Project into 1 Single Standalone Binary
-
-```bash
-# Compiles an entire multi-file project into 1 standalone binary (auto-resolves all local imports):
-uv run pyfasm64 compile ./my_project -o my_app.exe
-
-# Or compile from entry script (auto-resolves all imported helper modules):
-uv run pyfasm64 compile my_project/main.py -o my_app.exe
-```
-
-### 6. Inspect Generated FASM Assembly
-
-```bash
-uv run pyfasm64 emit-asm examples/02_fibonacci.py
-```
-
-### 7. Compile to High-Performance Windows DLL
-
-```bash
-uv run pyfasm64 compile my_math.py -o my_math.dll --target dll
-```
-
-### 8. Export Full FASM Project Folder
-
-```bash
-# Exports assembly, headers, compiler, and 1-click build scripts into FASM/ directory:
-uv run pyfasm64 compile my_app.py --export-fasm
-```
-
----
-
-### 9. Application Icon & Windows PE Resources
-
-```bash
-# Compile with application icon embedded into PE resources (.rsrc), window, and taskbar:
-uv run pyfasm64 compile main.py --icon icon.ico
-
-# Auto-detects icon.ico if present in project directory:
-uv run pyfasm64 bundle . -o MyApp.exe
-```
-
-### 10. Clean Compiler & Build Caches
-
-```bash
-# Clean local project build artifacts (asm/, __pycache__, .stamp_*):
-uv run pyfasm64 clean
-
-# Dry-run to inspect items without deleting:
-uv run pyfasm64 clean --dry-run
-
-# Clean global unpacked application caches (%LOCALAPPDATA%/pyfasm):
-uv run pyfasm64 clean --apps
-
-# Clean all local and global caches:
-uv run pyfasm64 clean --all
-```
-
----
-
-
-## Supported Python Language Subset
-
-| Feature | Syntax / API | Description |
-| :--- | :--- | :--- |
-| **Functions & Closures** | `def`, `lambda`, lexical closures, Cyrillic/UTF-8 names | Typed x86_64 functions, defaults, capturing lambdas & recursive/nested `def`, function aliases, collision-free Unicode labels |
-| **Data Types** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-bit signed ints, IEEE-754 SSE doubles, UTF-8/UTF-16LE strings (`!r`, `:.Nf`, `:x`/`:b`/`:o`/`:0Nd`), raw pointers |
-| **Containers** | `list`, `dict`, `set`, `tuple`, slicing | Dynamic arrays, FNV-1a hash tables (incl. tuple keys), hash sets, comprehensions |
-| **OOP & Classes** | `class`, `__init__`, `super()`, `@property`, `@staticmethod`, `@classmethod` | Runtime class tags, polymorphic dispatch, `isinstance`/`issubclass`, and wired dunders (`__call__`, `__bool__`, `__abs__`, `__radd__`..`__rmod__`, `__enter__`/`__exit__`, `__iter__`/`__next__`, `__neg__`, `__iadd__`..`__ixor__`) |
-| **Generators & Errors** | `yield`, `yield from`, `try`/`except`, `with` | State-machine coroutines, generator expressions, structured exception unwinding |
-| **Arithmetic** | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, bitwise | Direct x86_64 ALU & SSE instructions, Python floor div/mod, AVX2 NanoGEMM `@` |
-| **Control Flow** | `if`/`elif`/`else`, `while`, `for`, `match`/`case` | Loops, unpacking, `break`, `continue`, `return`, pattern matching |
-| **Stdlib Modules** | `math`, `itertools`, `functools`, `bisect`, `heapq`, `json` | Native zero-dependency `gcd`, `lcm`, `isqrt`, `chain`, `reduce`, `heappush`, `loads` |
-| **Dynamic Memory** | `alloc_memory(bytes)`, `free_memory(ptr)` | OS virtual memory allocation (`VirtualAlloc` / `sys_mmap`) |
-| **Buffer Access** | `buf[i] = val` and `val = buf[i]` | Indexed memory read and write operations |
-| **Multithreading** | `spawn_thread(worker, param)`, `wait_thread(h)` | Hardware OS threads running concurrently without GIL |
-| **Atomic Ops** | `atomic_add(ptr, val)`, `atomic_sub(ptr, val)` | Thread-safe atomic operations via CPU `lock` prefix |
-| **Console I/O** | `print()`, `input()`, `print_int()`, `print_float()` | Low-level buffered stdout streaming and console line input |
-| **Timers & Sleep**| `get_tick_count()`, `sleep_ms(ms)` | High-precision timing and thread sleep |
-| **Native UI, Games & Web** | `tkinter`, `customtkinter`, `PyQt5`, `PyQt6`/`PySide6`, `flet`, `pygame`, `fastapi`/`uvicorn`, `pystray` | Win32 GDI desktop widgets/Canvas, double-buffered 2D games, Winsock2 HTTP/1.1 JSON APIs, and tray apps |
-
----
-
-## Benchmark Comparison
-
-Tested on AMD / Intel x86_64 (Windows 11 & Linux 6.x):
-
-| Benchmark | CPython 3.12 (Standard) | PyPy 3.10 (JIT) | PyFASM64 Native x64 | Speedup vs CPython |
+| Benchmark | CPython 3.12 | PyPy 3.10 (JIT) | PyFASM64 Native x64 | Speedup vs CPython |
 | :--- | :--- | :--- | :--- | :--- |
 | **Fibonacci ($N=40$)** | 12,450 ms | 620 ms | **< 1 ms** | **> 12,000x** |
 | **Sieve of Eratosthenes (100k)** | 185 ms | 18 ms | **< 1 ms** | **> 180x** |
-| **8-Thread Parallel Counter** | 4,210 ms (GIL contention)| 1,840 ms | **47 ms (Zero-GIL)** | **> 89x** |
-| **Binary Size** | ~35 MB (pyinstaller) | N/A | **2.5 KB** | **> 14,000x smaller** |
+| **8-Thread Parallel Counter** | 4,210 ms (GIL contention) | 1,840 ms | **47 ms (Zero-GIL)** | **> 89x** |
+| **Standalone Binary Size** | ~35 MB (PyInstaller) | N/A | **2.5 KB** | **> 14,000x smaller** |
 
 ---
 
-## Testing & Verification
+## Verification & Testing
 
-The test suite covers codegen, execution, AST parsing, multithreading, multi-module bundler, and type checking across all supported Python versions:
+Every commit and release is validated across all supported runtimes:
 
 ```bash
 uv run pytest
 ```
 
-```text
-============================= 152 passed ==============================
-```
-
-Verified compatibility matrix:
-* **CPython 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16**: 100% tests passing.
-* **Python Free-Threaded / No-GIL (3.13t, 3.14t, 3.15t, 3.16t)**: 100% tests passing.
-* **PyPy (3.8, 3.9, 3.10, 3.11, 3.12)**: 100% tests passing.
+* **Compatibility Matrix**: CPython 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16.
+* **No-GIL Matrix**: Free-Threaded Python 3.13t, 3.14t, 3.15t, 3.16t.
+* **PyPy Matrix**: PyPy 3.8 through 3.12.
+* **Test Suite Status**: 100% tests passing (154/154).
 
 ---
 
 ## Documentation
 
-Full guides and engineering references live in the [`docs/`](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) directory:
+Comprehensive architecture, language, and CLI documentation is available in [`docs/`](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md):
 
-| Document | Description |
-| :--- | :--- |
-| [Documentation Hub](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) | Navigation hub (English & Russian) |
-| [Getting Started](https://github.com/eminsk/pyfasm/blob/main/docs/GETTING_STARTED.md) | Installation, single-file & multi-package project structure, DLLs, and bundling |
-| [Language & Compatibility Reference](https://github.com/eminsk/pyfasm/blob/main/docs/LANGUAGE_REFERENCE.md) | Types, OOP, inheritance, `@property`, magic methods matrix, stdlib, and external imports |
-| [CLI & Python API Reference](https://github.com/eminsk/pyfasm/blob/main/docs/CLI_AND_API.md) | Full reference for `compile`, `check`, `emit-asm`, `bundle`, `clean`, and Python APIs |
-| [Compiler Diagnostics & Error Codes](https://github.com/eminsk/pyfasm/blob/main/docs/ERRORS.md) | Diagnostic catalog (`E1001`–`E4002`, `W2004`–`W3001`), `--strict`, and fixes |
-| [Architecture & ABI Internals](https://github.com/eminsk/pyfasm/blob/main/docs/ARCHITECTURE.md) | Compilation pipeline, heap object layouts, x86-64 ABI, `.rsrc` & `.reloc` internals |
-| [Руководство на русском языке](https://github.com/eminsk/pyfasm/blob/main/docs/GUIDE_RU.md) | Полное руководство пользователя и справочник ошибок на русском языке |
+* 📘 [Documentation Hub](https://github.com/eminsk/pyfasm/blob/main/docs/INDEX.md) — Main index and overview.
+* 🚀 [Getting Started Guide](https://github.com/eminsk/pyfasm/blob/main/docs/GETTING_STARTED.md) — Setup, builds, and packaging.
+* 📖 [Language Reference](https://github.com/eminsk/pyfasm/blob/main/docs/LANGUAGE_REFERENCE.md) — Supported syntax, types, and stdlib.
+* ⚙️ [CLI & Python API](https://github.com/eminsk/pyfasm/blob/main/docs/CLI_AND_API.md) — Options, flags, and programmatic API.
+* 🔍 [Diagnostics & Error Catalog](https://github.com/eminsk/pyfasm/blob/main/docs/ERRORS.md) — Compiler error codes (`E1001`–`E4002`).
+* 🏗️ [Architecture & ABI Internals](https://github.com/eminsk/pyfasm/blob/main/docs/ARCHITECTURE.md) — FASM backend and memory layouts.
+* 🇷🇺 [Руководство пользователя (Russian Guide)](https://github.com/eminsk/pyfasm/blob/main/docs/GUIDE_RU.md) — Документация на русском языке.
+
+---
+
+## Community & Support
+
+* 🐛 **Bug Reports & Issues:** [GitHub Issues](https://github.com/eminsk/pyfasm/issues)
+* 💬 **Community Discussions:** [GitHub Discussions](https://github.com/eminsk/pyfasm/discussions)
+* 🏛️ **FASM Community Forum:** [Flat Assembler Board](https://board.flatassembler.net/topic.php?t=24431)
+* ☕ **Donations (USDT TRC-20):** `TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P` ([Verify on TronScan](https://tronscan.org/#/address/TDVbEdnpgNgoAhNcn1EwXxWHiR3RKLit5P))
 
 ---
 

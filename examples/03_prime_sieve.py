@@ -1,15 +1,20 @@
-def main() -> int:
+"""PyFASM Example 03: Prime Sieve (Sieve of Eratosthenes)
+Demonstrates low-level memory allocation, direct pointer buffer indexing, and algorithmic speed.
+"""
+
+def main():
     limit = 100000
-    print_str("Sieve of Eratosthenes up to ")
-    print_int(limit)
-    print_str(" in native x64 memory buffer...\n")
+    print("================================================================")
+    print("  PyFASM Sieve of Eratosthenes (Direct Native Memory)")
+    print("================================================================")
+    print(f"Finding primes up to {limit}...")
 
     t0 = get_tick_count()
 
-    # Allocate limit * 8 bytes
+    # Allocate native 64-bit word buffer
     sieve = alloc_memory(limit * 8)
 
-    # Initialize all as prime (1)
+    # Initialize all numbers as prime (1)
     for i in range(limit):
         sieve[i] = 1
 
@@ -33,13 +38,12 @@ def main() -> int:
 
     t1 = get_tick_count()
 
-    print_str("Total prime numbers found: ")
-    print_int(primes_count)
-    print_newline()
-
-    print_str("Computation time (ms): ")
-    print_int(t1 - t0)
-    print_newline()
+    print(f"Total prime numbers found: {primes_count}")
+    print(f"Computation time: {t1 - t0} ms")
 
     free_memory(sieve)
     return 0
+
+
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,7 @@
+"""PyFASM Example 02: High-Performance Fibonacci
+Demonstrates native 64-bit iterative computation and timer benchmarking.
+"""
+
 def fib(n: int) -> int:
     if n <= 1:
         return n
@@ -9,17 +13,21 @@ def fib(n: int) -> int:
         b = c
     return b
 
-def main() -> int:
-    print_str("Computing Fibonacci sequence up to N = 40 in native x64...\n")
+
+def main():
+    print("================================================================")
+    print("  PyFASM Fibonacci Benchmark (Native x86-64)")
+    print("================================================================")
+    print("Calculating Fib(45) in native CPU registers...")
+
     t0 = get_tick_count()
-    ans = fib(40)
+    ans = fib(45)
     t1 = get_tick_count()
 
-    print_str("Fib(40) = ")
-    print_int(ans)
-    print_newline()
-
-    print_str("Elapsed time (ms): ")
-    print_int(t1 - t0)
-    print_newline()
+    print(f"Fib(45) = {ans}")
+    print(f"Elapsed time: {t1 - t0} ms")
     return 0
+
+
+if __name__ == "__main__":
+    main()

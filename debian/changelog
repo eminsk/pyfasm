@@ -1,3 +1,12 @@
+python3-pyfasm64 (1.1.0-1) stable; urgency=medium
+
+  * Release PyFASM64 1.1.0 (Comprehensive Modern GUI & Framework Enhancement).
+  * Removed legacy canvas template fallbacks; all canvas, plotting, and graphic applications now compile authentically from user AST directly into native Win64 machine code.
+  * Added deep CustomTkinter and Flet support (CTkFont, CTkImage, CTkEntry.delete/insert Win32 edit routing, cget, page.clean(), page.window_width/height, event attributes, 16+ modern UI containers).
+  * Added native SIMD/scalar x86-64 assembly loops for min() and max(), and built-in support for tuple(), complex(), math.isfinite(), math.isclose(), and getattr().
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 13:40:00 -0500
+
 python3-pyfasm64 (1.0.0-1) stable; urgency=medium
 
   * Release PyFASM64 1.0.0 (Production Stable Milestone).

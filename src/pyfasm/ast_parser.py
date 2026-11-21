@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
@@ -121,6 +122,8 @@ class ParsedModule:
     diagnostics: List[CompilerDiagnostic] = field(default_factory=list)
     source_files: Dict[str, str] = field(default_factory=dict)
     http_routes: List[HttpRouteSpec] = field(default_factory=list)
+    type_aliases: Dict[str, PyFasmType] = field(default_factory=dict)
+    python_version: Tuple[int, int] = field(default_factory=lambda: (sys.version_info.major, sys.version_info.minor))
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
@@ -145,10 +148,16 @@ class ParsedModule:
 
     @property
     def is_modern_gui(self) -> bool:
+        if getattr(self, "_override_is_modern_gui", None) is not None:
+            return bool(self._override_is_modern_gui)
         return self.has_library(
             "customtkinter", "tkinter", "ttkbootstrap", "ctk", "flet", "textual",
             "qt", "pyqt5", "pyqt6", "pyside6", "pyside2",
         ) or any("app" in s.lower() or "gui" in s.lower() or "window" in s.lower() for s in self.classes)
+
+    @is_modern_gui.setter
+    def is_modern_gui(self, val: bool) -> None:
+        self._override_is_modern_gui = val
 
     @property
     def is_pygame_app(self) -> bool:
@@ -184,6 +193,49 @@ class ConstantFolder(ast.NodeTransformer):
     """Evaluates compile-time constant expressions (Constant Folding)."""
 
     _MAX_FOLD_INT = 1 << 62
+
+    def __init__(self, py_version: Optional[Tuple[int, int]] = None, py_micro: Optional[int] = None):
+        super().__init__()
+        self.py_version = py_version or (sys.version_info.major, sys.version_info.minor)
+        self.py_micro = py_micro if py_micro is not None else sys.version_info.micro
+
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.ops) == 1 and len(node.comparators) == 1:
+            left = node.left
+            op = node.ops[0]
+            right = node.comparators[0]
+            is_sys_ver = False
+            if isinstance(left, ast.Attribute) and isinstance(left.value, ast.Name) and left.value.id == "sys" and left.attr == "version_info":
+                is_sys_ver = True
+            elif isinstance(left, ast.Subscript) and isinstance(left.value, ast.Attribute) and isinstance(left.value.value, ast.Name) and left.value.value.id == "sys" and left.value.attr == "version_info":
+                is_sys_ver = True
+
+            if is_sys_ver and isinstance(right, ast.Tuple):
+                cmp_vals = []
+                for elt in right.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
+                        cmp_vals.append(elt.value)
+                    else:
+                        break
+                if len(cmp_vals) >= 1:
+                    target_tup = tuple(cmp_vals)
+                    ver_tup = (self.py_version[0], self.py_version[1], self.py_micro)[:len(target_tup)]
+                    ans = False
+                    if isinstance(op, ast.GtE):
+                        ans = ver_tup >= target_tup
+                    elif isinstance(op, ast.Gt):
+                        ans = ver_tup > target_tup
+                    elif isinstance(op, ast.LtE):
+                        ans = ver_tup <= target_tup
+                    elif isinstance(op, ast.Lt):
+                        ans = ver_tup < target_tup
+                    elif isinstance(op, ast.Eq):
+                        ans = ver_tup == target_tup
+                    elif isinstance(op, ast.NotEq):
+                        ans = ver_tup != target_tup
+                    return ast.copy_location(ast.Constant(value=ans), node)
+        return node
 
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         self.generic_visit(node)
@@ -956,13 +1008,17 @@ class GeneratorExpLifter(ast.NodeTransformer):
         return ast.copy_location(call_node, node)
 
 
-def preprocess_ast(tree: ast.AST) -> ast.AST:
+def preprocess_ast(
+    tree: ast.AST,
+    py_version: Optional[Tuple[int, int]] = None,
+    py_micro: Optional[int] = None,
+) -> ast.AST:
     """Preprocesses AST: folds constants, desugars yield from, lifts generator expressions and lambdas."""
     tree = ImportCallTransformer().visit(tree)
     tree = ClassLambdaDesugarer().visit(tree)
     tree = MapMethodTransformer().visit(tree)
     tree = ChainedCompareTransformer().visit(tree)
-    tree = ConstantFolder().visit(tree)
+    tree = ConstantFolder(py_version=py_version, py_micro=py_micro).visit(tree)
     tree = YieldFromTransformer().visit(tree)
     gen_lifter = GeneratorExpLifter()
     tree = gen_lifter.visit(tree)
@@ -979,10 +1035,17 @@ def preprocess_ast(tree: ast.AST) -> ast.AST:
 class AstAnalyzer:
     """Extracts function signatures, local variables, and literals across single files or multi-module projects."""
 
-    def __init__(self, project_root: Optional[Path | str] = None):
+    def __init__(
+        self,
+        project_root: Optional[Path | str] = None,
+        py_version: Optional[Tuple[int, int]] = None,
+        py_micro: Optional[int] = None,
+    ):
         self.strings: List[StringLiteral] = []
         self.floats: List[FloatLiteral] = []
         self.project_root: Optional[Path] = Path(project_root).resolve() if project_root else None
+        self.py_version: Tuple[int, int] = py_version or (sys.version_info.major, sys.version_info.minor)
+        self.py_micro: int = py_micro if py_micro is not None else sys.version_info.micro
         self._visited_files: Set[Path] = set()
         self._site_packages_dirs: List[Path] = []
         self._str_counter = 0
@@ -1310,7 +1373,7 @@ class AstAnalyzer:
 
         pending_routes = self._prepare_fastapi_routes_in_tree(tree, mod_prefix="")
         self._validate_ast_tree(tree, module, "<source>", source_code, current_dir=self.project_root)
-        tree = preprocess_ast(tree)
+        tree = preprocess_ast(tree, py_version=self.py_version, py_micro=self.py_micro)
 
         # First pass: find imports, string and float constants across the AST
         for node in ast.walk(tree):
@@ -1647,7 +1710,7 @@ class AstAnalyzer:
         if not any(v in path_str for v in (".venv", "venv", "site-packages")):
             self._validate_ast_tree(tree, module, str(real_path), source_code, current_dir=real_path.parent)
         try:
-            tree = preprocess_ast(tree)
+            tree = preprocess_ast(tree, py_version=self.py_version, py_micro=self.py_micro)
         except Exception as e:
             module.diagnostics.append(
                 CompilerDiagnostic(
@@ -1815,6 +1878,13 @@ class AstAnalyzer:
                                 module.global_vars[f"{mod_prefix}_{tgt.id}"] = init_val
                         elif isinstance(tgt, (ast.Tuple, ast.List)):
                             self._record_global_unpack_types(module, tgt, val_t, mod_prefix)
+                elif hasattr(ast, "TypeAlias") and isinstance(s, ast.TypeAlias):
+                    aname = s.name.id if isinstance(s.name, ast.Name) else str(s.name)
+                    resolved = self._resolve_annotation_type(s.value)
+                    if resolved:
+                        module.type_aliases[aname] = resolved
+                        if mod_prefix:
+                            module.type_aliases[f"{mod_prefix}_{aname}"] = resolved
                 elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
                     vname = s.target.id
                     vtype = TYPE_INT
@@ -1984,11 +2054,41 @@ class AstAnalyzer:
             ann_name = ann_node.id
         elif isinstance(ann_node, ast.Constant) and isinstance(ann_node.value, str):
             ann_name = ann_node.value
+        elif isinstance(ann_node, ast.Subscript):
+            val_t = self._resolve_annotation_type(ann_node.value)
+            if val_t and val_t.is_list():
+                elt_t = self._resolve_annotation_type(ann_node.slice)
+                return ListType(element_type=elt_t)
+            elif val_t and val_t.is_dict():
+                if isinstance(ann_node.slice, ast.Tuple) and len(ann_node.slice.elts) >= 2:
+                    kt = self._resolve_annotation_type(ann_node.slice.elts[0])
+                    vt = self._resolve_annotation_type(ann_node.slice.elts[1])
+                    return DictType(key_type=kt, val_type=vt)
+                return TYPE_DICT
+            elif val_t and val_t.is_set():
+                elt_t = self._resolve_annotation_type(ann_node.slice)
+                return SetType(element_type=elt_t)
+            elif val_t and val_t.is_tuple():
+                if isinstance(ann_node.slice, ast.Tuple):
+                    elt_ts = tuple(self._resolve_annotation_type(e) or TYPE_INT for e in ann_node.slice.elts)
+                    return TupleType(element_types=elt_ts)
+                return TYPE_TUPLE
+            return val_t or TYPE_INT
+        elif isinstance(ann_node, ast.BinOp) and isinstance(ann_node.op, ast.BitOr):
+            left_t = self._resolve_annotation_type(ann_node.left)
+            right_t = self._resolve_annotation_type(ann_node.right)
+            if left_t and left_t != TYPE_VOID:
+                return left_t
+            return right_t or TYPE_INT
+
         if not ann_name:
             return None
         mod = getattr(self, "current_module", None)
-        if mod is not None and ann_name in mod.classes:
-            return InstanceType(class_name=ann_name)
+        if mod is not None:
+            if hasattr(mod, "type_aliases") and ann_name in mod.type_aliases:
+                return mod.type_aliases[ann_name]
+            if ann_name in mod.classes:
+                return InstanceType(class_name=ann_name)
         return resolve_type(ann_name)
 
     def _analyze_class(self, node: ast.ClassDef, module: ParsedModule, mod_prefix: str = "") -> ClassSymbol:
@@ -2657,6 +2757,8 @@ class AstAnalyzer:
                     return TYPE_PTR
                 if fid in ("str", "repr", "chr", "input", "hex", "bin", "oct", "file_read", "get_simd_isa"):
                     return TYPE_STR
+                elif fid in ("alloc_memory", "malloc", "VirtualAlloc", "calloc"):
+                    return TYPE_PTR
                 elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open", "bit_length"):
                     return TYPE_INT
                 elif fid in ("float", "pow"):

@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import re
 import struct
+import sys
 from typing import List, Dict, Optional, Tuple, Set, Any
 _AST_MATCH = getattr(ast, 'Match', ())
 _AST_MATCH_AS = getattr(ast, 'MatchAs', ())
@@ -126,10 +127,19 @@ def _unwrap_slice(node: ast.AST) -> ast.AST:
 class X64CodeGen:
     """Translates a ParsedModule into a complete FASM assembly program."""
 
-    def __init__(self, module: ParsedModule, target: str = "win64", icon_path: Optional[str] = None):
+    def __init__(
+        self,
+        module: ParsedModule,
+        target: str = "win64",
+        icon_path: Optional[str] = None,
+        py_version: Optional[Tuple[int, int]] = None,
+        py_micro: Optional[int] = None,
+    ):
         self.icon_path = icon_path
         self.module = module
         self.target = target
+        self.py_version = py_version or (sys.version_info.major, sys.version_info.minor)
+        self.py_micro = py_micro if py_micro is not None else sys.version_info.micro
         self.lines: List[str] = []
         self._label_counter = 0
         self.current_func: Optional[FunctionSymbol] = None
@@ -146,6 +156,15 @@ class X64CodeGen:
         self.gui_control_id = 1000
         self.gui_edit_id = 100
         self.gui_chip_count = 0
+
+    def get_or_create_string(self, text: str) -> str:
+        for s in self.module.string_literals:
+            if s.value == text:
+                return s.label
+        self._label_counter += 1
+        label = f"_str_lit_gen_{self._label_counter}"
+        self.module.string_literals.append(StringLiteral(label=label, value=text))
+        return label
 
     def _record_unresolved(self, sym: str, node: Optional[ast.AST] = None) -> None:
         self.unresolved_symbols.add(sym)
@@ -3369,6 +3388,8 @@ include 'functions.inc'
                 fn_id = expr.func.id
                 if fn_id in ("str", "repr", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct", "get_simd_isa"):
                     return TYPE_STR
+                if fn_id in ("alloc_memory", "malloc", "VirtualAlloc", "calloc"):
+                    return TYPE_PTR
                 if fn_id in ("float",):
                     return TYPE_FLOAT
                 if fn_id in ("bool", "isinstance", "issubclass", "any", "all", "isdigit", "isascii"):
@@ -3427,7 +3448,9 @@ include 'functions.inc'
                     if m_fn in self.module.functions and self.module.functions[m_fn].return_type != TYPE_VOID:
                         return ListType(element_type=self.module.functions[m_fn].return_type)
                     return TYPE_LIST
-                if fn_id in ("filter", "zip", "enumerate", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                if fn_id in ("sumprod", "math_sumprod", "cpu_count", "process_cpu_count"):
+                    return TYPE_INT
+                if fn_id in ("filter", "zip", "enumerate", "chain", "accumulate", "batched", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
                     if fn_id in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
@@ -3554,6 +3577,23 @@ include 'functions.inc'
                     if m and m in self.module.functions:
                         return self.module.functions[m].return_type
         if isinstance(expr, ast.Attribute):
+            if isinstance(expr.value, ast.Name) and expr.value.id == "sys":
+                if expr.attr in ("version", "platform", "byteorder"):
+                    return TYPE_STR
+                if expr.attr in ("maxsize", "hexversion"):
+                    return TYPE_INT
+                if expr.attr == "version_info":
+                    return TupleType(element_types=(TYPE_INT, TYPE_INT, TYPE_INT, TYPE_STR, TYPE_INT))
+                if expr.attr == "argv":
+                    return ListType(element_type=TYPE_STR)
+            if (
+                isinstance(expr.value, ast.Attribute)
+                and expr.value.attr == "version_info"
+                and isinstance(expr.value.value, ast.Name)
+                and expr.value.value.id == "sys"
+            ):
+                if expr.attr in ("major", "minor", "micro"):
+                    return TYPE_INT
             prop = self.resolve_property_for_expr(expr.value, expr.attr)
             if prop and getattr(prop, "getter_name", None) and prop.getter_name in self.module.functions:
                 return self.module.functions[prop.getter_name].return_type
@@ -3640,6 +3680,22 @@ include 'functions.inc'
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
 
         elif isinstance(expr, ast.Attribute):
+            if (
+                isinstance(expr.value, ast.Attribute)
+                and expr.value.attr == "version_info"
+                and isinstance(expr.value.value, ast.Name)
+                and expr.value.value.id == "sys"
+            ):
+                if expr.attr == "major":
+                    self.emit(f"mov rax, {self.py_version[0]}", "sys.version_info.major")
+                    return
+                elif expr.attr == "minor":
+                    self.emit(f"mov rax, {self.py_version[1]}", "sys.version_info.minor")
+                    return
+                elif expr.attr == "micro":
+                    self.emit(f"mov rax, {self.py_micro}", "sys.version_info.micro")
+                    return
+
             prop = self.resolve_property_for_expr(expr.value, expr.attr)
             if prop and getattr(prop, "getter_name", None):
                 self._generate_expr(expr.value)
@@ -3732,6 +3788,47 @@ include 'functions.inc'
                             self.emit_raw(f"{lbl_has_obj}:")
                             val_handled = True
                     if not val_handled:
+                        if mod_name == "sys":
+                            if expr.attr == "version":
+                                v_str = f"{self.py_version[0]}.{self.py_version[1]}.{self.py_micro} (PyFASM Native x86-64 AOT, Python {self.py_version[0]}.{self.py_version[1]} compatible)"
+                                lbl = self.get_or_create_string(v_str)
+                                self.emit(f"lea rax, [{lbl}]", "load sys.version")
+                                val_handled = True
+                            elif expr.attr == "version_info":
+                                lbl_final = self.get_or_create_string("final")
+                                self.emit("mov ecx, 5", "tuple len 5")
+                                self.emit("call _pyfasm_list_create")
+                                self.emit(f"mov qword [rax + 8], {self.py_version[0]}", "major")
+                                self.emit(f"mov qword [rax + 16], {self.py_version[1]}", "minor")
+                                self.emit(f"mov qword [rax + 24], {self.py_micro}", "micro")
+                                self.emit(f"lea rdx, [{lbl_final}]")
+                                self.emit("mov [rax + 32], rdx", "releaselevel 'final'")
+                                self.emit("mov qword [rax + 40], 0", "serial 0")
+                                val_handled = True
+                            elif expr.attr == "platform":
+                                plat_str = "win32" if self.target in ("win64", "dll") else ("darwin" if self.target in ("macos", "apple") else "linux")
+                                lbl = self.get_or_create_string(plat_str)
+                                self.emit(f"lea rax, [{lbl}]", f"sys.platform -> {plat_str}")
+                                val_handled = True
+                            elif expr.attr == "byteorder":
+                                lbl = self.get_or_create_string("little")
+                                self.emit(f"lea rax, [{lbl}]", "sys.byteorder -> little")
+                                val_handled = True
+                            elif expr.attr == "maxsize":
+                                self.emit("mov rax, 9223372036854775807", "sys.maxsize (int64 max)")
+                                val_handled = True
+                            elif expr.attr == "hexversion":
+                                hexv = (self.py_version[0] << 24) | (self.py_version[1] << 16) | (self.py_micro << 8) | 0xF0
+                                self.emit(f"mov rax, {hexv}", f"sys.hexversion -> 0x{hexv:08X}")
+                                val_handled = True
+                            elif expr.attr == "argv":
+                                lbl_app = self.get_or_create_string("app.exe")
+                                self.emit("mov ecx, 1")
+                                self.emit("call _pyfasm_list_create")
+                                self.emit(f"lea rdx, [{lbl_app}]")
+                                self.emit("mov [rax + 8], rdx")
+                                val_handled = True
+                    if not val_handled:
                         namespaced_global = f"{mod_name}_{expr.attr}"
                         if namespaced_global in self.module.global_vars:
                             self.emit(f"mov rax, [{safe_global_label(namespaced_global)}]", f"load module global {mod_name}.{expr.attr}")
@@ -3776,6 +3873,21 @@ include 'functions.inc'
                     self.emit("xor eax, eax")
                     self.emit_raw(f"{lbl_done_sz}:")
                     return
+                if (
+                    isinstance(expr.value, ast.Attribute)
+                    and expr.value.attr == "version_info"
+                    and isinstance(expr.value.value, ast.Name)
+                    and expr.value.value.id == "sys"
+                ):
+                    if expr.attr == "major":
+                        self.emit(f"mov rax, {self.py_version[0]}", "sys.version_info.major")
+                        return
+                    elif expr.attr == "minor":
+                        self.emit(f"mov rax, {self.py_version[1]}", "sys.version_info.minor")
+                        return
+                    elif expr.attr == "micro":
+                        self.emit(f"mov rax, {self.py_micro}", "sys.version_info.micro")
+                        return
                 if expr.attr == "real":
                     self._generate_expr(expr.value)
                     return
@@ -8211,6 +8323,33 @@ include 'functions.inc'
             self.emit("sub rsp, 32", "shadow space for _pyfasm_functools_reduce")
             self.emit("call _pyfasm_functools_reduce")
             self.emit("add rsp, 32")
+            return
+
+        # itertools.batched(seq, n) - Python 3.12+ / 3.14 / 3.15
+        if (func_name in ("batched", "itertools_batched") or (prefix == "itertools" and attr_name == "batched")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "batch size n")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "seq list")
+            self.emit("pop rdx", "batch size n")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_itertools_batched")
+            self.emit("call _pyfasm_itertools_batched")
+            self.emit("add rsp, 32")
+            return
+
+        # math.sumprod(p, q) - Python 3.12+ / 3.14 / 3.15
+        if (func_name in ("sumprod", "math_sumprod") or (prefix == "math" and attr_name == "sumprod")) and len(call.args) >= 2:
+            self._generate_expr(call.args[1])
+            self.emit("push rax", "vec q")
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "vec p")
+            self.emit("pop rdx", "vec q")
+            self.emit("call _pyfasm_math_sumprod")
+            return
+
+        # os.cpu_count() / os.process_cpu_count() - Python 3.13+ / 3.14 / 3.15
+        if func_name in ("cpu_count", "process_cpu_count") or (prefix == "os" and attr_name in ("cpu_count", "process_cpu_count")):
+            self.emit("call _pyfasm_os_cpu_count")
             return
 
         if func_name == "spawn_thread":

@@ -8,7 +8,7 @@ Both `pyfasm64` and `pyfasm` (or `python -m pyfasm64` / `python -m pyfasm`) invo
 
 ### Global Flags
 
-* `-V`, `--version`: Prints `<prog> 1.0.0` and exits.
+* `-V`, `--version`: Prints compiler and host Python version (e.g. `pyfasm64 1.1.0 (Host Python: 3.15.2)`).
 
 ### `compile` — Compile Python file or project directory to a native binary
 
@@ -21,6 +21,11 @@ pyfasm64 compile <source> [OPTIONS]
 | `source` | required | Path to a `.py` file or project directory |
 | `-o`, `--output` | `<stem>.<ext>` | Output binary path (`.exe`, `.dll`, `.elf`, `.macho`, `.bin`) |
 | `--target` | `win64` | Target platform: `win64`, `dll`, `linux`, `macos`, `apple`, `myos` |
+| `--gui`, `-w`, `--windowed` | auto-detected | Compile as a Win32 GUI windowed subsystem executable (suppress console window) |
+| `--console`, `-c` | auto-detected | Compile with console subsystem (standard I/O enabled) |
+| `--python-version`, `--py-ver` | host version | Target Python version (e.g. `3.14`, `3.15`, auto-detects host environment) |
+| `--optimize`, `-O` | `False` | Enable assembly peephole optimizations |
+| `--verbose`, `-v` | `False` | Enable verbose compilation diagnostics |
 | `--run` | `False` | Execute the compiled binary immediately after compilation |
 | `--no-asm` | `False` | Do not keep the intermediate `asm/` directory |
 | `--export-fasm`, `-f` | `None` | Export self-contained compilable FASM folder with build scripts (default folder name: `FASM`) |
@@ -30,7 +35,7 @@ pyfasm64 compile <source> [OPTIONS]
 ### `check` — Validate compatibility and diagnostics without assembling
 
 ```bash
-pyfasm64 check <source> [--target win64] [--strict]
+pyfasm64 check <source> [--target win64] [--gui] [--python-version 3.15] [--strict] [--verbose]
 ```
 
 Runs `AstAnalyzer` (including multi-file dependency resolution and syntax checks) and `X64CodeGen` without creating `asm/` outputs or running FASM. Exits `0` if no errors (or prints warnings to `stderr`), exits `1` on errors (or warnings when `--strict` is set).
@@ -38,7 +43,7 @@ Runs `AstAnalyzer` (including multi-file dependency resolution and syntax checks
 ### `emit-asm` — Emit FASM x86-64 assembly to stdout or file
 
 ```bash
-pyfasm64 emit-asm <source> [-o out.asm] [--target win64] [--icon app.ico] [--strict]
+pyfasm64 emit-asm <source> [-o out.asm] [--target win64] [--gui] [--console] [--python-version 3.15] [--icon app.ico] [--strict]
 ```
 
 Prints formatted diagnostics to `stderr` and exits `1` if errors are present (honoring `--strict`). Otherwise writes or prints complete FASM x64 assembly.

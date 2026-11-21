@@ -1779,6 +1779,234 @@ _pyfasm_str_concat:
     pop     rbp
     ret
 
+_pyfasm_str_join:
+    ; RCX = sep_str, RDX = seq_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rsi, rcx
+    mov     rbx, rdx
+    test    rbx, rbx
+    jz      .join_empty
+    mov     r12, [rbx]
+    test    r12, r12
+    jle     .join_empty
+
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_auto_to_str
+    mov     r15, rax
+    mov     r13, 1
+.join_loop:
+    cmp     r13, r12
+    jge     .join_done
+    mov     rcx, r15
+    mov     rdx, rsi
+    call    _pyfasm_str_concat
+    mov     r15, rax
+    mov     rcx, [rbx + r13 * 8 + 8]
+    call    _pyfasm_auto_to_str
+    mov     rcx, r15
+    mov     rdx, rax
+    call    _pyfasm_str_concat
+    mov     r15, rax
+    inc     r13
+    jmp     .join_loop
+
+.join_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     r15, rax
+.join_done:
+    mov     rax, r15
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_removeprefix:
+    ; RCX = str, RDX = prefix
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    call    _pyfasm_str_startswith
+    test    eax, eax
+    jz      .rmp_ret_orig
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    add     rbx, rax
+.rmp_ret_orig:
+    mov     rax, rbx
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_removesuffix:
+    ; RCX = str, RDX = suffix
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    call    _pyfasm_str_endswith
+    test    eax, eax
+    jz      .rms_ret_orig
+    mov     rcx, rbx
+    call    _pyfasm_str_len
+    mov     rdi, rax
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    sub     rdi, rax
+    lea     rcx, [rdi + 1]
+    call    _pyfasm_alloc
+    mov     rsi, rax
+    mov     rcx, rdi
+    mov     rdx, rbx
+.rms_copy:
+    test    rcx, rcx
+    jz      .rms_done
+    mov     al, [rdx]
+    mov     [rsi], al
+    inc     rdx
+    inc     rsi
+    dec     rcx
+    jmp     .rms_copy
+.rms_done:
+    mov     byte [rsi], 0
+    sub     rsi, rdi
+    mov     rax, rsi
+    jmp     .rms_ret
+.rms_ret_orig:
+    mov     rax, rbx
+.rms_ret:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_replace:
+    ; RCX = target, RDX = old_str, R8 = new_str
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 64
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     rdi, r8
+    test    rbx, rbx
+    jz      .srep_ret_empty
+    test    rsi, rsi
+    jz      .srep_ret_orig
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r12, rax
+    test    r12, r12
+    jz      .srep_ret_orig
+
+    mov     rcx, rdi
+    call    _pyfasm_str_len
+    mov     r13, rax
+
+    mov     ecx, 65536
+    call    _pyfasm_alloc
+    mov     r14, rax
+    mov     r15, rax
+
+.srep_loop:
+    mov     al, [rbx]
+    test    al, al
+    jz      .srep_finish
+
+    mov     rcx, rbx
+    mov     rdx, rsi
+    call    _pyfasm_str_startswith
+    test    eax, eax
+    jz      .srep_copy_char
+
+    mov     rcx, r13
+    mov     rdx, rdi
+.srep_copy_new:
+    test    rcx, rcx
+    jz      .srep_adv_old
+    mov     al, [rdx]
+    mov     [r15], al
+    inc     rdx
+    inc     r15
+    dec     rcx
+    jmp     .srep_copy_new
+.srep_adv_old:
+    add     rbx, r12
+    jmp     .srep_loop
+
+.srep_copy_char:
+    mov     al, [rbx]
+    mov     [r15], al
+    inc     rbx
+    inc     r15
+    jmp     .srep_loop
+
+.srep_finish:
+    mov     byte [r15], 0
+    mov     rax, r14
+    jmp     .srep_ret
+.srep_ret_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    jmp     .srep_ret
+.srep_ret_orig:
+    mov     rax, rbx
+.srep_ret:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_str_cmp:
     ; RCX = key1, RDX = key2
     ; Returns RAX = 1 if equal, 0 if not equal
@@ -2843,6 +3071,177 @@ _pyfasm_dict_remove:
 .rem_done:
     xor     eax, eax
 .rem_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_values:
+    ; RCX = dict_ptr -> returns RAX = list of values
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dval_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.dval_loop:
+    cmp     r14, r13
+    jge     .dval_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .dval_next
+    cmp     rax, -1
+    je      .dval_next
+    mov     rcx, r12
+    mov     rdx, [rsi + 16]
+    call    _pyfasm_list_append
+.dval_next:
+    inc     r14
+    jmp     .dval_loop
+.dval_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.dval_done:
+    mov     rax, r12
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_keys:
+    ; RCX = dict_ptr -> returns RAX = list of keys
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dkey_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.dkey_loop:
+    cmp     r14, r13
+    jge     .dkey_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .dkey_next
+    cmp     rax, -1
+    je      .dkey_next
+    mov     rcx, r12
+    mov     rdx, [rsi + 8]
+    call    _pyfasm_list_append
+.dkey_next:
+    inc     r14
+    jmp     .dkey_loop
+.dkey_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.dkey_done:
+    mov     rax, r12
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_items:
+    ; RCX = dict_ptr -> returns RAX = list of (key, val) pairs
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .ditem_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.ditem_loop:
+    cmp     r14, r13
+    jge     .ditem_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .ditem_next
+    cmp     rax, -1
+    je      .ditem_next
+    mov     ecx, 2
+    call    _pyfasm_list_create
+    mov     rdi, rax
+    mov     rcx, rdi
+    mov     rdx, [rsi + 8]
+    call    _pyfasm_list_append
+    mov     rcx, rdi
+    mov     rdx, [rsi + 16]
+    call    _pyfasm_list_append
+    mov     rcx, r12
+    mov     rdx, rdi
+    call    _pyfasm_list_append
+.ditem_next:
+    inc     r14
+    jmp     .ditem_loop
+.ditem_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.ditem_done:
+    mov     rax, r12
     lea     rsp, [rbp - 48]
     pop     r14
     pop     r13
@@ -5047,6 +5446,150 @@ _pyfasm_functools_reduce:
     pop     rbp
     ret
 
+math_sumprod:
+sumprod:
+_pyfasm_math_sumprod:
+    ; RCX = list a, RDX = list b -> RAX = sum(a[i] * b[i])
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    xor     rax, rax
+    test    rcx, rcx
+    jz      .sp_done
+    test    rdx, rdx
+    jz      .sp_done
+    mov     rsi, rcx
+    mov     rdi, rdx
+    mov     r12, [rsi]
+    mov     r13, [rdi]
+    cmp     r12, r13
+    cmovg   r12, r13
+    test    r12, r12
+    jle     .sp_done
+    xor     ecx, ecx
+.sp_loop:
+    cmp     rcx, r12
+    jge     .sp_done
+    mov     rdx, [rsi + rcx * 8 + 8]
+    imul    rdx, [rdi + rcx * 8 + 8]
+    add     rax, rdx
+    inc     rcx
+    jmp     .sp_loop
+.sp_done:
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+itertools_batched:
+batched:
+_pyfasm_itertools_batched:
+    ; RCX = list, RDX = batch size n -> RAX = list of batch lists
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    mov     rsi, rcx
+    mov     r12, rdx
+    test    rsi, rsi
+    jz      .bat_empty
+    cmp     r12, 1
+    jl      .bat_empty
+    mov     r13, [rsi]
+    test    r13, r13
+    jle     .bat_empty
+
+    mov     rax, r13
+    add     rax, r12
+    dec     rax
+    xor     edx, edx
+    div     r12
+    mov     r14, rax
+
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax
+    mov     [rbx], r14
+
+    xor     r15, r15
+    xor     edi, edi
+.bat_outer_loop:
+    cmp     r15, r14
+    jge     .bat_finish
+
+    mov     rcx, r13
+    sub     rcx, rdi
+    cmp     rcx, r12
+    cmovg   rcx, r12
+    mov     [rsp + 32], rcx
+
+    call    _pyfasm_list_create
+    mov     r8, rax
+    mov     rcx, [rsp + 32]
+    mov     [r8], rcx
+
+    xor     edx, edx
+.bat_inner_loop:
+    cmp     rdx, [rsp + 32]
+    jge     .bat_inner_done
+    mov     rax, [rsi + rdi * 8 + 8]
+    mov     [r8 + rdx * 8 + 8], rax
+    inc     rdi
+    inc     rdx
+    jmp     .bat_inner_loop
+.bat_inner_done:
+    mov     [rbx + r15 * 8 + 8], r8
+    inc     r15
+    jmp     .bat_outer_loop
+
+.bat_finish:
+    mov     rax, rbx
+    jmp     .bat_ret
+.bat_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+.bat_ret:
+    add     rsp, 48
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+os_cpu_count:
+cpu_count:
+process_cpu_count:
+_pyfasm_os_cpu_count:
+    mov     rax, [gs:60h]
+    test    rax, rax
+    jz      .cpu_def
+    movzx   eax, byte [rax + 0B8h]
+    test    eax, eax
+    jnz     .cpu_ret
+.cpu_def:
+    mov     eax, 8
+.cpu_ret:
+    ret
+
 
 _pyfasm_load_ext_symbol:
     push    rbp
@@ -5854,9 +6397,11 @@ _pyfasm_auto_to_str:
     and     rsp, -16
     mov     rbx, rcx
     call    _pyfasm_is_utf8_str_ptr
-    mov     rax, rbx
     test    eax, eax
-    jnz     .ats_done
+    jz      .ats_int
+    mov     rax, rbx
+    jmp     .ats_done
+.ats_int:
     mov     rcx, rbx
     call    _pyfasm_int_to_str
 .ats_done:
@@ -11916,6 +12461,234 @@ _pyfasm_str_concat:
     pop     rbp
     ret
 
+_pyfasm_str_join:
+    ; RCX = sep_str, RDX = seq_ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rsi, rcx
+    mov     rbx, rdx
+    test    rbx, rbx
+    jz      .join_empty
+    mov     r12, [rbx]
+    test    r12, r12
+    jle     .join_empty
+
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_auto_to_str
+    mov     r15, rax
+    mov     r13, 1
+.join_loop:
+    cmp     r13, r12
+    jge     .join_done
+    mov     rcx, r15
+    mov     rdx, rsi
+    call    _pyfasm_str_concat
+    mov     r15, rax
+    mov     rcx, [rbx + r13 * 8 + 8]
+    call    _pyfasm_auto_to_str
+    mov     rcx, r15
+    mov     rdx, rax
+    call    _pyfasm_str_concat
+    mov     r15, rax
+    inc     r13
+    jmp     .join_loop
+
+.join_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     r15, rax
+.join_done:
+    mov     rax, r15
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_removeprefix:
+    ; RCX = str, RDX = prefix
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    call    _pyfasm_str_startswith
+    test    eax, eax
+    jz      .rmp_ret_orig
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    add     rbx, rax
+.rmp_ret_orig:
+    mov     rax, rbx
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_removesuffix:
+    ; RCX = str, RDX = suffix
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    call    _pyfasm_str_endswith
+    test    eax, eax
+    jz      .rms_ret_orig
+    mov     rcx, rbx
+    call    _pyfasm_str_len
+    mov     rdi, rax
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    sub     rdi, rax
+    lea     rcx, [rdi + 1]
+    call    _pyfasm_alloc
+    mov     rsi, rax
+    mov     rcx, rdi
+    mov     rdx, rbx
+.rms_copy:
+    test    rcx, rcx
+    jz      .rms_done
+    mov     al, [rdx]
+    mov     [rsi], al
+    inc     rdx
+    inc     rsi
+    dec     rcx
+    jmp     .rms_copy
+.rms_done:
+    mov     byte [rsi], 0
+    sub     rsi, rdi
+    mov     rax, rsi
+    jmp     .rms_ret
+.rms_ret_orig:
+    mov     rax, rbx
+.rms_ret:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_replace:
+    ; RCX = target, RDX = old_str, R8 = new_str
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 64
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    mov     rdi, r8
+    test    rbx, rbx
+    jz      .srep_ret_empty
+    test    rsi, rsi
+    jz      .srep_ret_orig
+
+    mov     rcx, rsi
+    call    _pyfasm_str_len
+    mov     r12, rax
+    test    r12, r12
+    jz      .srep_ret_orig
+
+    mov     rcx, rdi
+    call    _pyfasm_str_len
+    mov     r13, rax
+
+    mov     ecx, 65536
+    call    _pyfasm_alloc
+    mov     r14, rax
+    mov     r15, rax
+
+.srep_loop:
+    mov     al, [rbx]
+    test    al, al
+    jz      .srep_finish
+
+    mov     rcx, rbx
+    mov     rdx, rsi
+    call    _pyfasm_str_startswith
+    test    eax, eax
+    jz      .srep_copy_char
+
+    mov     rcx, r13
+    mov     rdx, rdi
+.srep_copy_new:
+    test    rcx, rcx
+    jz      .srep_adv_old
+    mov     al, [rdx]
+    mov     [r15], al
+    inc     rdx
+    inc     r15
+    dec     rcx
+    jmp     .srep_copy_new
+.srep_adv_old:
+    add     rbx, r12
+    jmp     .srep_loop
+
+.srep_copy_char:
+    mov     al, [rbx]
+    mov     [r15], al
+    inc     rbx
+    inc     r15
+    jmp     .srep_loop
+
+.srep_finish:
+    mov     byte [r15], 0
+    mov     rax, r14
+    jmp     .srep_ret
+.srep_ret_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    jmp     .srep_ret
+.srep_ret_orig:
+    mov     rax, rbx
+.srep_ret:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_str_cmp:
     ; RCX = key1, RDX = key2
     ; Returns RAX = 1 if equal, 0 if not equal
@@ -12980,6 +13753,177 @@ _pyfasm_dict_remove:
 .rem_done:
     xor     eax, eax
 .rem_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_values:
+    ; RCX = dict_ptr -> returns RAX = list of values
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dval_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.dval_loop:
+    cmp     r14, r13
+    jge     .dval_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .dval_next
+    cmp     rax, -1
+    je      .dval_next
+    mov     rcx, r12
+    mov     rdx, [rsi + 16]
+    call    _pyfasm_list_append
+.dval_next:
+    inc     r14
+    jmp     .dval_loop
+.dval_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.dval_done:
+    mov     rax, r12
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_keys:
+    ; RCX = dict_ptr -> returns RAX = list of keys
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .dkey_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.dkey_loop:
+    cmp     r14, r13
+    jge     .dkey_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .dkey_next
+    cmp     rax, -1
+    je      .dkey_next
+    mov     rcx, r12
+    mov     rdx, [rsi + 8]
+    call    _pyfasm_list_append
+.dkey_next:
+    inc     r14
+    jmp     .dkey_loop
+.dkey_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.dkey_done:
+    mov     rax, r12
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_dict_items:
+    ; RCX = dict_ptr -> returns RAX = list of (key, val) pairs
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .ditem_empty
+    mov     rcx, [rbx + 8]
+    call    _pyfasm_list_create
+    mov     r12, rax
+    mov     r13, [rbx]
+    xor     r14, r14
+.ditem_loop:
+    cmp     r14, r13
+    jge     .ditem_done
+    lea     rax, [r14 + r14 * 2]
+    shl     rax, 3
+    lea     rsi, [rbx + 16 + rax]
+    mov     rax, [rsi]
+    test    rax, rax
+    jz      .ditem_next
+    cmp     rax, -1
+    je      .ditem_next
+    mov     ecx, 2
+    call    _pyfasm_list_create
+    mov     rdi, rax
+    mov     rcx, rdi
+    mov     rdx, [rsi + 8]
+    call    _pyfasm_list_append
+    mov     rcx, rdi
+    mov     rdx, [rsi + 16]
+    call    _pyfasm_list_append
+    mov     rcx, r12
+    mov     rdx, rdi
+    call    _pyfasm_list_append
+.ditem_next:
+    inc     r14
+    jmp     .ditem_loop
+.ditem_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     r12, rax
+.ditem_done:
+    mov     rax, r12
     lea     rsp, [rbp - 48]
     pop     r14
     pop     r13
@@ -15184,6 +16128,150 @@ _pyfasm_functools_reduce:
     pop     rbp
     ret
 
+math_sumprod:
+sumprod:
+_pyfasm_math_sumprod:
+    ; RCX = list a, RDX = list b -> RAX = sum(a[i] * b[i])
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    xor     rax, rax
+    test    rcx, rcx
+    jz      .sp_done
+    test    rdx, rdx
+    jz      .sp_done
+    mov     rsi, rcx
+    mov     rdi, rdx
+    mov     r12, [rsi]
+    mov     r13, [rdi]
+    cmp     r12, r13
+    cmovg   r12, r13
+    test    r12, r12
+    jle     .sp_done
+    xor     ecx, ecx
+.sp_loop:
+    cmp     rcx, r12
+    jge     .sp_done
+    mov     rdx, [rsi + rcx * 8 + 8]
+    imul    rdx, [rdi + rcx * 8 + 8]
+    add     rax, rdx
+    inc     rcx
+    jmp     .sp_loop
+.sp_done:
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+itertools_batched:
+batched:
+_pyfasm_itertools_batched:
+    ; RCX = list, RDX = batch size n -> RAX = list of batch lists
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    mov     rsi, rcx
+    mov     r12, rdx
+    test    rsi, rsi
+    jz      .bat_empty
+    cmp     r12, 1
+    jl      .bat_empty
+    mov     r13, [rsi]
+    test    r13, r13
+    jle     .bat_empty
+
+    mov     rax, r13
+    add     rax, r12
+    dec     rax
+    xor     edx, edx
+    div     r12
+    mov     r14, rax
+
+    mov     rcx, r14
+    call    _pyfasm_list_create
+    mov     rbx, rax
+    mov     [rbx], r14
+
+    xor     r15, r15
+    xor     edi, edi
+.bat_outer_loop:
+    cmp     r15, r14
+    jge     .bat_finish
+
+    mov     rcx, r13
+    sub     rcx, rdi
+    cmp     rcx, r12
+    cmovg   rcx, r12
+    mov     [rsp + 32], rcx
+
+    call    _pyfasm_list_create
+    mov     r8, rax
+    mov     rcx, [rsp + 32]
+    mov     [r8], rcx
+
+    xor     edx, edx
+.bat_inner_loop:
+    cmp     rdx, [rsp + 32]
+    jge     .bat_inner_done
+    mov     rax, [rsi + rdi * 8 + 8]
+    mov     [r8 + rdx * 8 + 8], rax
+    inc     rdi
+    inc     rdx
+    jmp     .bat_inner_loop
+.bat_inner_done:
+    mov     [rbx + r15 * 8 + 8], r8
+    inc     r15
+    jmp     .bat_outer_loop
+
+.bat_finish:
+    mov     rax, rbx
+    jmp     .bat_ret
+.bat_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+.bat_ret:
+    add     rsp, 48
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+os_cpu_count:
+cpu_count:
+process_cpu_count:
+_pyfasm_os_cpu_count:
+    mov     rax, [gs:60h]
+    test    rax, rax
+    jz      .cpu_def
+    movzx   eax, byte [rax + 0B8h]
+    test    eax, eax
+    jnz     .cpu_ret
+.cpu_def:
+    mov     eax, 8
+.cpu_ret:
+    ret
+
 
 _pyfasm_load_ext_symbol:
     push    rbp
@@ -15973,9 +17061,11 @@ _pyfasm_auto_to_str:
     and     rsp, -16
     mov     rbx, rcx
     call    _pyfasm_is_utf8_str_ptr
-    mov     rax, rbx
     test    eax, eax
-    jnz     .ats_done
+    jz      .ats_int
+    mov     rax, rbx
+    jmp     .ats_done
+.ats_int:
     mov     rcx, rbx
     call    _pyfasm_int_to_str
 .ats_done:

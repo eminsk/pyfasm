@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument(
         "-V", "--version",
         action="version",
-        version=f"%(prog)s {__version__}",
+        version=f"%(prog)s {__version__} (Host Python: {sys.version.split()[0]})",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -28,8 +28,13 @@ def main() -> int:
     # Subcommand: compile
     p_compile = subparsers.add_parser("compile", help="Compile a Python file or project directory to a single native x64 binary")
     p_compile.add_argument("source", help="Path to input Python source file (.py) or project directory")
+    p_compile.add_argument("--python-version", "--py-ver", default=None, help="Target Python language version (default: auto-detected host version, e.g. 3.14, 3.15)")
     p_compile.add_argument("-o", "--output", help="Path to output binary (.exe, .dll, .elf, .macho, or .bin)")
     p_compile.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_compile.add_argument("--gui", "--windowed", "-w", action="store_true", help="Compile as a Win32 GUI windowed subsystem executable (suppress console window)")
+    p_compile.add_argument("--console", "-c", action="store_true", help="Compile with console subsystem (standard I/O enabled)")
+    p_compile.add_argument("--optimize", "-O", action="store_true", help="Enable assembly peephole optimizations")
+    p_compile.add_argument("--verbose", "-v", action="store_true", help="Enable verbose compilation diagnostics")
     p_compile.add_argument("--run", action="store_true", help="Execute compiled binary immediately after successful build")
     p_compile.add_argument("--no-asm", action="store_true", help="Do not keep intermediate .asm file")
     p_compile.add_argument("--export-fasm", "-f", nargs="?", const="FASM", default=None, help="Export complete self-contained compilable FASM source directory with build scripts (default: FASM)")
@@ -39,16 +44,23 @@ def main() -> int:
     # Subcommand: check
     p_check = subparsers.add_parser("check", help="Validate Python compatibility and report errors/warnings without assembling")
     p_check.add_argument("source", help="Path to input Python source file (.py) or project directory")
+    p_check.add_argument("--python-version", "--py-ver", default=None, help="Target Python language version (default: auto-detected host version)")
     p_check.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_check.add_argument("--gui", "--windowed", "-w", action="store_true", help="Validate under GUI windowed subsystem")
     p_check.add_argument("--strict", action="store_true", help="Treat warnings as errors (non-zero exit code)")
+    p_check.add_argument("--verbose", "-v", action="store_true", help="Enable verbose diagnostics")
 
     # Subcommand: emit-asm
     p_asm = subparsers.add_parser("emit-asm", help="Output generated FASM x64 assembly to stdout or file")
     p_asm.add_argument("source", help="Path to input Python source file (.py) or project directory")
+    p_asm.add_argument("--python-version", "--py-ver", default=None, help="Target Python language version (default: auto-detected host version)")
     p_asm.add_argument("-o", "--output", help="Path to output .asm file")
     p_asm.add_argument("--target", default="win64", help="Target OS platform (win64, dll, linux, macos, apple, myos)")
+    p_asm.add_argument("--gui", "--windowed", "-w", action="store_true", help="Target GUI windowed application structure")
+    p_asm.add_argument("--console", "-c", action="store_true", help="Target console application structure")
     p_asm.add_argument("--icon", default=None, help="Path to .ico icon file for PE resources")
     p_asm.add_argument("--strict", action="store_true", help="Treat compiler warnings as errors")
+    p_asm.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
 
     # Subcommand: bundle
     p_bundle = subparsers.add_parser("bundle", help="Bundle a full Python project into a native x64 monolithic executable")
@@ -122,7 +134,8 @@ def main() -> int:
         print(content)
         return 0
 
-    compiler = PyFasmCompiler()
+    py_ver_opt = getattr(args, "python_version", None)
+    compiler = PyFasmCompiler(py_version=py_ver_opt)
 
     if args.command == "clean":
         files_count, bytes_freed, items = PyFasmCompiler.clean_cache(
@@ -163,11 +176,14 @@ def main() -> int:
         print(f"[PyFASM SUCCESS] Project bundled into native executable: {out_bin}")
         return 0
 
+    gui_opt = True if getattr(args, "gui", False) else (False if getattr(args, "console", False) else None)
+
     if args.command == "check":
         ok, report = compiler.check_file(
             source_path=args.source,
             target=args.target,
             strict=args.strict,
+            gui=gui_opt,
         )
         if report.items:
             print(report.format_all(), file=sys.stderr)
@@ -186,6 +202,7 @@ def main() -> int:
             export_fasm_dir=args.export_fasm,
             icon_path=args.icon,
             strict=args.strict,
+            gui=gui_opt,
         )
 
         if not success:
@@ -219,14 +236,29 @@ def main() -> int:
         from pyfasm.ast_parser import AstAnalyzer
         from pyfasm.codegen_x64 import X64CodeGen
 
-        analyzer = AstAnalyzer(project_root=project_dir)
+        analyzer = AstAnalyzer(
+            project_root=project_dir,
+            py_version=compiler.py_version,
+            py_micro=compiler.py_micro,
+        )
         parsed_mod = analyzer.parse_file(src_file, project_root=project_dir)
+        if gui_opt is True:
+            parsed_mod.is_gui_app = True
+            parsed_mod.is_modern_gui = True
+        elif gui_opt is False:
+            parsed_mod.is_gui_app = False
         report.extend(parsed_mod.diagnostics)
         if report.has_errors:
             print(report.format_all(), file=sys.stderr)
             return 1
 
-        codegen = X64CodeGen(parsed_mod, target=args.target, icon_path=args.icon)
+        codegen = X64CodeGen(
+            parsed_mod,
+            target=args.target,
+            icon_path=args.icon,
+            py_version=compiler.py_version,
+            py_micro=compiler.py_micro,
+        )
         asm_code = codegen.generate()
         report.extend(codegen.diagnostics)
         if args.strict:
