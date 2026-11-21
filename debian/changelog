@@ -1,3 +1,12 @@
+python3-pyfasm64 (2.0.1-1) stable; urgency=medium
+
+  * Patch Release 2.0.1: Matplotlib native adaptation & strict mode diagnostic parity.
+  * Registered matplotlib.backends.backend_tkagg and matplotlib.figure in NATIVELY_SUPPORTED_OR_ADAPTED_MODULES.
+  * Overhauled terminal documentation renderer (pyfasm docs) with box-drawing tables.
+  * Fixed generator expression and lambda variable capture scoping.
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 15:30:00 -0500
+
 python3-pyfasm64 (2.0.0-1) stable; urgency=medium
 
   * Major Milestone: Release PyFASM64 2.0.0 (Next-Gen Authentic Compiler & Python 3.15 Parity).

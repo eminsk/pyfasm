@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [2.0.1] - 2026-11-21
+
+### Fixed & Enhanced
+- **Matplotlib Native Strict Parity**:
+  - Registered `matplotlib.backends.backend_tkagg` and `matplotlib.figure` in `NATIVELY_SUPPORTED_OR_ADAPTED_MODULES`, eliminating `error[E2005]` diagnostics when compiling Matplotlib figures and canvases with `--strict`.
+- **Terminal Docs Formatting Overhaul**:
+  - Enhanced `pyfasm docs` and `pyfasm docs --ru` with aligned Unicode box-drawing tables (`┌───┬───┐`, `│...│`, `└───┴───┘`), framed code blocks, and stripped web-specific badges.
+- **Generator & Lambda Variable Scoping**:
+  - Fixed free variable collection in `GeneratorExpLifter` to properly isolate parameter scopes of `ast.Lambda` and prevent false `W3001` external symbol warnings.
+
+---
+
 ## [2.0.0] - 2026-11-21
 
 ### Added
