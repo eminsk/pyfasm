@@ -13,7 +13,7 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 | `int` | Signed 64-bit integer (`int64`) | Floor division (`//`) and modulo (`%`) follow Python sign semantics, not C truncation |
 | `float` | IEEE-754 double (`float64`, SSE2) | Exact bit representation including `-0.0`, `inf`, `-inf`, `nan`; leading fraction zeros preserved in `print()` |
 | `bool` | 64-bit integer (`0` / `1`) | Short-circuiting `and` / `or` and ternary expressions supported |
-| `str` | Null-terminated UTF-8/ASCII buffer pointer | `len()`, slicing, indexing, `+` concatenation, f-strings, `.lower()`, `.upper()`, `.strip()`, `.split()`, `.join()`, `.replace()`, `.startswith()`, `.endswith()`, `.count()`, `.removeprefix()`, `.removesuffix()` |
+| `str` | Null-terminated UTF-8/ASCII buffer pointer | UTF-8 codepoint `len()`, indexing `s[i]`, slicing `s[start:stop:step]`, `+` concatenation, f-strings, Cyrillic/ASCII `.lower()`, `.upper()` (including `Ё`/`ё`), `.strip()`, `.split()`, `.join()`, `.replace()`, `.startswith()`, `.endswith()`, `.count()`, `.removeprefix()`, `.removesuffix()` |
 | `list` | Heap buffer `[length, item0, item1, ...]` | Negative indexing, slicing with step, comprehensions, `.append()`, `.insert()`, `.pop()`, `.sort()`, `.count()`, `+`, `*`, `in` |
 | `tuple` | Heap buffer `[length, item0, item1, ...]` | Tuple unpacking, swap `a, b = b, a`, nested unpacking, tuple keys in `dict` |
 | `dict` | Open-addressing hash table (pow2 slots, tombstones `-1`) | `int` (including negative keys like `-1`), `str`, and `tuple` keys; `.get()`, `.pop(k[, default])`, `.keys()`, `.values()`, `.items()`, `in`, `len()`, comprehensions |
@@ -24,7 +24,8 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 
 ## 2. Functions, Control Flow & Modern Python Syntax
 
-* **Functions**: defaults, keyword arguments, recursion (16-byte stack aligned), 0–20+ arguments, closures reading globals, first-class functions & lambdas.
+* **Identifiers & Encoding**: Full UTF-8 / Cyrillic / Unicode identifiers for functions, classes, and local/global variables via collision-free hex-encoded FASM labels.
+* **Functions & Closures**: defaults, keyword arguments, recursion (16-byte stack aligned), 0–20+ arguments, real lexical closures (capturing lambdas and nested `def` functions usable directly, indirectly, and with `map()`/`filter()`), first-class functions & lambdas.
 * **Control Flow**: `if`/`elif`/`else`, `while`/`for ... else`, `break`, `continue`, chained comparisons (`0 <= x < 10`), walrus operator (`:=`), `assert`, structural pattern matching (`match`/`case`), `try`/`except`/`finally`/`raise`.
 * **Generators & Comprehensions**: `yield`, `yield from`, generator expressions `(x * 2 for x in seq if ...)`, list/dict/set comprehensions.
 * **No-GIL Multithreading**: `spawn_thread(worker, param)`, `wait_thread(handle)`, `atomic_add(ptr, val)`, `atomic_sub(ptr, val)`, `get_tick_count()`, `sleep_ms(ms)`.
@@ -33,19 +34,19 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 
 ## 3. Object-Oriented Programming & Magic Methods
 
-### Classes & Inheritance
-* Instance allocation, attribute initialization (`self.x = ...`), method calls, multi-level single inheritance (`class GrandSub(Sub)`), `super().__init__(...)` and `super().method(...)`.
-* Properties: `@property` getters and `@name.setter` setters.
+### Classes, Inheritance & Polymorphism
+* Instance allocation with runtime class tags, inheritance (single & multi-level), `super().__init__(...)` and `super().method(...)`, polymorphic virtual dispatch across base/subclass hierarchies, `isinstance(obj, T)`, and `issubclass(C, T)`.
+* Decorators: `@property` / `@name.setter`, `@staticmethod`, and `@classmethod` (including dynamic `cls(...)` constructors and `issubclass(cls, Base)`).
 * Automatic `__init__` synthesis when a class defines annotated attributes (`x: int`) without an explicit `__init__`.
 
 ### Magic Methods (Dunders) Matrix
 
 | Category | Supported in Native Codegen | Not Wired (`W2006` warning / `E2006` in `--strict`) |
 | :--- | :--- | :--- |
-| Lifecycle | `__init__`, `__new__` | `__del__` |
-| Binary Operators | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__floordiv__`, `__mod__`, `__pow__`, `__and__`, `__or__`, `__xor__`, `__lshift__`, `__rshift__` | Reflected variants (`__radd__`, etc.), in-place (`__iadd__`) |
-| Comparisons | `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__` | — |
-| Containers & Formatting | `__len__`, `__getitem__`, `__setitem__`, `__contains__`, `__str__`, `__repr__` | `__call__`, `__iter__`, `__next__`, `__enter__`, `__exit__`, `__bool__`, `__hash__`, `__format__`, `__getattr__`, `__getattribute__`, `__setattr__`, `__delattr__` |
+| Lifecycle & Contexts | `__init__`, `__new__`, `__enter__`, `__exit__` | `__del__` |
+| Operators (Binary, Unary & In-Place) | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__floordiv__`, `__mod__`, `__pow__`, `__and__`, `__or__`, `__xor__`, `__lshift__`, `__rshift__`, `__neg__`, `__pos__`, `__invert__`, `__iadd__`..`__ixor__` | Reflected variants (`__radd__`, etc.) |
+| Comparisons & Truthiness | `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`, `__bool__` | — |
+| Containers, Iteration, Callables & Formatting | `__len__`, `__getitem__`, `__setitem__`, `__contains__`, `__str__`, `__repr__`, `__call__`, `__iter__`, `__next__` (with `StopIteration`) | `__hash__`, `__format__`, `__getattr__`, `__getattribute__`, `__setattr__`, `__delattr__` |
 
 > **Tip:** Annotate variables holding custom class instances (`v: Vector` or assign directly from `Vector(...)`) so static dispatch always finds dunder methods and properties cleanly.
 
@@ -76,9 +77,9 @@ Running `pyfasm64 check` or `pyfasm64 compile` flags these immediately instead o
   * `E2002`: `class X(metaclass=...)`
   * `E2003`: `nonlocal` statements in nested scopes
 * **Warnings (promoted to errors under `--strict`)**:
-  * `W2004`: `with <expr>:` where `<expr>` is not `open(...)`
+  * `W2004`: `with <expr>:` where `<expr>` is neither `open(...)` nor a class instance defining `__enter__`/`__exit__`
   * `W2005`: Imports of known unsupported/binary C-extension packages
-  * `W2006`: Unsupported magic methods on classes (`__call__`, `__enter__`, `__iter__`, etc.)
+  * `W2006`: Unsupported magic methods on classes (`__getattr__`, `__hash__`, `__del__`, etc.)
   * `W3001`: Unresolved external function or symbol calls (default mode emits a `xor eax, eax` stub for compatibility; `--strict` rejects them cleanly)
 
 ---

@@ -3,7 +3,7 @@ Type definitions and annotations for the PyFASM compiler.
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 
 class PyFasmType:
@@ -105,6 +105,8 @@ class SetType(PyFasmType):
 class TupleType(PyFasmType):
     name: str = "tuple"
     size_bytes: int = 8  # Pointer to heap tuple descriptor
+    element_type: Optional[PyFasmType] = None
+    element_types: Optional[Tuple[PyFasmType, ...]] = None
 
 
 @dataclass(frozen=True)

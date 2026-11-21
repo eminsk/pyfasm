@@ -17,9 +17,9 @@ Warnings (`Wxxxx`) still allow compilation to succeed in default mode (emitting 
 | **`E2001`** | `error` | Semantic Check | Asyncio construct (`async def`, `await`, `async for`, `async with`) in AOT compile mode |
 | **`E2002`** | `error` | Semantic Check | Metaclass (`class X(metaclass=...)`) in AOT compile mode |
 | **`E2003`** | `error` | Semantic Check | `nonlocal` statement inside nested closure |
-| **`W2004`** / **`E2004`** | `warning` (strict -> `error`) | Semantic Check | Custom `with` context manager (non-`open(...)` expression) |
+| **`W2004`** / **`E2004`** | `warning` (strict -> `error`) | Semantic Check | `with <expr>:` where `<expr>` is not `open(...)` or a class defining `__enter__`/`__exit__` |
 | **`W2005`** / **`E2005`** | `warning` (strict -> `error`) | Import Check | Unsupported external or binary C-extension module import (`pandas`, `asyncio`, `torch`, etc.) |
-| **`W2006`** / **`E2006`** | `warning` (strict -> `error`) | OOP Check | Class defines a magic method not wired for automatic dispatch (`__call__`, `__iter__`, etc.) |
+| **`W2006`** / **`E2006`** | `warning` (strict -> `error`) | OOP Check | Class defines a magic method not wired for automatic dispatch (`__getattr__`, `__hash__`, `__del__`, etc.) |
 | **`W3001`** / **`E3001`** | `warning` (strict -> `error`) | Codegen | Unresolved external symbol (fallback stub returning `0` emitted) |
 | **`E4001`** | `error` | Assembler | FASM assembly error (includes `.asm` file, line number, instruction, and hint) |
 | **`E4002`** | `error` | Assembler | FASM assembler binary missing or failed to execute |
@@ -82,11 +82,11 @@ error[E2001]: Asyncio construct 'async FunctionDef' is not supported in AOT nati
 
 ---
 
-### `W2004` (`E2004` with `--strict`) — Custom `with` context manager
+### `W2004` (`E2004` with `--strict`) — Unmanaged `with` context expression
 
-Only `with open(...) as f:` has a dedicated native file-handle lowering. Custom `__enter__`/`__exit__` context managers emit `W2004`.
+`with open(...) as f:` and classes defining `__enter__` / `__exit__` compile natively. Any other `with <expr>:` expression emits `W2004`.
 
-**Fix:** Call explicit resource setup and cleanup in `try: ... finally:` for native compilation, or use `pyfasm64 bundle`.
+**Fix:** Implement `__enter__`/`__exit__` on the context class, use explicit cleanup in `try: ... finally:`, or package with `pyfasm64 bundle`.
 
 ---
 
@@ -107,9 +107,9 @@ warning[W2005]: External or C-extension module 'pandas' is not natively compiled
 
 ### `W2006` (`E2006` with `--strict`) — Unwired magic method
 
-Dunders such as `__call__`, `__iter__`, `__next__`, `__enter__`, `__exit__`, `__bool__`, `__hash__`, `__del__`, `__getattr__` are flagged because calling the object (`obj()`) or iterating it (`for x in obj:`) does not dispatch them automatically.
+Dunders such as `__getattr__`, `__getattribute__`, `__setattr__`, `__delattr__`, `__del__`, `__hash__`, `__format__`, and reflected `__r*__` operators are flagged because native dispatch does not synthesize attribute traps or CPython destructors automatically.
 
-**Fix:** Call named methods explicitly (e.g. `obj.apply(...)`, `obj.to_list()`) or stick to the supported operators/containers (`__init__`, `__add__`..`__xor__`, `__eq__`..`__ge__`, `__len__`, `__getitem__`, `__setitem__`, `__contains__`, `__str__`, `__repr__`).
+**Fix:** Call named methods explicitly (e.g. `obj.apply(...)`, `obj.to_list()`) or use the wired operators, callables, iterators, and context managers (`__init__`, `__call__`, `__bool__`, `__enter__`/`__exit__`, `__iter__`/`__next__`, `__add__`..`__xor__`, `__iadd__`..`__ixor__`, `__neg__`/`__pos__`/`__invert__`, `__eq__`..`__ge__`, `__len__`, `__getitem__`, `__setitem__`, `__contains__`, `__str__`, `__repr__`).
 
 ---
 

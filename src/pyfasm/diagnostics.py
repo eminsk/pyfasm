@@ -11,24 +11,19 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 VALID_TARGETS: Tuple[str, ...] = ("win64", "dll", "linux", "macos", "apple", "myos")
 
 UNSUPPORTED_DUNDERS: Set[str] = {
-    "__call__",
-    "__enter__",
-    "__exit__",
-    "__iter__",
-    "__next__",
     "__del__",
     "__getattr__",
     "__getattribute__",
     "__setattr__",
     "__delattr__",
-    "__bool__",
     "__hash__",
     "__format__",
 }
 
 SUPPORTED_DUNDERS_SUMMARY: str = (
-    "__init__, __new__, __add__..__xor__, __eq__..__ge__, "
-    "__len__, __getitem__, __setitem__, __contains__, __str__, __repr__"
+    "__init__, __new__, __add__..__xor__, __iadd__..__ixor__, __neg__, __pos__, __invert__, "
+    "__eq__..__ge__, __len__, __getitem__, __setitem__, __contains__, __str__, __repr__, "
+    "__bool__, __call__, __iter__, __next__, __enter__, __exit__"
 )
 
 NATIVELY_SUPPORTED_OR_ADAPTED_MODULES: Set[str] = {

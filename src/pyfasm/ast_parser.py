@@ -9,14 +9,15 @@ import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 _AST_MATCH = getattr(ast, 'Match', ())
 _AST_MATCH_AS = getattr(ast, 'MatchAs', ())
 _AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
 _AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
-    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR, InstanceType, ListType, DictType, SetType
+    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR,
+    InstanceType, ListType, DictType, SetType, TupleType
 )
 from pyfasm.diagnostics import (
     CompilerDiagnostic,
@@ -36,6 +37,7 @@ class VariableSymbol:
     is_arg: bool = False
     arg_index: int = 0
     is_generator: bool = False
+    is_dynamic: bool = False
 
 
 @dataclass
@@ -51,6 +53,10 @@ class FunctionSymbol:
     is_generator: bool = False
     defaults: List[ast.expr] = field(default_factory=list)
     source_file: Optional[str] = None
+    is_staticmethod: bool = False
+    is_classmethod: bool = False
+    is_closure: bool = False
+    is_dynamic_return: bool = False
 
 
 @dataclass
@@ -69,6 +75,9 @@ class ClassSymbol:
     properties: Dict[str, PropertySymbol] = field(default_factory=dict)
     class_attrs: Dict[str, Any] = field(default_factory=dict)
     field_types: Dict[str, PyFasmType] = field(default_factory=dict)
+    field_classes: Dict[str, str] = field(default_factory=dict)
+    static_methods: Set[str] = field(default_factory=set)
+    class_methods: Set[str] = field(default_factory=set)
     ast_node: Optional[ast.ClassDef] = None
 
 
@@ -91,6 +100,7 @@ class ParsedModule:
     string_literals: List[StringLiteral] = field(default_factory=list)
     float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
+    global_var_types: Dict[str, PyFasmType] = field(default_factory=dict)
     imports: List[str] = field(default_factory=list)
     detected_libraries: Set[str] = field(default_factory=set)
     main_func: Optional[FunctionSymbol] = None
@@ -361,30 +371,263 @@ class ChainedCompareTransformer(ast.NodeTransformer):
         )
 
 
-class LambdaLifter(ast.NodeTransformer):
-    """Lifts anonymous lambda expressions into module-level FunctionDef nodes."""
+class ClosureLifter(ast.NodeTransformer):
+    """Lifts anonymous lambdas and nested functions to top-level definitions with lexical closure capture."""
 
     def __init__(self):
         super().__init__()
         self.lambdas: List[ast.FunctionDef] = []
         self.counter: int = 0
+        self.scope_stack: List[Set[str]] = []
+
+    @staticmethod
+    def _collect_target_names(target: ast.AST, out: Set[str]) -> None:
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                ClosureLifter._collect_target_names(elt, out)
+        elif isinstance(target, ast.Starred):
+            ClosureLifter._collect_target_names(target.value, out)
+
+    @classmethod
+    def _collect_fn_bound_names(cls, fn_node: ast.FunctionDef) -> Set[str]:
+        bound: Set[str] = set()
+        globals_declared: Set[str] = set()
+        for a in getattr(fn_node.args, "posonlyargs", []):
+            bound.add(a.arg)
+        for a in fn_node.args.args:
+            bound.add(a.arg)
+        for a in getattr(fn_node.args, "kwonlyargs", []):
+            bound.add(a.arg)
+        if fn_node.args.vararg:
+            bound.add(fn_node.args.vararg.arg)
+        if fn_node.args.kwarg:
+            bound.add(fn_node.args.kwarg.arg)
+
+        for sub in walk_local_scope(fn_node):
+            if isinstance(sub, ast.Global):
+                globals_declared.update(sub.names)
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    cls._collect_target_names(t, bound)
+            elif isinstance(sub, ast.AnnAssign):
+                cls._collect_target_names(sub.target, bound)
+            elif isinstance(sub, ast.AugAssign):
+                cls._collect_target_names(sub.target, bound)
+            elif isinstance(sub, ast.For):
+                cls._collect_target_names(sub.target, bound)
+            elif isinstance(sub, ast.With):
+                for item in sub.items:
+                    if item.optional_vars:
+                        cls._collect_target_names(item.optional_vars, bound)
+            elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                bound.add(sub.name)
+            elif isinstance(sub, ast.NamedExpr):
+                cls._collect_target_names(sub.target, bound)
+            elif isinstance(sub, ast.FunctionDef) and sub is not fn_node:
+                bound.add(sub.name)
+
+        return bound - globals_declared
+
+    @classmethod
+    def _collect_comp_and_walrus_names(cls, node: ast.AST) -> Set[str]:
+        bound: Set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                for gen in sub.generators:
+                    cls._collect_target_names(gen.target, bound)
+            elif isinstance(sub, ast.NamedExpr):
+                cls._collect_target_names(sub.target, bound)
+        return bound
+
+    @staticmethod
+    def _collect_loaded_names(nodes: List[ast.AST]) -> Set[str]:
+        loaded: Set[str] = set()
+        for root in nodes:
+            for sub in ast.walk(root):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                    loaded.add(sub.id)
+        return loaded
+
+    @staticmethod
+    def _make_closure_args(orig_args: ast.arguments) -> ast.arguments:
+        env_arg = ast.arg(arg="_pyfasm_env", annotation=None, type_comment=None)
+        posonly = list(getattr(orig_args, "posonlyargs", []))
+        args = list(orig_args.args)
+        if posonly:
+            posonly = [env_arg] + posonly
+        else:
+            args = [env_arg] + args
+        return ast.arguments(
+            posonlyargs=posonly,
+            args=args,
+            vararg=orig_args.vararg,
+            kwonlyargs=list(getattr(orig_args, "kwonlyargs", [])),
+            kw_defaults=list(getattr(orig_args, "kw_defaults", [])),
+            kwarg=orig_args.kwarg,
+            defaults=list(orig_args.defaults),
+        )
+
+    def _enclosing_vars(self) -> Set[str]:
+        out: Set[str] = set()
+        for s in self.scope_stack:
+            out.update(s)
+        return out
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        self.generic_visit(node)
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        is_nested = len(self.scope_stack) > 0
+        if is_nested:
+            is_nested_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in walk_local_scope(node))
+            if is_nested_gen or node.decorator_list:
+                return node
+
+        fn_bound = self._collect_fn_bound_names(node)
+        self.scope_stack.append(fn_bound)
+        try:
+            self.generic_visit(node)
+        finally:
+            self.scope_stack.pop()
+
+        if not is_nested:
+            return node
+
+        enclosing = self._enclosing_vars()
+        loaded = self._collect_loaded_names(list(node.body))
+        comp_bound = self._collect_comp_and_walrus_names(node)
+        free = loaded - fn_bound - comp_bound - {node.name}
+        captured = sorted(n for n in free if n in enclosing)
+
+        self.counter += 1
+        if not captured:
+            lifted_name = f"_pyfasm_nested_{self.counter}"
+            lifted_fn = ast.FunctionDef(
+                name=lifted_name,
+                args=node.args,
+                body=list(node.body),
+                decorator_list=[],
+                returns=node.returns,
+                lineno=getattr(node, "lineno", 1),
+                col_offset=getattr(node, "col_offset", 0),
+            )
+            self.lambdas.append(lifted_fn)
+            assign = ast.Assign(
+                targets=[ast.Name(id=node.name, ctx=ast.Store())],
+                value=ast.Name(id=lifted_name, ctx=ast.Load()),
+            )
+            return ast.copy_location(assign, node)
+
+        lifted_name = f"_pyfasm_closure_{self.counter}"
+        preamble: List[ast.stmt] = [
+            ast.Assign(
+                targets=[ast.Name(id=cap_name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="_pyfasm_closure_get", ctx=ast.Load()),
+                    args=[ast.Name(id="_pyfasm_env", ctx=ast.Load()), ast.Constant(value=idx)],
+                    keywords=[],
+                ),
+            )
+            for idx, cap_name in enumerate(captured)
+        ]
+        lifted_fn = ast.FunctionDef(
+            name=lifted_name,
+            args=self._make_closure_args(node.args),
+            body=preamble + list(node.body),
+            decorator_list=[],
+            returns=node.returns,
+            lineno=getattr(node, "lineno", 1),
+            col_offset=getattr(node, "col_offset", 0),
+        )
+        self.lambdas.append(lifted_fn)
+        factory_call = ast.Call(
+            func=ast.Name(id="_pyfasm_closure_new", ctx=ast.Load()),
+            args=[ast.Name(id=lifted_name, ctx=ast.Load())]
+            + [ast.Name(id=cap_name, ctx=ast.Load()) for cap_name in captured],
+            keywords=[],
+        )
+        assign = ast.Assign(
+            targets=[ast.Name(id=node.name, ctx=ast.Store())],
+            value=factory_call,
+        )
+        return ast.copy_location(assign, node)
 
     def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
-        self.generic_visit(node)
+        own_args: Set[str] = set()
+        for a in getattr(node.args, "posonlyargs", []):
+            own_args.add(a.arg)
+        for a in node.args.args:
+            own_args.add(a.arg)
+        for a in getattr(node.args, "kwonlyargs", []):
+            own_args.add(a.arg)
+        if node.args.vararg:
+            own_args.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            own_args.add(node.args.kwarg.arg)
+
+        self.scope_stack.append(own_args)
+        try:
+            self.generic_visit(node)
+        finally:
+            self.scope_stack.pop()
+
+        enclosing = self._enclosing_vars()
+        comp_bound = self._collect_comp_and_walrus_names(node.body)
+        loaded = self._collect_loaded_names([node.body])
+        free = loaded - own_args - comp_bound
+        captured = sorted(n for n in free if n in enclosing)
+
         self.counter += 1
-        fn_name = f"_pyfasm_lambda_{self.counter}"
-        ret_stmt = ast.Return(value=node.body)
+        if not captured:
+            fn_name = f"_pyfasm_lambda_{self.counter}"
+            fn_def = ast.FunctionDef(
+                name=fn_name,
+                args=node.args,
+                body=[ast.Return(value=node.body)],
+                decorator_list=[],
+                returns=None,
+                lineno=getattr(node, "lineno", 1),
+                col_offset=getattr(node, "col_offset", 0),
+            )
+            self.lambdas.append(fn_def)
+            return ast.copy_location(ast.Name(id=fn_name, ctx=ast.Load()), node)
+
+        fn_name = f"_pyfasm_closure_{self.counter}"
+        body_stmts: List[ast.stmt] = [
+            ast.Assign(
+                targets=[ast.Name(id=cap_name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="_pyfasm_closure_get", ctx=ast.Load()),
+                    args=[ast.Name(id="_pyfasm_env", ctx=ast.Load()), ast.Constant(value=idx)],
+                    keywords=[],
+                ),
+            )
+            for idx, cap_name in enumerate(captured)
+        ]
+        body_stmts.append(ast.Return(value=node.body))
         fn_def = ast.FunctionDef(
             name=fn_name,
-            args=node.args,
-            body=[ret_stmt],
+            args=self._make_closure_args(node.args),
+            body=body_stmts,
             decorator_list=[],
             returns=None,
             lineno=getattr(node, "lineno", 1),
-            col_offset=getattr(node, "col_offset", 0)
+            col_offset=getattr(node, "col_offset", 0),
         )
         self.lambdas.append(fn_def)
-        return ast.Name(id=fn_name, ctx=ast.Load())
+        factory_call = ast.Call(
+            func=ast.Name(id="_pyfasm_closure_new", ctx=ast.Load()),
+            args=[ast.Name(id=fn_name, ctx=ast.Load())]
+            + [ast.Name(id=cap_name, ctx=ast.Load()) for cap_name in captured],
+            keywords=[],
+        )
+        return ast.copy_location(factory_call, node)
+
+
+LambdaLifter = ClosureLifter
 
 
 class YieldFromTransformer(ast.NodeTransformer):
@@ -570,6 +813,9 @@ class AstAnalyzer:
         self._str_counter = 0
         self._flt_counter = 0
         self._current_source_file: Optional[str] = None
+        self._current_mod_prefix: str = ""
+        self._closure_cap_types: Dict[str, List[PyFasmType]] = {}
+        self._current_func_name: str = ""
         if self.project_root:
             self._discover_site_packages()
 
@@ -610,6 +856,26 @@ class AstAnalyzer:
             if ln is not None and 1 <= ln <= len(src_lines):
                 return src_lines[ln - 1]
             return None
+
+        cm_classes: Set[str] = set()
+        for cls_node in ast.walk(tree):
+            if isinstance(cls_node, ast.ClassDef):
+                for cls_item in cls_node.body:
+                    if isinstance(cls_item, (ast.FunctionDef, ast.AsyncFunctionDef)) and cls_item.name in ("__enter__", "__exit__"):
+                        cm_classes.add(cls_node.name)
+                        break
+
+        cm_var_names: Set[str] = set()
+        if cm_classes:
+            for sub in ast.walk(tree):
+                if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call) and isinstance(sub.value.func, ast.Name):
+                    if sub.value.func.id in cm_classes:
+                        for tgt in sub.targets:
+                            if isinstance(tgt, ast.Name):
+                                cm_var_names.add(tgt.id)
+                elif isinstance(sub, ast.arg) and isinstance(getattr(sub, "annotation", None), ast.Name):
+                    if sub.annotation.id in cm_classes:
+                        cm_var_names.add(sub.arg)
 
         def _check_import(mod_name: str, imp_node: ast.AST) -> None:
             if not mod_name:
@@ -721,7 +987,11 @@ class AstAnalyzer:
                         and isinstance(ctx.func, ast.Name)
                         and ctx.func.id == "open"
                     )
-                    if not is_open_call:
+                    is_custom_cm = (
+                        (isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Name) and ctx.func.id in cm_classes)
+                        or (isinstance(ctx, ast.Name) and ctx.id in cm_var_names)
+                    )
+                    if not is_open_call and not is_custom_cm:
                         w_ln, w_col, w_end = self._ast_span(ctx)
                         module.diagnostics.append(
                             CompilerDiagnostic(
@@ -1169,73 +1439,152 @@ class AstAnalyzer:
         mod_prefix: str = ""
     ) -> None:
         self.current_module = module
-        top_level_stmts = []
-        for stmt in tree.body:
-            if isinstance(stmt, ast.Assign):
-                for tgt in stmt.targets:
-                    if isinstance(tgt, ast.Name):
-                        init_val = 0
-                        if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, int):
-                            init_val = int(stmt.value.value)  # bool -> int (False->0, True->1)
-                        module.global_vars[tgt.id] = init_val
-                        if mod_prefix:
-                            module.global_vars[f"{mod_prefix}_{tgt.id}"] = init_val
-            if isinstance(stmt, ast.FunctionDef):
-                fn = self._analyze_function(stmt)
-                if fn.name not in module.functions:
-                    module.functions[fn.name] = fn
-                if mod_prefix:
-                    alias_name = f"{mod_prefix}_{fn.name}"
-                    if alias_name not in module.functions:
-                        module.functions[alias_name] = fn
-                if is_entry and fn.name == "main":
-                    module.main_func = fn
-            elif isinstance(stmt, ast.ClassDef):
-                cls_assigns = self._analyze_class(stmt, module, mod_prefix=mod_prefix)
-                if cls_assigns:
-                    top_level_stmts.extend(cls_assigns)
-            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                continue
-            elif isinstance(stmt, ast.If):
-                is_main_guard = False
-                if isinstance(stmt.test, ast.Compare):
-                    if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
-                       any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
-                        is_main_guard = True
-                if is_main_guard:
-                    if is_entry:
-                        top_level_stmts.extend(stmt.body)
+        prev_mod_prefix = self._current_mod_prefix
+        self._current_mod_prefix = mod_prefix
+        try:
+            top_level_stmts = []
+            func_defs: List[ast.FunctionDef] = []
+
+            # Pass 0: pre-register module-level globals (including types) so functions defined
+            # anywhere in the module see accurate global_var_types.
+            def _scan_global_stmt(s: ast.stmt) -> None:
+                if isinstance(s, ast.Assign):
+                    val_t = self._infer_node_type(s.value, {})
+                    for tgt in s.targets:
+                        if isinstance(tgt, ast.Name):
+                            init_val = 0
+                            if isinstance(s.value, ast.Constant) and isinstance(s.value.value, int):
+                                init_val = int(s.value.value)
+                            module.global_vars[tgt.id] = init_val
+                            self._record_global_var_type(module, tgt.id, val_t, mod_prefix)
+                            if mod_prefix:
+                                module.global_vars[f"{mod_prefix}_{tgt.id}"] = init_val
+                        elif isinstance(tgt, (ast.Tuple, ast.List)):
+                            self._record_global_unpack_types(module, tgt, val_t, mod_prefix)
+                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                    vname = s.target.id
+                    vtype = TYPE_INT
+                    if isinstance(s.annotation, ast.Name):
+                        vtype = resolve_type(s.annotation.id)
+                    elif isinstance(s.annotation, ast.Constant) and isinstance(s.annotation.value, str):
+                        vtype = resolve_type(s.annotation.value)
+                    if s.value is not None:
+                        inferred = self._infer_node_type(s.value, {})
+                        if vtype == TYPE_INT or self._should_upgrade_type(vtype, inferred):
+                            vtype = inferred
+                    init_val = 0
+                    if s.value is not None and isinstance(s.value, ast.Constant) and isinstance(s.value.value, int):
+                        init_val = int(s.value.value)
+                    module.global_vars.setdefault(vname, init_val)
+                    self._record_global_var_type(module, vname, vtype, mod_prefix)
+                    if mod_prefix:
+                        module.global_vars.setdefault(f"{mod_prefix}_{vname}", init_val)
+
+            for _scan_pass in range(2):
+                for stmt in tree.body:
+                    if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                        _scan_global_stmt(stmt)
+                    elif isinstance(stmt, ast.If) and is_entry:
+                        is_mg = False
+                        if isinstance(stmt.test, ast.Compare):
+                            if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
+                               any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
+                                is_mg = True
+                        if is_mg:
+                            for sub_s in stmt.body:
+                                if isinstance(sub_s, (ast.Assign, ast.AnnAssign)):
+                                    _scan_global_stmt(sub_s)
+
+            owned_fn_keys: List[Tuple[ast.FunctionDef, bool, bool]] = []
+            for stmt in tree.body:
+                if isinstance(stmt, ast.FunctionDef):
+                    func_defs.append(stmt)
+                    fn = self._analyze_function(stmt)
+                    added_primary = fn.name not in module.functions
+                    if added_primary:
+                        module.functions[fn.name] = fn
+                    added_alias = False
+                    if mod_prefix:
+                        alias_name = f"{mod_prefix}_{fn.name}"
+                        if alias_name not in module.functions:
+                            module.functions[alias_name] = fn
+                            added_alias = True
+                    owned_fn_keys.append((stmt, added_primary, added_alias))
+                    if is_entry and fn.name == "main":
+                        module.main_func = fn
+                elif isinstance(stmt, ast.ClassDef):
+                    cls_assigns = self._analyze_class(stmt, module, mod_prefix=mod_prefix)
+                    if cls_assigns:
+                        top_level_stmts.extend(cls_assigns)
+                elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
                     continue
+                elif isinstance(stmt, ast.If):
+                    is_main_guard = False
+                    if isinstance(stmt.test, ast.Compare):
+                        if (isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__") or \
+                           any(isinstance(c, ast.Name) and getattr(c, "id", None) == "__name__" for c in stmt.test.comparators):
+                            is_main_guard = True
+                    if is_main_guard:
+                        if is_entry:
+                            top_level_stmts.extend(stmt.body)
+                        continue
+                    else:
+                        top_level_stmts.append(stmt)
                 else:
                     top_level_stmts.append(stmt)
-            else:
-                top_level_stmts.append(stmt)
 
-        if is_entry and top_level_stmts:
-            calls_main = any(
-                isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main"
-                for s in top_level_stmts
-            )
-            if "main" not in module.functions:
-                entry_fn_def = ast.FunctionDef(
-                    name="main",
-                    args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-                    body=top_level_stmts,
-                    decorator_list=[],
-                    returns=None,
-                    lineno=1,
-                    col_offset=0
+            if is_entry and top_level_stmts:
+                calls_main = any(
+                    isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main"
+                    for s in top_level_stmts
                 )
-                fn_sym = self._analyze_function(entry_fn_def)
-                module.functions["main"] = fn_sym
-                module.main_func = fn_sym
-            else:
+                if "main" not in module.functions:
+                    entry_fn_def = ast.FunctionDef(
+                        name="main",
+                        args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                        body=top_level_stmts,
+                        decorator_list=[],
+                        returns=None,
+                        lineno=1,
+                        col_offset=0
+                    )
+                    fn_sym = self._analyze_function(entry_fn_def)
+                    module.functions["main"] = fn_sym
+                    module.main_func = fn_sym
+                else:
+                    assigned_names = []
+                    filtered_stmts = [
+                        s for s in top_level_stmts
+                        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main")
+                    ]
+                    for s in filtered_stmts:
+                        if isinstance(s, ast.Assign):
+                            for tgt in s.targets:
+                                if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
+                                    assigned_names.append(tgt.id)
+                        elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                            if s.target.id not in assigned_names:
+                                assigned_names.append(s.target.id)
+                    if assigned_names:
+                        filtered_stmts = [ast.Global(names=assigned_names)] + filtered_stmts
+
+                    entry_fn_def = ast.FunctionDef(
+                        name="_pyfasm_top_level_init",
+                        args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+                        body=filtered_stmts,
+                        decorator_list=[],
+                        returns=None,
+                        lineno=1,
+                        col_offset=0
+                    )
+                    fn_sym = self._analyze_function(entry_fn_def)
+                    module.functions["_pyfasm_top_level_init"] = fn_sym
+                    if "_pyfasm_top_level_init" not in module.module_inits:
+                        module.module_inits.append("_pyfasm_top_level_init")
+            elif not is_entry and mod_prefix and top_level_stmts:
+                init_fn_name = f"_pyfasm_modinit_{mod_prefix}"
                 assigned_names = []
-                filtered_stmts = [
-                    s for s in top_level_stmts
-                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Name) and s.value.func.id == "main")
-                ]
-                for s in filtered_stmts:
+                for s in top_level_stmts:
                     if isinstance(s, ast.Assign):
                         for tgt in s.targets:
                             if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
@@ -1244,48 +1593,49 @@ class AstAnalyzer:
                         if s.target.id not in assigned_names:
                             assigned_names.append(s.target.id)
                 if assigned_names:
-                    filtered_stmts = [ast.Global(names=assigned_names)] + filtered_stmts
+                    top_level_stmts = [ast.Global(names=assigned_names)] + top_level_stmts
 
-                entry_fn_def = ast.FunctionDef(
-                    name="_pyfasm_top_level_init",
+                init_fn_def = ast.FunctionDef(
+                    name=init_fn_name,
                     args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-                    body=filtered_stmts,
+                    body=top_level_stmts,
                     decorator_list=[],
                     returns=None,
                     lineno=1,
                     col_offset=0
                 )
-                fn_sym = self._analyze_function(entry_fn_def)
-                module.functions["_pyfasm_top_level_init"] = fn_sym
-                if "_pyfasm_top_level_init" not in module.module_inits:
-                    module.module_inits.append("_pyfasm_top_level_init")
-        elif not is_entry and mod_prefix and top_level_stmts:
-            init_fn_name = f"_pyfasm_modinit_{mod_prefix}"
-            assigned_names = []
-            for s in top_level_stmts:
-                if isinstance(s, ast.Assign):
-                    for tgt in s.targets:
-                        if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
-                            assigned_names.append(tgt.id)
-                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
-                    if s.target.id not in assigned_names:
-                        assigned_names.append(s.target.id)
-            if assigned_names:
-                top_level_stmts = [ast.Global(names=assigned_names)] + top_level_stmts
+                fn_sym = self._analyze_function(init_fn_def)
+                module.functions[init_fn_name] = fn_sym
+                if init_fn_name not in module.module_inits:
+                    module.module_inits.append(init_fn_name)
 
-            init_fn_def = ast.FunctionDef(
-                name=init_fn_name,
-                args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-                body=top_level_stmts,
-                decorator_list=[],
-                returns=None,
-                lineno=1,
-                col_offset=0
-            )
-            fn_sym = self._analyze_function(init_fn_def)
-            module.functions[init_fn_name] = fn_sym
-            if init_fn_name not in module.module_inits:
-                module.module_inits.append(init_fn_name)
+            # Second pass on module functions so forward-called functions and globals initialized
+            # in top-level statements propagate return/variable types everywhere.
+            for fn_def, added_primary, added_alias in owned_fn_keys:
+                fn2 = self._analyze_function(fn_def)
+                if added_primary:
+                    module.functions[fn2.name] = fn2
+                if added_alias and mod_prefix:
+                    module.functions[f"{mod_prefix}_{fn2.name}"] = fn2
+                if is_entry and fn2.name == "main":
+                    module.main_func = fn2
+        finally:
+            self._current_mod_prefix = prev_mod_prefix
+
+    def _resolve_annotation_type(self, ann_node: Optional[ast.AST]) -> Optional[PyFasmType]:
+        if ann_node is None:
+            return None
+        ann_name: Optional[str] = None
+        if isinstance(ann_node, ast.Name):
+            ann_name = ann_node.id
+        elif isinstance(ann_node, ast.Constant) and isinstance(ann_node.value, str):
+            ann_name = ann_node.value
+        if not ann_name:
+            return None
+        mod = getattr(self, "current_module", None)
+        if mod is not None and ann_name in mod.classes:
+            return InstanceType(class_name=ann_name)
+        return resolve_type(ann_name)
 
     def _analyze_class(self, node: ast.ClassDef, module: ParsedModule, mod_prefix: str = "") -> ClassSymbol:
         cls_name = node.name
@@ -1298,13 +1648,28 @@ class AstAnalyzer:
 
         cls_sym = ClassSymbol(name=cls_name, bases=bases, ast_node=node)
 
-        # Discover field assignments in class methods (especially self.x = ...)
+        # Inherit known field types & classes from base classes
+        for base in bases:
+            base_sym = module.classes.get(base)
+            if base_sym:
+                cls_sym.field_types.update(getattr(base_sym, "field_types", {}))
+                cls_sym.field_classes.update(getattr(base_sym, "field_classes", {}))
+                cls_sym.static_methods.update(getattr(base_sym, "static_methods", set()))
+                cls_sym.class_methods.update(getattr(base_sym, "class_methods", set()))
+
+        # Discover field declarations & class attributes in class body and methods
         fields: List[str] = []
         class_assigns: List[ast.Assign] = []
         for item in node.body:
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                if item.target.id not in fields:
-                    fields.append(item.target.id)
+                fname = item.target.id
+                if fname not in fields:
+                    fields.append(fname)
+                ann_t = self._resolve_annotation_type(item.annotation)
+                if ann_t is not None:
+                    cls_sym.field_types[fname] = ann_t
+                    if isinstance(ann_t, InstanceType):
+                        cls_sym.field_classes[fname] = ann_t.class_name
             elif isinstance(item, ast.Assign):
                 for tgt in item.targets:
                     if isinstance(tgt, ast.Name):
@@ -1317,10 +1682,10 @@ class AstAnalyzer:
                         global_name = f"{cls_name}_{tgt.id}"
                         module.global_vars[global_name] = 0
                         module.global_vars[tgt.id] = 0
-                        if isinstance(item.value, (ast.Dict, ast.DictComp)):
-                            cls_sym.field_types[tgt.id] = TYPE_DICT
-                        elif isinstance(item.value, (ast.List, ast.ListComp)):
-                            cls_sym.field_types[tgt.id] = TYPE_LIST
+                        vt = self._infer_node_type(item.value, {})
+                        cls_sym.field_types[tgt.id] = vt
+                        if isinstance(vt, InstanceType):
+                            cls_sym.field_classes[tgt.id] = vt.class_name
                         class_assigns.append(ast.Assign(
                             targets=[ast.Name(id=global_name, ctx=ast.Store())],
                             value=item.value
@@ -1336,29 +1701,84 @@ class AstAnalyzer:
                                     cls_sym.field_types[tgt.attr] = TYPE_DICT
                                 elif isinstance(sub.value, (ast.List, ast.ListComp)):
                                     cls_sym.field_types[tgt.attr] = TYPE_LIST
+                    elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Attribute):
+                        if isinstance(sub.target.value, ast.Name) and sub.target.value.id == "self":
+                            if sub.target.attr not in fields:
+                                fields.append(sub.target.attr)
+                            ann_t = self._resolve_annotation_type(sub.annotation)
+                            if ann_t is not None:
+                                cls_sym.field_types[sub.target.attr] = ann_t
+                                if isinstance(ann_t, InstanceType):
+                                    cls_sym.field_classes[sub.target.attr] = ann_t.class_name
         cls_sym.fields = fields
+        module.classes[cls_name] = cls_sym
+        if mod_prefix:
+            module.classes[f"{mod_prefix}_{cls_name}"] = cls_sym
 
-        # Extract and register methods, properties, and getters/setters
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef):
+        def _register_class_methods() -> None:
+            for item in node.body:
+                if not isinstance(item, ast.FunctionDef):
+                    continue
                 is_prop_getter = False
                 prop_setter_target = None
+                is_static = False
+                is_clsmethod = False
                 for dec in item.decorator_list:
-                    if isinstance(dec, ast.Name) and dec.id == "property":
-                        is_prop_getter = True
+                    if isinstance(dec, ast.Name):
+                        if dec.id == "property":
+                            is_prop_getter = True
+                        elif dec.id == "staticmethod":
+                            is_static = True
+                        elif dec.id == "classmethod":
+                            is_clsmethod = True
                     elif isinstance(dec, ast.Attribute) and dec.attr == "setter" and isinstance(dec.value, ast.Name):
                         prop_setter_target = dec.value.id
 
-                m_fn = self._analyze_function(item)
+                m_fn = self._analyze_function(
+                    item,
+                    owner_class=cls_name,
+                    is_static=is_static,
+                    is_classmethod=is_clsmethod,
+                )
                 m_fn.class_name = cls_name
+
+                if is_static:
+                    cls_sym.static_methods.add(item.name)
+                if is_clsmethod:
+                    cls_sym.class_methods.add(item.name)
+                    if m_fn.return_type == TYPE_VOID or m_fn.return_type == TYPE_INT:
+                        for sub in walk_local_scope(item):
+                            if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Call):
+                                if isinstance(sub.value.func, ast.Name) and sub.value.func.id in ("cls", cls_name):
+                                    m_fn.return_type = InstanceType(class_name=cls_name)
+                                    break
+
+                # Record exact inferred types for `self.<field> = <expr>` assignments
+                for sub in walk_local_scope(item):
+                    if isinstance(sub, ast.Assign):
+                        for tgt in sub.targets:
+                            if isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name) and tgt.value.id == "self":
+                                ft = self._infer_node_type(sub.value, m_fn.local_vars)
+                                cur_ft = cls_sym.field_types.get(tgt.attr)
+                                if cur_ft is None or self._should_upgrade_type(cur_ft, ft):
+                                    cls_sym.field_types[tgt.attr] = ft
+                                if isinstance(ft, InstanceType):
+                                    cls_sym.field_classes[tgt.attr] = ft.class_name
+                    elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Attribute):
+                        if isinstance(sub.target.value, ast.Name) and sub.target.value.id == "self" and sub.value is not None:
+                            ft = self._infer_node_type(sub.value, m_fn.local_vars)
+                            cur_ft = cls_sym.field_types.get(sub.target.attr)
+                            if cur_ft is None or self._should_upgrade_type(cur_ft, ft):
+                                cls_sym.field_types[sub.target.attr] = ft
+                            if isinstance(ft, InstanceType):
+                                cls_sym.field_classes[sub.target.attr] = ft.class_name
 
                 if is_prop_getter:
                     prop_name = item.name
                     getter_name = f"{cls_name}_get_{prop_name}"
                     m_fn.name = getter_name
                     cls_sym.methods[getter_name] = m_fn
-                    if getter_name not in module.functions:
-                        module.functions[getter_name] = m_fn
+                    module.functions[getter_name] = m_fn
                     module.functions[f"{cls_name}_{prop_name}"] = m_fn
                     if prop_name not in cls_sym.properties:
                         cls_sym.properties[prop_name] = PropertySymbol(name=prop_name)
@@ -1368,8 +1788,7 @@ class AstAnalyzer:
                     setter_name = f"{cls_name}_set_{prop_name}"
                     m_fn.name = setter_name
                     cls_sym.methods[setter_name] = m_fn
-                    if setter_name not in module.functions:
-                        module.functions[setter_name] = m_fn
+                    module.functions[setter_name] = m_fn
                     if prop_name not in cls_sym.properties:
                         cls_sym.properties[prop_name] = PropertySymbol(name=prop_name)
                     cls_sym.properties[prop_name].setter_name = setter_name
@@ -1377,15 +1796,13 @@ class AstAnalyzer:
                     method_name = f"{cls_name}_{item.name}"
                     m_fn.name = method_name  # Ensure class method has unique namespaced symbol name
                     cls_sym.methods[item.name] = m_fn
-
-                    # Register namespaced method: ClassName_method (e.g. StackOverflowApp_mainloop)
-                    if method_name not in module.functions:
-                        module.functions[method_name] = m_fn
-
+                    module.functions[method_name] = m_fn
                     if mod_prefix:
                         pref_name = f"{mod_prefix}_{cls_name}_{item.name}"
-                        if pref_name not in module.functions:
-                            module.functions[pref_name] = m_fn
+                        module.functions[pref_name] = m_fn
+
+        _register_class_methods()
+        _register_class_methods()
 
         # Register constructor function symbol
         init_fn = cls_sym.methods.get("__init__")
@@ -1417,7 +1834,7 @@ class AstAnalyzer:
                 lineno=getattr(node, "lineno", 1),
                 col_offset=0
             )
-            init_fn = self._analyze_function(synth_node)
+            init_fn = self._analyze_function(synth_node, owner_class=cls_name)
             init_fn.class_name = cls_name
             method_name = f"{cls_name}___init__"
             init_fn.name = method_name
@@ -1439,23 +1856,285 @@ class AstAnalyzer:
         ctor_sym = FunctionSymbol(
             name=cls_name,
             args=ctor_args,
-            return_type=TYPE_PTR,
+            defaults=list(getattr(init_fn, "defaults", [])) if init_fn else [],
+            return_type=InstanceType(class_name=cls_name),
             stack_size=64
         )
         module.functions[cls_name] = ctor_sym
         if mod_prefix:
             module.functions[f"{mod_prefix}_{cls_name}"] = ctor_sym
 
-        module.classes[cls_name] = cls_sym
-        if mod_prefix:
-            module.classes[f"{mod_prefix}_{cls_name}"] = cls_sym
-
         return class_assigns
+
+    def _record_global_var_type(
+        self,
+        module: Optional[ParsedModule],
+        vname: str,
+        new_type: Optional[PyFasmType],
+        mod_prefix: str = "",
+    ) -> None:
+        if module is None or new_type is None:
+            return
+        cur = module.global_var_types.get(vname)
+        if cur is None or self._should_upgrade_type(cur, new_type):
+            module.global_var_types[vname] = new_type
+        if mod_prefix:
+            mname = f"{mod_prefix}_{vname}"
+            cur_m = module.global_var_types.get(mname)
+            if cur_m is None or self._should_upgrade_type(cur_m, new_type):
+                module.global_var_types[mname] = new_type
+
+    def _unpack_target_types(
+        self,
+        target: ast.AST,
+        rhs_type: PyFasmType,
+    ) -> List[Tuple[str, PyFasmType]]:
+        """Compute `(var_name, inferred_type)` pairs for simple and tuple/list unpacking targets."""
+        if isinstance(target, ast.Name):
+            return [(target.id, rhs_type)]
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return []
+
+        fallback_elt = TYPE_INT
+        if rhs_type.is_str():
+            fallback_elt = TYPE_STR
+        elif rhs_type.is_list() and getattr(rhs_type, "element_type", None):
+            fallback_elt = rhs_type.element_type
+        elif rhs_type.is_tuple():
+            if getattr(rhs_type, "element_type", None):
+                fallback_elt = rhs_type.element_type
+            elif getattr(rhs_type, "element_types", None):
+                fallback_elt = self._merge_element_types(list(rhs_type.element_types)) or TYPE_INT
+
+        pos_types = getattr(rhs_type, "element_types", None) if rhs_type.is_tuple() else None
+        out: List[Tuple[str, PyFasmType]] = []
+        for idx, elt in enumerate(target.elts):
+            if isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
+                star_elt = fallback_elt if fallback_elt != TYPE_INT else None
+                out.append((elt.value.id, ListType(element_type=star_elt) if star_elt else TYPE_LIST))
+                continue
+            elt_t = pos_types[idx] if (pos_types is not None and idx < len(pos_types)) else fallback_elt
+            if isinstance(elt, ast.Name):
+                out.append((elt.id, elt_t))
+            elif isinstance(elt, (ast.Tuple, ast.List)):
+                out.extend(self._unpack_target_types(elt, elt_t))
+        return out
+
+    def _record_global_unpack_types(
+        self,
+        module: ParsedModule,
+        target: ast.AST,
+        rhs_type: PyFasmType,
+        mod_prefix: str = "",
+    ) -> None:
+        for vname, t_type in self._unpack_target_types(target, rhs_type):
+            module.global_vars.setdefault(vname, 0)
+            self._record_global_var_type(module, vname, t_type, mod_prefix)
+            if mod_prefix:
+                module.global_vars.setdefault(f"{mod_prefix}_{vname}", 0)
+
+    def _merge_element_types(self, types: List[Optional[PyFasmType]]) -> Optional[PyFasmType]:
+        """Return a common element type if all elements share a compatible shape, else None."""
+        concrete = [t for t in types if t is not None]
+        if not concrete:
+            return None
+        first = concrete[0]
+        if all(t == first for t in concrete):
+            return first
+        if all(t.is_list() for t in concrete):
+            inner = [getattr(t, "element_type", None) for t in concrete if getattr(t, "element_type", None) is not None]
+            if inner:
+                merged_inner = self._merge_element_types(inner)
+                if merged_inner is not None:
+                    return ListType(element_type=merged_inner)
+            return TYPE_LIST
+        if all(t.is_dict() for t in concrete):
+            return TYPE_DICT
+        if all(t.is_set() for t in concrete):
+            return TYPE_SET
+        if all(t.is_tuple() for t in concrete):
+            return TYPE_TUPLE
+        if all(isinstance(t, InstanceType) for t in concrete):
+            cls_names = [t.class_name for t in concrete]
+            if len(set(cls_names)) == 1:
+                return first
+            mod = getattr(self, "current_module", None)
+            if mod is not None:
+                def _ancestors(cname: str) -> List[str]:
+                    order: List[str] = []
+                    seen: Set[str] = set()
+                    q = [cname]
+                    while q:
+                        cur = q.pop(0)
+                        if cur in seen:
+                            continue
+                        seen.add(cur)
+                        order.append(cur)
+                        csym = mod.classes.get(cur)
+                        if csym:
+                            q.extend(csym.bases)
+                    return order
+
+                base_anc = _ancestors(cls_names[0])
+                other_sets = [set(_ancestors(cn)) for cn in cls_names[1:]]
+                for cand in base_anc:
+                    if all(cand in s for s in other_sets):
+                        return InstanceType(class_name=cand)
+            return TYPE_PTR
+        return None
+
+    @staticmethod
+    def _should_upgrade_type(cur: Optional[PyFasmType], new: Optional[PyFasmType]) -> bool:
+        if new is None:
+            return False
+        if cur is None:
+            return True
+        if cur == new:
+            return False
+        if cur == TYPE_INT and new != TYPE_INT:
+            return True
+        if cur.is_list() and new.is_list():
+            return getattr(cur, "element_type", None) is None and getattr(new, "element_type", None) is not None
+        if cur.is_dict() and new.is_dict():
+            return (
+                (cur.key_type is None and new.key_type is not None)
+                or (cur.val_type is None and new.val_type is not None)
+            )
+        if cur.is_set() and new.is_set():
+            return cur.element_type is None and new.element_type is not None
+        if cur.is_tuple() and new.is_tuple():
+            return (
+                (cur.element_type is None and new.element_type is not None)
+                or (cur.element_types is None and new.element_types is not None)
+            )
+        return False
+
+    def _infer_map_element_type(self, call_node: ast.Call) -> Optional[PyFasmType]:
+        """Infer element type yielded by map(func, iterable) without recursing into iter_node."""
+        if len(call_node.args) >= 2 and isinstance(call_node.args[0], ast.Name):
+            fn_name = call_node.args[0].id
+            if fn_name == "str":
+                return TYPE_STR
+            if fn_name == "float":
+                return TYPE_FLOAT
+            if fn_name == "bool":
+                return TYPE_BOOL
+            if fn_name == "int":
+                return TYPE_INT
+            mod = getattr(self, "current_module", None)
+            if mod is not None and fn_name in mod.functions:
+                rt = mod.functions[fn_name].return_type
+                return rt if rt != TYPE_VOID else None
+        return None
+
+    def _is_dynamic_expr(self, expr: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> bool:
+        """True when expr has statically ambiguous value representation (dynamic param or untyped container element)."""
+        if expr is None:
+            return False
+        if isinstance(expr, ast.Name):
+            sym = local_vars.get(expr.id)
+            return bool(sym and sym.is_dynamic and sym.var_type == TYPE_INT)
+        if isinstance(expr, ast.Subscript) and not isinstance(expr.slice, ast.Slice):
+            ct = self._infer_node_type(expr.value, local_vars)
+            if ct.is_list() and getattr(ct, "element_type", None) is None:
+                return True
+            if ct.is_tuple() and getattr(ct, "element_type", None) is None and getattr(ct, "element_types", None) is None:
+                return True
+            if ct.is_dict() and getattr(ct, "val_type", None) is None:
+                return True
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr in ("pop", "get"):
+                ct = self._infer_node_type(expr.func.value, local_vars)
+                if ct.is_list() and getattr(ct, "element_type", None) is None:
+                    return True
+                if ct.is_dict() and getattr(ct, "val_type", None) is None and len(expr.args) < 2:
+                    return True
+            elif isinstance(expr.func, ast.Name):
+                mod = getattr(self, "current_module", None)
+                if expr.func.id in local_vars and self._infer_node_type(expr, local_vars) == TYPE_INT:
+                    return True
+                if mod is not None and expr.func.id in mod.functions:
+                    if getattr(mod.functions[expr.func.id], "is_dynamic_return", False):
+                        return True
+            elif isinstance(expr.func, ast.Subscript) and self._infer_node_type(expr, local_vars) == TYPE_INT:
+                return True
+        return False
+
+    def _infer_iter_element_type(self, iter_node: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> PyFasmType:
+        """Infer the yielded item type when iterating over `iter_node` in a loop or comprehension."""
+        if iter_node is None:
+            return TYPE_INT
+        if isinstance(iter_node, ast.Call):
+            if isinstance(iter_node.func, ast.Name):
+                fid = iter_node.func.id
+                if fid == "range":
+                    return TYPE_INT
+                if fid == "enumerate":
+                    inner = self._infer_iter_element_type(iter_node.args[0], local_vars) if iter_node.args else TYPE_INT
+                    return TupleType(element_type=None, element_types=(TYPE_INT, inner))
+                if fid == "zip":
+                    if iter_node.args:
+                        elt_ts = tuple(self._infer_iter_element_type(a, local_vars) for a in iter_node.args)
+                        return TupleType(element_type=self._merge_element_types(list(elt_ts)), element_types=elt_ts)
+                    return TYPE_TUPLE
+                if fid in ("sorted", "list", "reversed", "tuple", "set") and iter_node.args:
+                    return self._infer_iter_element_type(iter_node.args[0], local_vars)
+                if fid == "map":
+                    return self._infer_map_element_type(iter_node) or TYPE_INT
+            elif isinstance(iter_node.func, ast.Attribute):
+                attr = iter_node.func.attr
+                recv_t = self._infer_node_type(iter_node.func.value, local_vars)
+                if attr in ("split", "splitlines"):
+                    return TYPE_STR
+                if attr == "keys":
+                    return getattr(recv_t, "key_type", None) or TYPE_INT
+                if attr == "values":
+                    return getattr(recv_t, "val_type", None) or TYPE_INT
+                if attr == "items":
+                    kt = getattr(recv_t, "key_type", None) or TYPE_INT
+                    vt = getattr(recv_t, "val_type", None) or TYPE_INT
+                    return TupleType(element_type=self._merge_element_types([kt, vt]), element_types=(kt, vt))
+
+        iter_t = self._infer_node_type(iter_node, local_vars)
+        if iter_t.is_str():
+            return TYPE_STR
+        if iter_t.is_list() or iter_t.is_set():
+            return getattr(iter_t, "element_type", None) or TYPE_INT
+        if iter_t.is_tuple():
+            if getattr(iter_t, "element_type", None):
+                return iter_t.element_type
+            if getattr(iter_t, "element_types", None):
+                return self._merge_element_types(list(iter_t.element_types)) or TYPE_INT
+            return TYPE_INT
+        if iter_t.is_dict():
+            return getattr(iter_t, "key_type", None) or TYPE_INT
+        if isinstance(iter_t, InstanceType):
+            mod = getattr(self, "current_module", None)
+            if mod is not None:
+                seen_cls: Set[str] = set()
+                q = [iter_t.class_name]
+                while q:
+                    cn = q.pop(0)
+                    if cn in seen_cls:
+                        continue
+                    seen_cls.add(cn)
+                    cs = mod.classes.get(cn)
+                    if cs:
+                        nm = cs.methods.get("__next__")
+                        if nm and nm.return_type != TYPE_VOID:
+                            return nm.return_type
+                        im = cs.methods.get("__iter__")
+                        if im and isinstance(im.return_type, InstanceType) and im.return_type.class_name != cn:
+                            q.append(im.return_type.class_name)
+                        q.extend(cs.bases)
+        return TYPE_INT
 
     def _infer_node_type(self, expr: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> PyFasmType:
         """Infers the PyFasmType of an AST expression using local type propagation (inspired by Shedskin & Mypyc)."""
         if expr is None:
             return TYPE_INT
+        if hasattr(ast, "Index") and isinstance(expr, ast.Index):
+            return self._infer_node_type(expr.value, local_vars)
 
         if isinstance(expr, ast.Constant):
             if isinstance(expr.value, bool):
@@ -1473,44 +2152,63 @@ class AstAnalyzer:
                 return local_vars[expr.id].var_type
             if expr.id in ("True", "False"):
                 return TYPE_BOOL
+            mod = getattr(self, "current_module", None)
+            if mod is not None:
+                if self._current_mod_prefix:
+                    prefixed_key = f"{self._current_mod_prefix}_{expr.id}"
+                    if prefixed_key in mod.global_var_types:
+                        return mod.global_var_types[prefixed_key]
+                if expr.id in mod.global_var_types:
+                    return mod.global_var_types[expr.id]
             return TYPE_INT
 
         elif isinstance(expr, ast.List):
-            elem_t = None
-            if expr.elts:
-                elem_t = self._infer_node_type(expr.elts[0], local_vars)
+            elem_t = self._merge_element_types([self._infer_node_type(e, local_vars) for e in expr.elts]) if expr.elts else None
             return ListType(element_type=elem_t) if elem_t else TYPE_LIST
 
         elif isinstance(expr, ast.ListComp):
-            elem_t = self._infer_node_type(expr.elt, local_vars)
+            comp_vars = dict(local_vars)
+            for gen in expr.generators:
+                elt_t = self._infer_iter_element_type(gen.iter, comp_vars)
+                for vname, v_t in self._unpack_target_types(gen.target, elt_t):
+                    comp_vars[vname] = VariableSymbol(name=vname, var_type=v_t, stack_offset=0)
+            elem_t = self._infer_node_type(expr.elt, comp_vars)
             return ListType(element_type=elem_t) if elem_t else TYPE_LIST
 
         elif isinstance(expr, ast.Dict):
-            kt = None
-            vt = None
-            if expr.keys and expr.keys[0] is not None:
-                kt = self._infer_node_type(expr.keys[0], local_vars)
-            if expr.values:
-                vt = self._infer_node_type(expr.values[0], local_vars)
+            kt = self._merge_element_types([self._infer_node_type(k, local_vars) for k in expr.keys if k is not None])
+            vt = self._merge_element_types([self._infer_node_type(v, local_vars) for v in expr.values])
             return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
 
         elif isinstance(expr, ast.DictComp):
-            kt = self._infer_node_type(expr.key, local_vars)
-            vt = self._infer_node_type(expr.value, local_vars)
+            comp_vars = dict(local_vars)
+            for gen in expr.generators:
+                elt_t = self._infer_iter_element_type(gen.iter, comp_vars)
+                for vname, v_t in self._unpack_target_types(gen.target, elt_t):
+                    comp_vars[vname] = VariableSymbol(name=vname, var_type=v_t, stack_offset=0)
+            kt = self._infer_node_type(expr.key, comp_vars)
+            vt = self._infer_node_type(expr.value, comp_vars)
             return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
 
         elif isinstance(expr, ast.Set):
-            elem_t = None
-            if expr.elts:
-                elem_t = self._infer_node_type(expr.elts[0], local_vars)
+            elem_t = self._merge_element_types([self._infer_node_type(e, local_vars) for e in expr.elts]) if expr.elts else None
             return SetType(element_type=elem_t) if elem_t else TYPE_SET
 
         elif isinstance(expr, ast.SetComp):
-            elem_t = self._infer_node_type(expr.elt, local_vars)
+            comp_vars = dict(local_vars)
+            for gen in expr.generators:
+                elt_t = self._infer_iter_element_type(gen.iter, comp_vars)
+                for vname, v_t in self._unpack_target_types(gen.target, elt_t):
+                    comp_vars[vname] = VariableSymbol(name=vname, var_type=v_t, stack_offset=0)
+            elem_t = self._infer_node_type(expr.elt, comp_vars)
             return SetType(element_type=elem_t) if elem_t else TYPE_SET
 
         elif isinstance(expr, ast.Tuple):
-            return TYPE_TUPLE
+            if not expr.elts:
+                return TYPE_TUPLE
+            elt_ts = tuple(self._infer_node_type(e, local_vars) for e in expr.elts)
+            elem_t = self._merge_element_types(list(elt_ts))
+            return TupleType(element_type=elem_t, element_types=elt_ts)
 
         elif isinstance(expr, ast.JoinedStr):
             return TYPE_STR
@@ -1524,8 +2222,22 @@ class AstAnalyzer:
                 return TYPE_FLOAT
             if left_t.is_str() or right_t.is_str():
                 return TYPE_STR
-            if left_t.is_list() or right_t.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple)):
-                return TYPE_LIST
+            if isinstance(expr.op, ast.Mult):
+                if left_t.is_list():
+                    return left_t
+                if right_t.is_list():
+                    return right_t
+                if left_t.is_tuple():
+                    return left_t
+                if right_t.is_tuple():
+                    return right_t
+            if left_t.is_list() or right_t.is_list():
+                lt_elem = getattr(left_t, "element_type", None) if left_t.is_list() else None
+                rt_elem = getattr(right_t, "element_type", None) if right_t.is_list() else None
+                merged = self._merge_element_types([t for t in (lt_elem, rt_elem) if t is not None])
+                return ListType(element_type=merged) if merged else TYPE_LIST
+            if left_t.is_tuple() or right_t.is_tuple():
+                return TYPE_TUPLE
             return TYPE_INT
 
         elif isinstance(expr, ast.UnaryOp):
@@ -1534,7 +2246,12 @@ class AstAnalyzer:
             return self._infer_node_type(expr.operand, local_vars)
 
         elif isinstance(expr, ast.IfExp):
-            return self._infer_node_type(expr.body, local_vars)
+            bt = self._infer_node_type(expr.body, local_vars)
+            ot = self._infer_node_type(expr.orelse, local_vars)
+            if bt == ot:
+                return bt
+            merged = self._merge_element_types([bt, ot])
+            return merged if merged is not None else TYPE_INT
 
         elif isinstance(expr, ast.NamedExpr):
             return self._infer_node_type(expr.value, local_vars)
@@ -1545,7 +2262,20 @@ class AstAnalyzer:
         elif isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fid = expr.func.id
-                if fid in ("str", "chr", "input", "hex", "bin", "oct", "file_read", "get_simd_isa"):
+                if fid == "_pyfasm_closure_get":
+                    caps = self._closure_cap_types.get(self._current_func_name)
+                    if caps and len(expr.args) >= 2 and isinstance(expr.args[1], ast.Constant) and isinstance(expr.args[1].value, int):
+                        cidx = expr.args[1].value
+                        if 0 <= cidx < len(caps):
+                            return caps[cidx]
+                    return TYPE_INT
+                if fid == "_pyfasm_closure_new":
+                    if expr.args and isinstance(expr.args[0], ast.Name):
+                        self._closure_cap_types[expr.args[0].id] = [
+                            self._infer_node_type(a, local_vars) for a in expr.args[1:]
+                        ]
+                    return TYPE_PTR
+                if fid in ("str", "repr", "chr", "input", "hex", "bin", "oct", "file_read", "get_simd_isa"):
                     return TYPE_STR
                 elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open", "bit_length"):
                     return TYPE_INT
@@ -1553,21 +2283,128 @@ class AstAnalyzer:
                     return TYPE_FLOAT
                 elif fid in ("bool", "isinstance", "issubclass", "isdigit", "isascii"):
                     return TYPE_BOOL
-                elif fid in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                elif fid == "range":
+                    return ListType(element_type=TYPE_INT)
+                elif fid in ("list", "sorted", "reversed"):
+                    if expr.args:
+                        a0 = expr.args[0]
+                        a0_t = self._infer_node_type(a0, local_vars)
+                        inner_t: Optional[PyFasmType] = None
+                        if a0_t.is_str():
+                            inner_t = TYPE_STR
+                        elif a0_t.is_list() or a0_t.is_set():
+                            inner_t = getattr(a0_t, "element_type", None)
+                        elif a0_t.is_tuple():
+                            inner_t = getattr(a0_t, "element_type", None)
+                            if inner_t is None and getattr(a0_t, "element_types", None):
+                                inner_t = self._merge_element_types(list(a0_t.element_types))
+                        elif a0_t.is_dict():
+                            inner_t = getattr(a0_t, "key_type", None)
+                        elif isinstance(a0, ast.Call) and isinstance(a0.func, ast.Name) and a0.func.id in ("range", "enumerate", "zip", "map"):
+                            inner_t = self._infer_iter_element_type(a0, local_vars)
+                        elif isinstance(a0, ast.Call) and isinstance(a0.func, ast.Attribute) and a0.func.attr in ("keys", "values", "items", "split", "splitlines"):
+                            inner_t = self._infer_iter_element_type(a0, local_vars)
+                        if inner_t is not None:
+                            return ListType(element_type=inner_t)
+                    return TYPE_LIST
+                elif fid in ("enumerate",):
+                    inner = self._infer_iter_element_type(expr.args[0], local_vars) if expr.args else TYPE_INT
+                    return ListType(element_type=TupleType(element_types=(TYPE_INT, inner)))
+                elif fid in ("map", "filter", "zip", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
                     if fid in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
+                    if fid == "map":
+                        map_elt = self._infer_map_element_type(expr)
+                        return ListType(element_type=map_elt) if map_elt else TYPE_LIST
                     return TYPE_LIST
                 elif fid in ("dict",):
                     return TYPE_DICT
                 elif fid in ("set",):
+                    if expr.args:
+                        a0 = expr.args[0]
+                        a0_t = self._infer_node_type(a0, local_vars)
+                        if a0_t.is_str():
+                            return SetType(element_type=TYPE_STR)
+                        if (a0_t.is_list() or a0_t.is_set() or a0_t.is_tuple()) and getattr(a0_t, "element_type", None):
+                            return SetType(element_type=a0_t.element_type)
                     return TYPE_SET
                 elif fid in ("tuple",):
+                    if expr.args:
+                        a0 = expr.args[0]
+                        a0_t = self._infer_node_type(a0, local_vars)
+                        if a0_t.is_str():
+                            return TupleType(element_type=TYPE_STR)
+                        if a0_t.is_list() or a0_t.is_set() or a0_t.is_tuple():
+                            return TupleType(
+                                element_type=getattr(a0_t, "element_type", None),
+                                element_types=getattr(a0_t, "element_types", None),
+                            )
                     return TYPE_TUPLE
+                mod = getattr(self, "current_module", None)
+                if mod is not None and fid in mod.functions:
+                    rt = mod.functions[fid].return_type
+                    if rt != TYPE_VOID:
+                        return rt
+                if fid in local_vars and isinstance(local_vars[fid].var_type, InstanceType) and mod is not None:
+                    cls_t = local_vars[fid].var_type
+                    seen_c: Set[str] = set()
+                    cq = [cls_t.class_name]
+                    while cq:
+                        cn = cq.pop(0)
+                        if cn in seen_c:
+                            continue
+                        seen_c.add(cn)
+                        cs = mod.classes.get(cn)
+                        if cs:
+                            cm = cs.methods.get("__call__")
+                            if cm and cm.return_type != TYPE_VOID:
+                                return cm.return_type
+                            cq.extend(cs.bases)
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("read", "split", "strip", "replace", "lower", "upper", "capitalize", "format", "choice", "get_simd_isa", "join", "removeprefix", "removesuffix"):
+                mod = getattr(self, "current_module", None)
+                if mod is not None and isinstance(expr.func.value, ast.Name) and expr.func.value.id in mod.classes:
+                    cname = expr.func.value.id
+                    cq = [cname]
+                    seen_c = set()
+                    while cq:
+                        cn = cq.pop(0)
+                        if cn in seen_c:
+                            continue
+                        seen_c.add(cn)
+                        cs = mod.classes.get(cn)
+                        if cs:
+                            if attr in cs.class_methods:
+                                mfn = cs.methods.get(attr)
+                                if mfn and isinstance(mfn.return_type, InstanceType):
+                                    return InstanceType(class_name=cname)
+                            if attr in cs.methods and cs.methods[attr].return_type != TYPE_VOID:
+                                return cs.methods[attr].return_type
+                            cq.extend(cs.bases)
+                if attr in ("split", "splitlines"):
+                    return ListType(element_type=TYPE_STR)
+                elif attr in ("read", "strip", "lstrip", "rstrip", "replace", "lower", "upper", "capitalize", "title", "format", "choice", "get_simd_isa", "join", "removeprefix", "removesuffix"):
                     return TYPE_STR
-                elif attr in ("keys", "values", "items", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                elif attr == "keys":
+                    recv_t = self._infer_node_type(expr.func.value, local_vars)
+                    kt = getattr(recv_t, "key_type", None) if recv_t.is_dict() else None
+                    return ListType(element_type=kt) if kt else TYPE_LIST
+                elif attr == "values":
+                    recv_t = self._infer_node_type(expr.func.value, local_vars)
+                    vt = getattr(recv_t, "val_type", None) if recv_t.is_dict() else None
+                    return ListType(element_type=vt) if vt else TYPE_LIST
+                elif attr == "items":
+                    recv_t = self._infer_node_type(expr.func.value, local_vars)
+                    if recv_t.is_dict():
+                        kt = getattr(recv_t, "key_type", None) or TYPE_INT
+                        vt = getattr(recv_t, "val_type", None) or TYPE_INT
+                        return ListType(element_type=TupleType(element_types=(kt, vt)))
+                    return TYPE_LIST
+                elif attr == "copy":
+                    recv_t = self._infer_node_type(expr.func.value, local_vars)
+                    if recv_t.is_list() or recv_t.is_dict() or recv_t.is_set():
+                        return recv_t
+                elif attr in ("chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
                     if attr in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
@@ -1579,22 +2416,77 @@ class AstAnalyzer:
                     # json.loads() returns dict
                     if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
                         return TYPE_DICT
-                elif attr == "get":
-                    # dict.get(key, default) — infer from default arg type
-                    if isinstance(expr.func.value, ast.Name) and expr.func.value.id in local_vars:
-                        obj_type = local_vars[expr.func.value.id].var_type
-                        if obj_type.is_dict() and len(expr.args) >= 2:
-                            return self._infer_node_type(expr.args[1], local_vars)
+                elif attr in ("get", "pop"):
+                    obj_type = self._infer_node_type(expr.func.value, local_vars)
+                    if attr == "pop" and obj_type.is_list() and getattr(obj_type, "element_type", None):
+                        return obj_type.element_type
+                    if obj_type.is_dict() and getattr(obj_type, "val_type", None):
+                        return obj_type.val_type
+                    if len(expr.args) >= 2:
+                        return self._infer_node_type(expr.args[1], local_vars)
+                if mod is not None:
+                    if isinstance(expr.func.value, ast.Name):
+                        pref = f"{expr.func.value.id}_{attr}"
+                        if pref in mod.functions and mod.functions[pref].return_type != TYPE_VOID:
+                            return mod.functions[pref].return_type
+                    recv_t = self._infer_node_type(expr.func.value, local_vars)
+                    if isinstance(recv_t, InstanceType):
+                        seen_c = set()
+                        cq = [recv_t.class_name]
+                        while cq:
+                            cn = cq.pop(0)
+                            if cn in seen_c:
+                                continue
+                            seen_c.add(cn)
+                            mname = f"{cn}_{attr}"
+                            if mname in mod.functions and mod.functions[mname].return_type != TYPE_VOID:
+                                return mod.functions[mname].return_type
+                            cs = mod.classes.get(cn)
+                            if cs:
+                                cq.extend(cs.bases)
+
+        elif isinstance(expr, ast.Attribute):
+            mod = getattr(self, "current_module", None)
+            if mod is not None:
+                recv_t = self._infer_node_type(expr.value, local_vars)
+                if isinstance(recv_t, InstanceType):
+                    seen_c: Set[str] = set()
+                    cq = [recv_t.class_name]
+                    while cq:
+                        cn = cq.pop(0)
+                        if cn in seen_c:
+                            continue
+                        seen_c.add(cn)
+                        cs = mod.classes.get(cn)
+                        if cs:
+                            if expr.attr in cs.properties and cs.properties[expr.attr].getter_name:
+                                gname = cs.properties[expr.attr].getter_name
+                                if gname in mod.functions and mod.functions[gname].return_type != TYPE_VOID:
+                                    return mod.functions[gname].return_type
+                            if expr.attr in cs.field_types:
+                                return cs.field_types[expr.attr]
+                            cq.extend(cs.bases)
+                if isinstance(expr.value, ast.Name) and expr.value.id in mod.classes:
+                    cs = mod.classes[expr.value.id]
+                    if expr.attr in cs.field_types:
+                        return cs.field_types[expr.attr]
+                    if expr.attr in cs.class_attrs:
+                        cval = cs.class_attrs[expr.attr]
+                        if isinstance(cval, bool):
+                            return TYPE_BOOL
+                        if isinstance(cval, float):
+                            return TYPE_FLOAT
+                        if isinstance(cval, str):
+                            return TYPE_STR
 
         elif isinstance(expr, ast.Subscript):
             container_type = self._infer_node_type(expr.value, local_vars)
-            if isinstance(expr.slice, ast.Slice):
+            sub_slice = expr.slice.value if (hasattr(ast, "Index") and isinstance(expr.slice, ast.Index)) else expr.slice
+            if isinstance(sub_slice, ast.Slice):
                 if container_type.is_str():
                     return TYPE_STR
-                if container_type.is_list():
+                if container_type.is_list() or container_type.is_tuple():
                     return container_type
-                if container_type.is_tuple():
-                    return TYPE_TUPLE
                 return container_type
             else:
                 if container_type.is_str():
@@ -1602,7 +2494,20 @@ class AstAnalyzer:
                 if container_type.is_list():
                     if hasattr(container_type, "element_type") and container_type.element_type:
                         return container_type.element_type
-                    return TYPE_LIST
+                    return TYPE_INT
+                if container_type.is_tuple():
+                    if (
+                        isinstance(sub_slice, ast.Constant)
+                        and isinstance(sub_slice.value, int)
+                        and getattr(container_type, "element_types", None)
+                    ):
+                        idx = sub_slice.value
+                        ets = container_type.element_types
+                        if -len(ets) <= idx < len(ets):
+                            return ets[idx]
+                    if getattr(container_type, "element_type", None):
+                        return container_type.element_type
+                    return TYPE_INT
                 if container_type.is_dict() and hasattr(container_type, "val_type") and container_type.val_type:
                     return container_type.val_type
                 if isinstance(expr.value, ast.Name):
@@ -1613,38 +2518,73 @@ class AstAnalyzer:
 
         return TYPE_INT
 
-    def _analyze_function(self, node: ast.FunctionDef) -> FunctionSymbol:
+    def _analyze_function(
+        self,
+        node: ast.FunctionDef,
+        owner_class: Optional[str] = None,
+        is_static: bool = False,
+        is_classmethod: bool = False,
+    ) -> FunctionSymbol:
+        prev_fn_name = self._current_func_name
+        self._current_func_name = node.name
+        try:
+            return self._analyze_function_impl(
+                node,
+                owner_class=owner_class,
+                is_static=is_static,
+                is_classmethod=is_classmethod,
+            )
+        finally:
+            self._current_func_name = prev_fn_name
+
+    def _analyze_function_impl(
+        self,
+        node: ast.FunctionDef,
+        owner_class: Optional[str] = None,
+        is_static: bool = False,
+        is_classmethod: bool = False,
+    ) -> FunctionSymbol:
         # Determine return type
         ret_type = TYPE_VOID
         if node.returns:
-            if isinstance(node.returns, ast.Name):
-                ret_type = resolve_type(node.returns.id)
-            elif isinstance(node.returns, ast.Constant) and isinstance(node.returns.value, str):
-                ret_type = resolve_type(node.returns.value)
+            rt_ann = self._resolve_annotation_type(node.returns)
+            if rt_ann is not None:
+                ret_type = rt_ann
 
         args: List[VariableSymbol] = []
         local_vars: Dict[str, VariableSymbol] = {}
         offset = 8
 
-        # Process function arguments
-        for idx, arg in enumerate(node.args.args):
+        # Process function arguments (include posonlyargs if present)
+        all_ast_args = list(getattr(node.args, "posonlyargs", [])) + list(node.args.args)
+        for idx, arg in enumerate(all_ast_args):
             arg_name = arg.arg
             arg_type = TYPE_INT
+            is_dyn_arg = False
             ann = getattr(arg, "annotation", None)
             if ann:
-                if isinstance(ann, ast.Name):
-                    arg_type = resolve_type(ann.id)
-                elif isinstance(ann, ast.Constant) and isinstance(ann.value, str):
-                    arg_type = resolve_type(ann.value)
+                ann_t = self._resolve_annotation_type(ann)
+                arg_type = ann_t if ann_t is not None else TYPE_INT
+            elif idx == 0 and owner_class and not is_static and not is_classmethod and arg_name in ("self", "this"):
+                arg_type = InstanceType(class_name=owner_class)
+            elif idx == 0 and is_classmethod:
+                arg_type = TYPE_PTR
+            elif arg_name == "_pyfasm_env":
+                arg_type = TYPE_PTR
+            elif node.name.startswith(("_pyfasm_lambda_", "_pyfasm_closure_", "_pyfasm_nested_")):
+                is_dyn_arg = True
             elif arg_name in ("st", "s", "str", "string", "text", "txt", "msg", "prompt", "pattern", "subpattern", "word", "line"):
                 arg_type = TYPE_STR
+            else:
+                is_dyn_arg = arg_name != "self"
 
             var_sym = VariableSymbol(
                 name=arg_name,
                 var_type=arg_type,
                 stack_offset=offset,
                 is_arg=True,
-                arg_index=idx
+                arg_index=idx,
+                is_dynamic=is_dyn_arg,
             )
             args.append(var_sym)
             local_vars[arg_name] = var_sym
@@ -1660,42 +2600,98 @@ class AstAnalyzer:
                         if gname not in self.current_module.global_vars:
                             self.current_module.global_vars[gname] = 0
 
-        for _pass in range(3):
+        mod = getattr(self, "current_module", None)
+        mod_prefix = getattr(self, "_current_mod_prefix", "")
+
+        def _get_var_type(vname: str) -> Optional[PyFasmType]:
+            if vname in local_vars:
+                return local_vars[vname].var_type
+            if mod is not None:
+                if mod_prefix and f"{mod_prefix}_{vname}" in mod.global_var_types:
+                    return mod.global_var_types[f"{mod_prefix}_{vname}"]
+                if vname in mod.global_var_types:
+                    return mod.global_var_types[vname]
+            return None
+
+        def _set_var_type(vname: str, new_t: PyFasmType) -> None:
+            if vname in local_vars:
+                local_vars[vname].var_type = new_t
+            elif vname in global_names or (mod is not None and vname in mod.global_var_types):
+                self._record_global_var_type(mod, vname, new_t, mod_prefix)
+
+        for _pass in range(4):
+            pass_list_obs: Dict[str, List[Optional[PyFasmType]]] = {}
+            pass_set_obs: Dict[str, List[Optional[PyFasmType]]] = {}
+            pass_dict_k_obs: Dict[str, List[Optional[PyFasmType]]] = {}
+            pass_dict_v_obs: Dict[str, List[Optional[PyFasmType]]] = {}
+
             for sub_node in walk_local_scope(node):
                 if isinstance(sub_node, ast.Assign):
                     inferred_type = self._infer_node_type(sub_node.value, local_vars)
+                    rhs_dynamic = inferred_type == TYPE_INT and self._is_dynamic_expr(sub_node.value, local_vars)
                     targets_to_proc = []
                     for target in sub_node.targets:
                         if isinstance(target, ast.Name):
-                            targets_to_proc.append((target.id, inferred_type))
+                            targets_to_proc.append((target.id, inferred_type, rhs_dynamic))
                         elif isinstance(target, (ast.Tuple, ast.List)):
-                            for elt in target.elts:
-                                if isinstance(elt, ast.Name):
-                                    targets_to_proc.append((elt.id, TYPE_INT))
-                                elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name):
-                                    targets_to_proc.append((elt.value.id, TYPE_LIST))
-                    for vname, t_type in targets_to_proc:
-                        if vname in global_names:
-                            continue
-                        if vname not in local_vars:
-                            local_vars[vname] = VariableSymbol(
-                                name=vname,
-                                var_type=t_type,
-                                stack_offset=offset,
-                                is_arg=False
+                            rhs_seq_dyn = (
+                                (inferred_type.is_list() and getattr(inferred_type, "element_type", None) is None)
+                                or (inferred_type.is_tuple() and getattr(inferred_type, "element_type", None) is None and getattr(inferred_type, "element_types", None) is None)
+                                or rhs_dynamic
                             )
-                            offset += 8
-                        elif local_vars[vname].var_type == TYPE_INT and t_type != TYPE_INT:
-                            local_vars[vname].var_type = t_type
+                            for un_name, un_t in self._unpack_target_types(target, inferred_type):
+                                targets_to_proc.append((un_name, un_t, un_t == TYPE_INT and rhs_seq_dyn))
+                        elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                            cname = target.value.id
+                            ct = _get_var_type(cname)
+                            kt = self._infer_node_type(target.slice, local_vars)
+                            vt = inferred_type
+                            if ct is not None and ct.is_dict():
+                                pass_dict_k_obs.setdefault(cname, []).append(kt)
+                                pass_dict_v_obs.setdefault(cname, []).append(vt)
+                            elif ct is not None and ct.is_list() and not isinstance(target.slice, ast.Slice):
+                                pass_list_obs.setdefault(cname, []).append(vt)
+                    for vname, t_type, is_dyn in targets_to_proc:
+                        if vname in global_names:
+                            self._record_global_var_type(mod, vname, t_type, mod_prefix)
+                        else:
+                            if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=t_type,
+                                    stack_offset=offset,
+                                    is_arg=False,
+                                    is_dynamic=is_dyn,
+                                )
+                                offset += 8
+                            elif self._should_upgrade_type(local_vars[vname].var_type, t_type):
+                                local_vars[vname].var_type = t_type
+                                local_vars[vname].is_dynamic = False
+                            elif is_dyn and local_vars[vname].var_type == TYPE_INT:
+                                local_vars[vname].is_dynamic = True
+                        if t_type.is_list() and getattr(t_type, "element_type", None) is not None:
+                            pass_list_obs.setdefault(vname, []).append(t_type.element_type)
+                        elif t_type.is_set() and getattr(t_type, "element_type", None) is not None:
+                            pass_set_obs.setdefault(vname, []).append(t_type.element_type)
+                        elif t_type.is_dict():
+                            if getattr(t_type, "key_type", None) is not None:
+                                pass_dict_k_obs.setdefault(vname, []).append(t_type.key_type)
+                            if getattr(t_type, "val_type", None) is not None:
+                                pass_dict_v_obs.setdefault(vname, []).append(t_type.val_type)
                 elif isinstance(sub_node, ast.AnnAssign) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
-                    if vname in global_names:
-                        continue
                     vtype = TYPE_INT
                     if isinstance(sub_node.annotation, ast.Name):
                         vtype = resolve_type(sub_node.annotation.id)
                     elif isinstance(sub_node.annotation, ast.Constant) and isinstance(sub_node.annotation.value, str):
                         vtype = resolve_type(sub_node.annotation.value)
+                    if sub_node.value is not None:
+                        inferred_val_t = self._infer_node_type(sub_node.value, local_vars)
+                        if vtype == TYPE_INT or self._should_upgrade_type(vtype, inferred_val_t):
+                            vtype = inferred_val_t
+                    if vname in global_names:
+                        self._record_global_var_type(mod, vname, vtype, mod_prefix)
+                        continue
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
@@ -1704,29 +2700,60 @@ class AstAnalyzer:
                             is_arg=False
                         )
                         offset += 8
+                    elif self._should_upgrade_type(local_vars[vname].var_type, vtype):
+                        local_vars[vname].var_type = vtype
+                elif isinstance(sub_node, ast.Call) and isinstance(sub_node.func, ast.Attribute):
+                    if isinstance(sub_node.func.value, ast.Name):
+                        cname = sub_node.func.value.id
+                        attr = sub_node.func.attr
+                        if attr in ("append",) and len(sub_node.args) == 1:
+                            pass_list_obs.setdefault(cname, []).append(self._infer_node_type(sub_node.args[0], local_vars))
+                        elif attr == "insert" and len(sub_node.args) >= 2:
+                            pass_list_obs.setdefault(cname, []).append(self._infer_node_type(sub_node.args[1], local_vars))
+                        elif attr == "extend" and len(sub_node.args) == 1:
+                            ext_elem = self._infer_iter_element_type(sub_node.args[0], local_vars)
+                            ext_t = self._infer_node_type(sub_node.args[0], local_vars)
+                            if ext_t.is_str() or getattr(ext_t, "element_type", None) is not None:
+                                pass_list_obs.setdefault(cname, []).append(ext_elem)
+                        elif attr == "add" and len(sub_node.args) == 1:
+                            pass_set_obs.setdefault(cname, []).append(self._infer_node_type(sub_node.args[0], local_vars))
                 elif isinstance(sub_node, ast.For):
-                    if isinstance(sub_node.target, ast.Name):
-                        vname = sub_node.target.id
-                        if vname not in global_names and vname not in local_vars:
+                    loop_elem_t = self._infer_iter_element_type(sub_node.iter, local_vars)
+                    iter_container_t = self._infer_node_type(sub_node.iter, local_vars)
+                    loop_iter_is_range = (
+                        isinstance(sub_node.iter, ast.Call)
+                        and isinstance(sub_node.iter.func, ast.Name)
+                        and sub_node.iter.func.id == "range"
+                    )
+                    loop_dyn = (
+                        not loop_iter_is_range
+                        and (
+                            (iter_container_t.is_list() and getattr(iter_container_t, "element_type", None) is None)
+                            or (iter_container_t.is_set() and getattr(iter_container_t, "element_type", None) is None)
+                            or (iter_container_t.is_tuple() and getattr(iter_container_t, "element_type", None) is None and getattr(iter_container_t, "element_types", None) is None)
+                            or (iter_container_t.is_dict() and getattr(iter_container_t, "key_type", None) is None)
+                            or self._is_dynamic_expr(sub_node.iter, local_vars)
+                        )
+                    )
+                    for vname, elem_t in self._unpack_target_types(sub_node.target, loop_elem_t):
+                        if vname in global_names:
+                            self._record_global_var_type(mod, vname, elem_t, mod_prefix)
+                            continue
+                        is_elt_dyn = elem_t == TYPE_INT and loop_dyn
+                        if vname not in local_vars:
                             local_vars[vname] = VariableSymbol(
                                 name=vname,
-                                var_type=TYPE_INT,
+                                var_type=elem_t,
                                 stack_offset=offset,
-                                is_arg=False
+                                is_arg=False,
+                                is_dynamic=is_elt_dyn,
                             )
                             offset += 8
-                    elif isinstance(sub_node.target, (ast.Tuple, ast.List)):
-                        for sub_elt in ast.walk(sub_node.target):
-                            if isinstance(sub_elt, ast.Name):
-                                vname = sub_elt.id
-                                if vname not in global_names and vname not in local_vars:
-                                    local_vars[vname] = VariableSymbol(
-                                        name=vname,
-                                        var_type=TYPE_INT,
-                                        stack_offset=offset,
-                                        is_arg=False
-                                    )
-                                    offset += 8
+                        elif self._should_upgrade_type(local_vars[vname].var_type, elem_t):
+                            local_vars[vname].var_type = elem_t
+                            local_vars[vname].is_dynamic = False
+                        elif is_elt_dyn and local_vars[vname].var_type == TYPE_INT:
+                            local_vars[vname].is_dynamic = True
 
                     # Loop buffers for safe register spilling across yields and nested loops
                     buf_name = f"_pyfasm_for_buf_{id(sub_node)}"
@@ -1763,29 +2790,36 @@ class AstAnalyzer:
                                 offset += 8
                 elif isinstance(sub_node, ast.NamedExpr) and isinstance(sub_node.target, ast.Name):
                     vname = sub_node.target.id
+                    val_t = self._infer_node_type(sub_node.value, local_vars)
                     if vname in global_names:
+                        self._record_global_var_type(mod, vname, val_t, mod_prefix)
                         continue
                     if vname not in local_vars:
                         local_vars[vname] = VariableSymbol(
                             name=vname,
-                            var_type=self._infer_node_type(sub_node.value, local_vars),
+                            var_type=val_t,
                             stack_offset=offset,
                             is_arg=False
                         )
                         offset += 8
+                    elif self._should_upgrade_type(local_vars[vname].var_type, val_t):
+                        local_vars[vname].var_type = val_t
                 elif isinstance(sub_node, (ast.ListComp, ast.DictComp, ast.SetComp)):
                     for gen in sub_node.generators:
-                        for sub_t in ast.walk(gen.target):
-                            if isinstance(sub_t, ast.Name) and sub_t.id not in global_names:
-                                vname = sub_t.id
-                                if vname not in local_vars:
-                                    local_vars[vname] = VariableSymbol(
-                                        name=vname,
-                                        var_type=TYPE_INT,
-                                        stack_offset=offset,
-                                        is_arg=False
-                                    )
-                                    offset += 8
+                        comp_elt_t = self._infer_iter_element_type(gen.iter, local_vars)
+                        for vname, elt_t in self._unpack_target_types(gen.target, comp_elt_t):
+                            if vname in global_names:
+                                continue
+                            if vname not in local_vars:
+                                local_vars[vname] = VariableSymbol(
+                                    name=vname,
+                                    var_type=elt_t,
+                                    stack_offset=offset,
+                                    is_arg=False
+                                )
+                                offset += 8
+                            elif self._should_upgrade_type(local_vars[vname].var_type, elt_t):
+                                local_vars[vname].var_type = elt_t
                 elif isinstance(sub_node, _AST_MATCH):
                     for case in sub_node.cases:
                         if isinstance(case.pattern, _AST_MATCH_AS) and case.pattern.name:
@@ -1810,7 +2844,27 @@ class AstAnalyzer:
                             is_arg=False
                         )
                         offset += 8
-    
+
+            # Reconcile container element/key/value types observed in this pass
+            for cname, obs in pass_list_obs.items():
+                cur_t = _get_var_type(cname)
+                if cur_t is not None and (cur_t.is_list() or cur_t == TYPE_INT):
+                    merged = self._merge_element_types(obs)
+                    new_lt = ListType(element_type=merged) if merged else TYPE_LIST
+                    _set_var_type(cname, new_lt)
+            for cname, obs in pass_set_obs.items():
+                cur_t = _get_var_type(cname)
+                if cur_t is not None and (cur_t.is_set() or cur_t == TYPE_INT):
+                    merged = self._merge_element_types(obs)
+                    new_st = SetType(element_type=merged) if merged else TYPE_SET
+                    _set_var_type(cname, new_st)
+            for cname in set(pass_dict_k_obs) | set(pass_dict_v_obs):
+                cur_t = _get_var_type(cname)
+                if cur_t is not None and (cur_t.is_dict() or cur_t == TYPE_INT):
+                    kt = self._merge_element_types(pass_dict_k_obs.get(cname, []))
+                    vt = self._merge_element_types(pass_dict_v_obs.get(cname, []))
+                    _set_var_type(cname, DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT)
+
         is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in walk_local_scope(node))
         if is_gen and ret_type == TYPE_VOID:
             ret_type = TYPE_PTR
@@ -1838,10 +2892,21 @@ class AstAnalyzer:
 
         # If return type wasn't explicitly annotated, infer from return statements
         if ret_type == TYPE_VOID:
+            ret_candidates = []
             for sub_node in walk_local_scope(node):
                 if isinstance(sub_node, ast.Return) and sub_node.value is not None:
-                    ret_type = self._infer_node_type(sub_node.value, local_vars)
-                    break
+                    ret_candidates.append(self._infer_node_type(sub_node.value, local_vars))
+            if ret_candidates:
+                merged_ret = self._merge_element_types(ret_candidates)
+                ret_type = merged_ret if merged_ret is not None else TYPE_INT
+
+        is_dyn_ret = False
+        if node.returns is None and ret_type == TYPE_INT:
+            is_dyn_ret = any(
+                self._is_dynamic_expr(sub_node.value, local_vars)
+                for sub_node in walk_local_scope(node)
+                if isinstance(sub_node, ast.Return) and sub_node.value is not None
+            )
 
         # 16-byte alignment + shadow space
         aligned_stack = ((offset + 15) // 16) * 16 + 32
@@ -1857,4 +2922,8 @@ class AstAnalyzer:
             is_generator=is_gen,
             defaults=list(node.args.defaults),
             source_file=self._current_source_file,
+            is_staticmethod=is_static,
+            is_classmethod=is_classmethod,
+            is_closure=node.name.startswith("_pyfasm_closure_"),
+            is_dynamic_return=is_dyn_ret,
         )

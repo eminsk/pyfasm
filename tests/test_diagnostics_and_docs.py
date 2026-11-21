@@ -116,8 +116,8 @@ def test_warnings_and_strict_mode_promotion(tmp_path: Path):
     src.write_text(
         "import pandas as pd\n\n"
         "class CustomCtx:\n"
-        "    def __call__(self, x: int) -> int:\n"
-        "        return x + 1\n\n"
+        "    def __getattr__(self, name: str) -> int:\n"
+        "        return 1\n\n"
         "def use_it(c: CustomCtx) -> int:\n"
         "    with c:\n"
         "        pass\n"

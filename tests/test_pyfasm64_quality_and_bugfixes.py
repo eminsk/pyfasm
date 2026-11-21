@@ -580,3 +580,475 @@ def test_win64_input_fstring_concat_and_utf8_cyrillic(tmp_path: Path):
     assert "Введи имя: " in r2.stdout
     assert "Как дела? Иван" in r2.stdout
     assert "Привет, Иван! IVAN | 3.140000 | 4.0 | Box(7)" in r2.stdout
+
+
+def test_win64_no_memory_addresses_in_lists_loops_dicts_and_casts(tmp_path: Path):
+    source = (
+        "GLOBAL_NAMES = ['Оля', 'Петя']\n"
+        "GLOBAL_GREET = 'Здравствуй'\n\n"
+        "def show_dyn(x):\n"
+        "    print(x)\n\n"
+        "def main() -> int:\n"
+        "    names = ['Аня', 'Боря', 'Вика']\n"
+        "    print(names)\n"
+        "    nums = [1, -42, 1000000000]\n"
+        "    print(nums)\n"
+        "    floats = [1.5, 2.5]\n"
+        "    print(floats)\n"
+        "    mat = [[1, 2], [3, 4]]\n"
+        "    print(mat)\n"
+        "    grid = [['А', 'Б'], ['В', 'Г']]\n"
+        "    print(grid)\n"
+        "    mixed = [10, 'Привет', 1000000000]\n"
+        "    print(mixed)\n"
+        "    print(mixed[0])\n"
+        "    print(mixed[1])\n"
+        "    print(mixed[2])\n"
+        "    for item in mixed:\n"
+        "        print(item)\n"
+        "    for n in names:\n"
+        "        print(n)\n"
+        "    for fv in floats:\n"
+        "        print(fv)\n"
+        "    for row in mat:\n"
+        "        print(row)\n"
+        "    for ch in 'Привет':\n"
+        "        print(ch)\n"
+        "    dyn_list = []\n"
+        "    dyn_list.append('Юля')\n"
+        "    dyn_list.append('Яша')\n"
+        "    print(dyn_list)\n"
+        "    last_name = dyn_list.pop()\n"
+        "    print(last_name)\n"
+        "    pair = ('Привет', 42)\n"
+        "    print(pair)\n"
+        "    ua, ub = pair\n"
+        "    print(ua, ub)\n"
+        "    single_t = (77,)\n"
+        "    print(single_t)\n"
+        "    d = {'имя': 'Аня', 'город': 'Москва'}\n"
+        "    print(d)\n"
+        "    d2 = {}\n"
+        "    d2['ключ'] = 7\n"
+        "    print(d2)\n"
+        "    st = {10, 20}\n"
+        "    print(st)\n"
+        "    parts = 'а,б,в'.split(',')\n"
+        "    print(parts)\n"
+        "    print('один   два\\tтри'.split())\n"
+        "    for tok in 'а,б,в'.split(','):\n"
+        "        print(tok)\n"
+        "    fwd = get_ru_names()\n"
+        "    print(fwd)\n"
+        "    show_dyn('Привет')\n"
+        "    show_dyn(42)\n"
+        "    print(GLOBAL_NAMES)\n"
+        "    print(GLOBAL_GREET)\n"
+        "    print(f'list={names} 2d={mat} dyn={last_name}')\n"
+        "    print(str(names))\n"
+        "    print(str('Привет'))\n"
+        "    print(str(3.5))\n"
+        "    print(str(123))\n"
+        "    print(int('42'))\n"
+        "    print(int('-17'))\n"
+        "    print(float('3.25'))\n"
+        "    return 0\n\n"
+        "def get_ru_names():\n"
+        "    return ['Даша', 'Егор']\n"
+    )
+    src = tmp_path / "no_addr_leaks.py"
+    src.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+
+    if sys.platform != "win32":
+        asm = compiler.compile_source_to_asm(source, target="win64")
+        for sym in (
+            "_pyfasm_print_list_str",
+            "_pyfasm_print_list_float",
+            "_pyfasm_print_list_2d_int",
+            "_pyfasm_print_list_2d_str",
+            "_pyfasm_print_dict_with",
+            "_pyfasm_print_set_with",
+            "_pyfasm_print_tuple",
+            "_pyfasm_utf8_next_char",
+            "_pyfasm_str_to_int",
+            "_pyfasm_str_to_float",
+            "_pyfasm_list_str_to_str",
+        ):
+            assert sym in asm
+        return
+
+    exe = tmp_path / "no_addr_leaks.exe"
+    ok, out_exe, log = compiler.compile_file(str(src), output_binary=str(exe), target="win64")
+    assert ok, f"Compilation failed:\n{log}"
+    r = subprocess.run([out_exe], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert r.returncode == 0, f"stderr: {r.stderr}\nstdout: {r.stdout}"
+    lines = r.stdout.splitlines()
+
+    expected_lines = [
+        "['Аня', 'Боря', 'Вика']",
+        "[1, -42, 1000000000]",
+        "[1.500000, 2.500000]",
+        "[[1, 2], [3, 4]]",
+        "[['А', 'Б'], ['В', 'Г']]",
+        "[10, 'Привет', 1000000000]",
+        "10",
+        "Привет",
+        "1000000000",
+        "10",
+        "Привет",
+        "1000000000",
+        "Аня",
+        "Боря",
+        "Вика",
+        "1.500000",
+        "2.500000",
+        "[1, 2]",
+        "[3, 4]",
+        "П",
+        "р",
+        "и",
+        "в",
+        "е",
+        "т",
+        "['Юля', 'Яша']",
+        "Яша",
+        "('Привет', 42)",
+        "Привет 42",
+        "(77,)",
+    ]
+    assert lines[:len(expected_lines)] == expected_lines
+    idx = len(expected_lines)
+
+    # d = {'имя': 'Аня', 'город': 'Москва'} (hash table slot order)
+    d_line = lines[idx]
+    assert d_line.startswith("{") and d_line.endswith("}")
+    assert "'имя': 'Аня'" in d_line and "'город': 'Москва'" in d_line
+    idx += 1
+
+    # d2 = {}; d2['ключ'] = 7
+    assert lines[idx] == "{'ключ': 7}"
+    idx += 1
+
+    # st = {10, 20}
+    s_line = lines[idx]
+    assert s_line.startswith("{") and s_line.endswith("}")
+    assert "10" in s_line and "20" in s_line
+    idx += 1
+
+    tail_expected = [
+        "['а', 'б', 'в']",
+        "['один', 'два', 'три']",
+        "а",
+        "б",
+        "в",
+        "['Даша', 'Егор']",
+        "Привет",
+        "42",
+        "['Оля', 'Петя']",
+        "Здравствуй",
+        "list=['Аня', 'Боря', 'Вика'] 2d=[[1, 2], [3, 4]] dyn=Яша",
+        "['Аня', 'Боря', 'Вика']",
+        "Привет",
+        "3.500000",
+        "123",
+        "42",
+        "-17",
+        "3.250000",
+    ]
+    assert lines[idx:] == tail_expected
+
+
+def test_win64_full_russian_identifiers_and_utf8_string_ops(tmp_path: Path):
+    source = """
+счётчик = 10
+слово = "Привет"
+
+class Дом:
+    def __init__(self, имя: str, этаж: int):
+        self.имя = имя
+        self.этаж = этаж
+
+    def описание(self) -> str:
+        return f"дом:{self.имя}:{self.этаж}"
+
+class Кот:
+    def __init__(self, кличка: str, возраст: int):
+        self.кличка = кличка
+        self.возраст = возраст
+
+    def описание(self) -> str:
+        return f"кот:{self.кличка}:{self.возраст}"
+
+def дом(а: int, б: int) -> int:
+    return а + б
+
+def кот(а: int, б: int) -> int:
+    return а * б
+
+def main():
+    объект_дом = Дом("Теремок", 3)
+    объект_кот = Кот("Барсик", 5)
+    сумма = дом(счётчик, 7)
+    произведение = кот(3, 4)
+    print(объект_дом.описание())
+    print(объект_кот.описание())
+    print(сумма)
+    print(произведение)
+    print(len(слово))
+    print(len("Ёлка"))
+    print(слово[0])
+    print(слово[-1])
+    print(слово[1:4])
+    print(слово[::-1])
+    print(слово[0:6:2])
+    print("Ёжик и ёлка".upper())
+    print("ЁЖИК И ЁЛКА".lower())
+    фраза = "ПрИвЕт"
+    print(фраза.lower())
+    print(фраза.upper())
+"""
+    src = tmp_path / "russian_utf8.py"
+    src.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+
+    if sys.platform != "win32":
+        asm = compiler.compile_source_to_asm(source, target="win64")
+        assert "_pyfasm_utf8_len" in asm
+        assert "_pyfasm_utf8_getitem" in asm
+        return
+
+    exe = tmp_path / "russian_utf8.exe"
+    ok, out_exe, log = compiler.compile_file(str(src), output_binary=str(exe), target="win64")
+    assert ok, f"Compilation failed:\n{log}"
+    r = subprocess.run([out_exe], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert r.returncode == 0, f"stderr: {r.stderr}\nstdout: {r.stdout}"
+    assert r.stdout.splitlines() == [
+        "дом:Теремок:3",
+        "кот:Барсик:5",
+        "17",
+        "12",
+        "6",
+        "4",
+        "П",
+        "т",
+        "рив",
+        "тевирП",
+        "Пие",
+        "ЁЖИК И ЁЛКА",
+        "ёжик и ёлка",
+        "привет",
+        "ПРИВЕТ",
+    ]
+
+
+def test_win64_oop_polymorphism_decorators_dunders_and_closures(tmp_path: Path):
+    source = """
+class Animal:
+    def __init__(self, name: str):
+        self.name = name
+
+    def speak(self) -> str:
+        return "..."
+
+    def __str__(self) -> str:
+        return f"Animal({self.name})"
+
+    @staticmethod
+    def kingdom() -> str:
+        return "Animalia"
+
+    @classmethod
+    def create(cls, name: str):
+        return cls(name)
+
+    @classmethod
+    def is_animal_cls(cls) -> bool:
+        return issubclass(cls, Animal)
+
+class Dog(Animal):
+    def speak(self) -> str:
+        return f"Woof:{self.name}"
+
+    def __str__(self) -> str:
+        return f"Dog({self.name})"
+
+class Cat(Animal):
+    def speak(self) -> str:
+        return f"Meow:{self.name}"
+
+    def __str__(self) -> str:
+        return f"Cat({self.name})"
+
+class Box:
+    def __init__(self, n: int):
+        self.n = n
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __bool__(self) -> bool:
+        return self.n > 0
+
+class Vec:
+    def __init__(self, x: int, y: int):
+        self.x = x
+        self.y = y
+
+    def __neg__(self):
+        return Vec(-self.x, -self.y)
+
+    def __iadd__(self, other):
+        return Vec(self.x + other.x, self.y + other.y)
+
+    def __str__(self) -> str:
+        return f"({self.x},{self.y})"
+
+class Multiplier:
+    def __init__(self, k: int):
+        self.k = k
+
+    def __call__(self, x: int, bonus: int = 0) -> int:
+        return self.k * x + bonus
+
+class Guard:
+    def __init__(self, val: int):
+        self.val = val
+        self.closed = 0
+
+    def __enter__(self) -> int:
+        return self.val + 10
+
+    def __exit__(self, exc_t, exc_v, exc_tb) -> int:
+        self.closed = 1
+        return 0
+
+class CounterIter:
+    def __init__(self, start: int, stop: int):
+        self.cur = start
+        self.stop = stop
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> int:
+        if self.cur >= self.stop:
+            raise StopIteration
+        v = self.cur
+        self.cur += 1
+        return v
+
+def make_sound(x) -> str:
+    return x.speak()
+
+def apply1(fn, x: int) -> int:
+    return fn(x)
+
+def apply_str(fn, name: str):
+    return fn(name)
+
+def make_adder(base: int):
+    return lambda x: x + base
+
+def make_gt(limit: int):
+    return lambda x: x > limit
+
+def make_greeter(prefix: str):
+    def greet(who) -> str:
+        return f"{prefix}, {who}!"
+    return greet
+
+def main():
+    pets = [Dog("Рекс"), Cat("Мурка")]
+    for p in pets:
+        print(p.speak())
+        print(p)
+        print(make_sound(p))
+
+    d2 = Dog.create("Бобик")
+    print(d2.speak())
+    print(Animal.kingdom())
+    print(pets[0].kingdom())
+    print(Dog.is_animal_cls())
+    print(isinstance(d2, Dog), isinstance(d2, Animal), isinstance(d2, Cat), isinstance(pets[1], (Dog, Cat)))
+    print(issubclass(Dog, Animal), issubclass(Cat, Dog))
+
+    b0 = Box(0)
+    b1 = Box(3)
+    print(bool(b0), bool(b1), not b0, len(b1))
+
+    v = Vec(2, 5)
+    v += Vec(3, 1)
+    print(v)
+    nv = -v
+    print(nv)
+
+    mult = Multiplier(4)
+    print(mult(5), mult(5, 2), apply1(mult, 6))
+
+    g = Guard(7)
+    with g as val:
+        print(val)
+    print(g.closed)
+
+    acc = []
+    for item in CounterIter(3, 6):
+        acc.append(item)
+    print(acc)
+
+    it2 = CounterIter(8, 10)
+    print(next(it2), next(it2), next(it2, -1))
+
+    add10 = make_adder(10)
+    print(add10(5), apply1(add10, 7))
+    print(list(map(make_adder(100), [1, 2, 3])))
+    print(list(filter(make_gt(2), [1, 2, 3, 4])))
+
+    gr = make_greeter("Привет")
+    print(gr("Аня"))
+    print(apply_str(gr, "Боря"))
+"""
+    src = tmp_path / "oop_closures.py"
+    src.write_text(source, encoding="utf-8")
+    compiler = PyFasmCompiler()
+
+    if sys.platform != "win32":
+        asm = compiler.compile_source_to_asm(source, target="win64")
+        assert "_pyfasm_vcall_" in asm
+        assert "505946434C4F5355h" in asm
+        return
+
+    exe = tmp_path / "oop_closures.exe"
+    ok, out_exe, log = compiler.compile_file(str(src), output_binary=str(exe), target="win64")
+    assert ok, f"Compilation failed:\n{log}"
+    r = subprocess.run([out_exe], capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert r.returncode == 0, f"stderr: {r.stderr}\nstdout: {r.stdout}"
+    assert r.stdout.splitlines() == [
+        "Woof:Рекс",
+        "Dog(Рекс)",
+        "Woof:Рекс",
+        "Meow:Мурка",
+        "Cat(Мурка)",
+        "Meow:Мурка",
+        "Woof:Бобик",
+        "Animalia",
+        "Animalia",
+        "1",
+        "1 1 0 1",
+        "1 0",
+        "0 1 1 3",
+        "(5,6)",
+        "(-5,-6)",
+        "20 22 24",
+        "17",
+        "1",
+        "[3, 4, 5]",
+        "8 9 -1",
+        "15 17",
+        "[101, 102, 103]",
+        "[3, 4]",
+        "Привет, Аня!",
+        "Привет, Боря!",
+    ]
+
+

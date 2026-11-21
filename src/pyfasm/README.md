@@ -40,8 +40,13 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 
 ---
 
-## What's New in v0.3.x
+## What's New in v0.4.0
 
+- **v0.4.0 Full UTF-8/Cyrillic Identifiers & Strings, Polymorphic OOP, Dunders & Lexical Closures**:
+  - Collision-free Cyrillic/Unicode identifiers for classes, functions, and variables, plus UTF-8 codepoint `len()`, indexing `s[i]` (including negative indices), slicing `s[start:stop:step]`, and Cyrillic `.upper()`/`.lower()` (including `Ё`/`ё`).
+  - Memory-address-free printing and formatting across typed/heterogeneous lists, 2D lists, tuples, dicts, sets, loops, f-strings, `str()`/`int()`/`float()` casts, and `.split()`.
+  - Production OOP with runtime class tags (`PYFCLSTG`), polymorphic virtual method dispatch (`_pyfasm_vcall_*`), `@staticmethod`, `@classmethod` (with dynamic `cls(...)`), `isinstance()`/`issubclass()`, and wired dunders (`__call__`, `__bool__`, `__neg__`/`__pos__`/`__invert__`, `__iadd__`..`__ixor__`, `__enter__`/`__exit__`, `__iter__`/`__next__` + `StopIteration`).
+  - Real lexical closures (`PYFCLOSU`) for capturing `lambda` and nested `def` functions across direct calls, higher-order indirect calls, `map()`, and `filter()`.
 - **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
 - **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
 - **Native Win32 Tkinter / CustomTkinter UI**: Translates Python desktop GUIs and Canvas drawing directly into DPI-aware Win32 GDI dark-mode applications.
@@ -333,10 +338,10 @@ uv run pyfasm64 clean --all
 
 | Feature | Syntax / API | Description |
 | :--- | :--- | :--- |
-| **Functions & Lambdas** | `def name(a: int, b: int) -> int:`, `lambda` | Strongly-typed x86_64 functions with ABI calling conventions & defaults |
+| **Functions & Closures** | `def`, `lambda`, lexical closures, Cyrillic/UTF-8 names | Typed x86_64 functions, defaults, capturing lambdas & nested `def`, collision-free Unicode labels |
 | **Data Types** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-bit signed ints, IEEE-754 SSE doubles, UTF-8/UTF-16LE strings, raw pointers |
 | **Containers** | `list`, `dict`, `set`, `tuple`, slicing | Dynamic arrays, FNV-1a hash tables (incl. tuple keys), hash sets, comprehensions |
-| **OOP & Classes** | `class`, `__init__`, `super()`, `@property` | Native object layout, method dispatch, inheritance, and property getters/setters |
+| **OOP & Classes** | `class`, `__init__`, `super()`, `@property`, `@staticmethod`, `@classmethod` | Runtime class tags, polymorphic dispatch, `isinstance`/`issubclass`, and wired dunders (`__call__`, `__bool__`, `__enter__`/`__exit__`, `__iter__`/`__next__`, `__neg__`, `__iadd__`..`__ixor__`) |
 | **Generators & Errors** | `yield`, `yield from`, `try`/`except`, `with` | State-machine coroutines, generator expressions, structured exception unwinding |
 | **Arithmetic** | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, bitwise | Direct x86_64 ALU & SSE instructions, Python floor div/mod, AVX2 NanoGEMM `@` |
 | **Control Flow** | `if`/`elif`/`else`, `while`, `for`, `match`/`case` | Loops, unpacking, `break`, `continue`, `return`, pattern matching |
@@ -373,7 +378,7 @@ uv run pytest
 ```
 
 ```text
-============================= 140 passed ==============================
+============================= 143 passed ==============================
 ```
 
 Verified compatibility matrix:

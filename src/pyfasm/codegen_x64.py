@@ -15,7 +15,11 @@ _AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
 _AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, walk_local_scope
 from pyfasm.diagnostics import CompilerDiagnostic, extract_source_line
-from pyfasm.types import TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_BOOL, TYPE_PTR, PyFasmType, ListType, DictType, SetType
+from pyfasm.types import (
+    TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET,
+    TYPE_TUPLE, TYPE_BOOL, TYPE_PTR, TYPE_VOID, PyFasmType,
+    ListType, DictType, SetType, TupleType, InstanceType,
+)
 
 RESERVED_FASM_KEYWORDS: Set[str] = {
     # Registers
@@ -78,10 +82,23 @@ _CALLEE_REG_PATTERNS = [
 ]
 
 
+_ASCII_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
 def safe_asm_label(name: str) -> str:
     """Escapes identifiers that conflict with FASM reserved keywords, instructions, or invalid syntax."""
     if not name:
         return "sym_anon"
+    if not name.isascii():
+        parts = []
+        for ch in name:
+            if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9"):
+                parts.append(ch)
+            elif ch == "_":
+                parts.append("__")
+            else:
+                parts.append(f"_u{ord(ch):04x}_")
+        return "u_" + "".join(parts)
     sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
     if not sanitized:
         return "sym_anon"
@@ -90,6 +107,13 @@ def safe_asm_label(name: str) -> str:
     if sanitized.lower() in RESERVED_FASM_KEYWORDS:
         sanitized = f"fn_{sanitized}"
     return sanitized
+
+
+def safe_global_label(name: str) -> str:
+    """Return a valid FASM label for a module or class global variable without ASCII collisions."""
+    if name and name.isascii() and _ASCII_IDENT_RE.match(name):
+        return f"_pyfasm_global_{name}"
+    return f"_pyfasm_global_{safe_asm_label(name)}"
 
 
 def _unwrap_slice(node: ast.AST) -> ast.AST:
@@ -115,6 +139,10 @@ class X64CodeGen:
         self.unresolved_locations: Dict[str, Tuple[Optional[str], Optional[int], Optional[int], Optional[int]]] = {}
         self.diagnostics: List[CompilerDiagnostic] = list(getattr(module, "diagnostics", []))
         self.local_var_classes: Dict[str, str] = {}
+        self._class_ids: Dict[str, int] = {
+            cname: idx for idx, cname in enumerate(sorted(module.classes.keys()), start=1)
+        }
+        self._used_vcalls: Set[str] = set()
         self.gui_control_id = 1000
         self.gui_edit_id = 100
         self.gui_chip_count = 0
@@ -217,13 +245,8 @@ class X64CodeGen:
         return None
 
     def resolve_property_for_expr(self, expr_node: ast.AST, prop_name: str) -> Optional[Any]:
-        cls_name = None
-        if isinstance(expr_node, ast.Name):
-            if expr_node.id in ("self", "this"):
-                cls_name = getattr(self.current_func, "class_name", None)
-            else:
-                cls_name = self.local_var_classes.get(expr_node.id)
-        elif isinstance(expr_node, ast.Call) and isinstance(expr_node.func, ast.Name):
+        cls_name = self.resolve_instance_class(expr_node)
+        if not cls_name and isinstance(expr_node, ast.Call) and isinstance(expr_node.func, ast.Name):
             cls_name = expr_node.func.id
 
         if cls_name:
@@ -239,19 +262,243 @@ class X64CodeGen:
             return candidates[0]
         return None
 
+    def _resolve_field_class(self, cls_name: Optional[str], field_name: str) -> Optional[str]:
+        if not cls_name:
+            return None
+        visited: Set[str] = set()
+        queue = [cls_name]
+        while queue:
+            curr = queue.pop(0)
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cs = self.module.classes.get(curr)
+            if not cs:
+                continue
+            if hasattr(cs, "properties") and field_name in cs.properties:
+                prop = cs.properties[field_name]
+                gname = getattr(prop, "getter_name", None)
+                if gname and gname in self.module.functions:
+                    rt = self.module.functions[gname].return_type
+                    if isinstance(rt, InstanceType):
+                        return rt.class_name
+            if hasattr(cs, "field_classes") and field_name in cs.field_classes:
+                return cs.field_classes[field_name]
+            if hasattr(cs, "field_types") and field_name in cs.field_types:
+                ft = cs.field_types[field_name]
+                if isinstance(ft, InstanceType):
+                    return ft.class_name
+            for b in cs.bases:
+                if b not in visited:
+                    queue.append(b)
+        return None
+
     def resolve_instance_class(self, node: Optional[ast.AST]) -> Optional[str]:
         if node is None or isinstance(node, ast.Constant):
             return None
         if isinstance(node, ast.Name):
             if node.id in ("self", "this"):
                 return getattr(self.current_func, "class_name", None)
-            return self.local_var_classes.get(node.id)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in self.module.classes:
-                return node.func.id
+            if node.id in self.local_var_classes:
+                return self.local_var_classes[node.id]
+            if self.current_func and node.id in self.current_func.local_vars:
+                vt = self.current_func.local_vars[node.id].var_type
+                if isinstance(vt, InstanceType):
+                    return vt.class_name
+            gvt = getattr(self.module, "global_var_types", {}).get(node.id)
+            if isinstance(gvt, InstanceType):
+                return gvt.class_name
+            return None
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                fid = node.func.id
+                if fid in self.module.classes:
+                    return fid
+                if getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args:
+                    if fid == self.current_func.args[0].name:
+                        return self.current_func.class_name
+                if fid in self.module.functions:
+                    rt = self.module.functions[fid].return_type
+                    if isinstance(rt, InstanceType):
+                        return rt.class_name
+            elif isinstance(node.func, ast.Attribute):
+                attr = node.func.attr
+                if isinstance(node.func.value, ast.Name) and node.func.value.id in self.module.classes:
+                    target_cls = node.func.value.id
+                    m = self.resolve_class_method(target_cls, attr)
+                    if m and m in self.module.functions:
+                        fn_sym = self.module.functions[m]
+                        if getattr(fn_sym, "is_classmethod", False) and (
+                            isinstance(fn_sym.return_type, InstanceType) or fn_sym.return_type == TYPE_VOID
+                        ):
+                            return target_cls
+                        if isinstance(fn_sym.return_type, InstanceType):
+                            return fn_sym.return_type.class_name
+                else:
+                    recv_cls = self.resolve_instance_class(node.func.value)
+                    if not recv_cls and isinstance(node.func.value, ast.Name) and node.func.value.id == "cls":
+                        if getattr(self.current_func, "is_classmethod", False):
+                            recv_cls = self.current_func.class_name
+                    if recv_cls:
+                        m = self.resolve_class_method(recv_cls, attr)
+                        if m and m in self.module.functions:
+                            rt = self.module.functions[m].return_type
+                            if isinstance(rt, InstanceType):
+                                return rt.class_name
+            return None
+        if isinstance(node, ast.Attribute):
+            owner_cls = self.resolve_instance_class(node.value)
+            if not owner_cls and isinstance(node.value, ast.Name) and node.value.id in self.module.classes:
+                owner_cls = node.value.id
+            if owner_cls:
+                fc = self._resolve_field_class(owner_cls, node.attr)
+                if fc:
+                    return fc
+            return None
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            vt = self._infer_expr_type(node.value)
+            if isinstance(vt, InstanceType):
+                return vt.class_name
+            if vt.is_list() or vt.is_tuple() or vt.is_set():
+                et = getattr(vt, "element_type", None)
+                if isinstance(et, InstanceType):
+                    return et.class_name
+            elif vt.is_dict():
+                dvt = getattr(vt, "val_type", None)
+                if isinstance(dvt, InstanceType):
+                    return dvt.class_name
+            return None
         if isinstance(node, ast.BinOp):
             return self.resolve_instance_class(node.left)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
+            return self.resolve_instance_class(node.operand)
         return None
+
+    def _class_hierarchy_includes(self, sub_cls: Optional[str], base_cls: str) -> bool:
+        if not sub_cls or not base_cls:
+            return False
+        if sub_cls == base_cls:
+            return True
+        visited: Set[str] = set()
+        queue = [sub_cls]
+        while queue:
+            curr = queue.pop(0)
+            if curr == base_cls:
+                return True
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cs = self.module.classes.get(curr)
+            if cs:
+                for b in cs.bases:
+                    if b not in visited:
+                        queue.append(b)
+        return False
+
+    def _all_subclasses(self, base_cls: Optional[str]) -> List[str]:
+        if not base_cls:
+            return sorted(self.module.classes.keys())
+        return [
+            cname for cname in sorted(self.module.classes.keys())
+            if self._class_hierarchy_includes(cname, base_cls)
+        ]
+
+    def _method_has_polymorphic_impls(self, cls_name: Optional[str], method_name: str) -> bool:
+        candidates = self._all_subclasses(cls_name) if cls_name else sorted(self.module.classes.keys())
+        if len(candidates) <= 1 and cls_name is not None:
+            return False
+        targets: Set[Optional[str]] = set()
+        for cname in candidates:
+            cs = self.module.classes.get(cname)
+            if cs and method_name in getattr(cs, "static_methods", set()):
+                continue
+            if method_name == "__str__":
+                m = self.resolve_class_method(cname, "__str__") or self.resolve_class_method(cname, "__repr__")
+            elif method_name == "__repr__":
+                m = self.resolve_class_method(cname, "__repr__") or self.resolve_class_method(cname, "__str__")
+            elif method_name == "__bool__":
+                m = self.resolve_class_method(cname, "__bool__") or self.resolve_class_method(cname, "__len__")
+            else:
+                m = self.resolve_class_method(cname, method_name)
+            targets.add(m)
+        non_none = {t for t in targets if t is not None}
+        if method_name == "__bool__":
+            return len(non_none) > 1 or (len(non_none) == 1 and None in targets)
+        return len(non_none) > 1
+
+    def _vcall_label(self, method_name: str) -> str:
+        return f"_pyfasm_vcall_{safe_asm_label(method_name)}"
+
+    def _emit_vcall_trampolines(self) -> None:
+        if not self._used_vcalls:
+            return
+        self.emit_raw("; ============================================================")
+        self.emit_raw("; Polymorphic Class VCall Trampolines")
+        self.emit_raw("; ============================================================")
+        for method_name in sorted(self._used_vcalls):
+            lbl = self._vcall_label(method_name)
+            lbl_ret0 = f".vcall_ret0_{safe_asm_label(method_name)}"
+            lbl_true = f".vcall_true_{safe_asm_label(method_name)}"
+            self.emit_raw(f"{lbl}:")
+            self.emit("test rcx, rcx", f"polymorphic dispatch for {method_name}")
+            self.emit(f"jz {lbl_ret0}")
+            self.emit("cmp rcx, 65536")
+            self.emit(f"jb {lbl_ret0}")
+            self.emit("mov r10, 505946434C535447h", "PYFCLSTG")
+            self.emit("cmp [rcx + 2032], r10")
+            self.emit(f"jne {lbl_ret0}")
+            self.emit("mov r10, [rcx + 2040]", "load runtime class_id")
+
+            if method_name == "__bool__":
+                len_thunks: List[Tuple[str, str]] = []
+                for cname in sorted(self.module.classes.keys()):
+                    cid = self._class_ids.get(cname, 0)
+                    if not cid:
+                        continue
+                    bm = self.resolve_class_method(cname, "__bool__")
+                    if bm:
+                        self.emit(f"cmp r10, {cid}")
+                        self.emit(f"je {safe_asm_label(bm)}")
+                    else:
+                        lm = self.resolve_class_method(cname, "__len__")
+                        if lm:
+                            t_lbl = f".vcall_bool_len_{safe_asm_label(cname)}"
+                            self.emit(f"cmp r10, {cid}")
+                            self.emit(f"je {t_lbl}")
+                            len_thunks.append((t_lbl, lm))
+                self.emit_raw(f"{lbl_true}:")
+                self.emit("mov rax, 1", "default truthiness for instance without __bool__/__len__")
+                self.emit("ret")
+                for t_lbl, lm in len_thunks:
+                    self.emit_raw(f"{t_lbl}:")
+                    self.emit("sub rsp, 40")
+                    self.emit(f"call {safe_asm_label(lm)}")
+                    self.emit("add rsp, 40")
+                    self.emit("test rax, rax")
+                    self.emit("setnz al")
+                    self.emit("movzx rax, al")
+                    self.emit("ret")
+            else:
+                for cname in sorted(self.module.classes.keys()):
+                    cid = self._class_ids.get(cname, 0)
+                    if not cid:
+                        continue
+                    cs = self.module.classes[cname]
+                    if method_name in getattr(cs, "static_methods", set()):
+                        continue
+                    if method_name == "__str__":
+                        m = self.resolve_class_method(cname, "__str__") or self.resolve_class_method(cname, "__repr__")
+                    elif method_name == "__repr__":
+                        m = self.resolve_class_method(cname, "__repr__") or self.resolve_class_method(cname, "__str__")
+                    else:
+                        m = self.resolve_class_method(cname, method_name)
+                    if m:
+                        self.emit(f"cmp r10, {cid}")
+                        self.emit(f"je {safe_asm_label(m)}")
+            self.emit_raw(f"{lbl_ret0}:")
+            self.emit("xor eax, eax")
+            self.emit("ret")
+            self.emit_raw("")
 
     def _desugar_str_format(self, fmt_str: str, args: List[ast.expr]) -> List[ast.AST]:
         parts: List[ast.AST] = []
@@ -329,7 +576,7 @@ class X64CodeGen:
 
     def _prepare_call_args(self, call: ast.Call, target_fn: FunctionSymbol, is_method_call: bool, self_expr: Optional[ast.AST] = None) -> List[ast.AST]:
         expected_args = target_fn.args
-        if is_method_call and expected_args and expected_args[0].name == "self":
+        if is_method_call and expected_args and (expected_args[0].name == "self" or getattr(target_fn, "is_classmethod", False)):
             formal_args = expected_args[1:]
             self_node = self_expr
         else:
@@ -396,10 +643,326 @@ class X64CodeGen:
             self.module.string_literals.append(StringLiteral(label=label, value=text))
         self.emit(f"lea {reg}, [{label}]")
 
+    def _is_ambiguous_dynamic_expr(self, expr: Optional[ast.AST]) -> bool:
+        """True when an expression has dynamically typed (int vs str pointer) representation at runtime."""
+        if expr is None or isinstance(expr, ast.Constant):
+            return False
+        if isinstance(expr, ast.Name):
+            if self.current_func and hasattr(self.current_func, "local_vars") and expr.id in self.current_func.local_vars:
+                sym = self.current_func.local_vars[expr.id]
+                return bool(getattr(sym, "is_dynamic", False) and sym.var_type == TYPE_INT)
+            return False
+        if isinstance(expr, ast.Subscript) and not isinstance(expr.slice, ast.Slice):
+            ct = self._infer_expr_type(expr.value)
+            if ct.is_list() and getattr(ct, "element_type", None) is None:
+                return True
+            if ct.is_tuple() and getattr(ct, "element_type", None) is None and getattr(ct, "element_types", None) is None:
+                return True
+            if ct.is_dict() and getattr(ct, "val_type", None) is None:
+                return True
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr in ("pop", "get"):
+                ct = self._infer_expr_type(expr.func.value)
+                if ct.is_list() and getattr(ct, "element_type", None) is None:
+                    return True
+                if ct.is_dict() and getattr(ct, "val_type", None) is None and len(expr.args) < 2:
+                    return True
+            if isinstance(expr.func, ast.Name):
+                if expr.func.id in self.module.functions:
+                    if getattr(self.module.functions[expr.func.id], "is_dynamic_return", False):
+                        return True
+                else:
+                    inst_cls = self.resolve_instance_class(expr.func)
+                    if not (inst_cls and self.resolve_class_method(inst_cls, "__call__")):
+                        if self._infer_expr_type(expr) == TYPE_INT:
+                            return True
+            elif isinstance(expr.func, ast.Subscript) and self._infer_expr_type(expr) == TYPE_INT:
+                return True
+        return self._infer_expr_type(expr) == TYPE_PTR
+
+    def _method_call_target(self, cls_name: Optional[str], vcall_key: str, concrete_target: str) -> str:
+        if cls_name and self._method_has_polymorphic_impls(cls_name, vcall_key):
+            self._used_vcalls.add(vcall_key)
+            return self._vcall_label(vcall_key)
+        return safe_asm_label(concrete_target)
+
+    def _emit_truthy_check(self, expr: ast.AST, lbl_false: str) -> None:
+        """Evaluate `expr` and jump to `lbl_false` when falsy per Python semantics."""
+        cls_name = self.resolve_instance_class(expr)
+        if cls_name:
+            bool_m = self.resolve_class_method(cls_name, "__bool__")
+            len_m = self.resolve_class_method(cls_name, "__len__")
+            poly_bool = self._method_has_polymorphic_impls(cls_name, "__bool__")
+            self._generate_expr(expr)
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_false}")
+            if poly_bool:
+                self._used_vcalls.add("__bool__")
+                self.emit("mov rcx, rax", "pass self to polymorphic __bool__")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {self._vcall_label('__bool__')}")
+                self.emit("add rsp, 32")
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_false}")
+            elif bool_m or len_m:
+                target_fn = bool_m or len_m
+                self.emit("mov rcx, rax", f"pass self to {'__bool__' if bool_m else '__len__'}")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {safe_asm_label(target_fn)}")
+                self.emit("add rsp, 32")
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_false}")
+            return
+
+        vt = self._infer_expr_type(expr)
+        is_seq = False
+        is_str = False
+        if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
+            is_seq = True
+        elif vt.is_str():
+            is_str = True
+        elif isinstance(expr, ast.Name) and self.current_func:
+            v = self.current_func.local_vars.get(expr.id)
+            if v:
+                if v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set():
+                    is_seq = True
+                elif v.var_type.is_str():
+                    is_str = True
+
+        self._generate_expr(expr)
+        self.emit("test rax, rax")
+        self.emit(f"jz {lbl_false}")
+        if is_seq:
+            self.emit("cmp qword [rax], 0", "check empty container")
+            self.emit(f"jz {lbl_false}")
+        elif is_str:
+            self.emit("cmp byte [rax], 0", "check empty string")
+            self.emit(f"jz {lbl_false}")
+
+    def _emit_to_bool(self, expr: ast.AST, negate: bool = False) -> None:
+        lbl_false = self.new_label("tobool_false")
+        lbl_done = self.new_label("tobool_done")
+        self._emit_truthy_check(expr, lbl_false)
+        self.emit(f"mov rax, {0 if negate else 1}")
+        self.emit(f"jmp {lbl_done}")
+        self.emit_raw(f"{lbl_false}:")
+        self.emit(f"mov rax, {1 if negate else 0}")
+        self.emit_raw(f"{lbl_done}:")
+
+    def _select_win64_elem_printer(self, elem_t: Optional[PyFasmType]) -> str:
+        if elem_t is None:
+            return "_pyfasm_print_auto_repr"
+        if elem_t.is_str():
+            return "_pyfasm_print_str_repr"
+        if elem_t.is_float():
+            return "_pyfasm_print_float_bits"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_print_int"
+        if elem_t.is_list():
+            return self._select_win64_list_printer(elem_t)
+        if elem_t.is_tuple():
+            return self._select_win64_tuple_printer(elem_t)
+        return "_pyfasm_print_auto_repr"
+
+    def _select_win64_list_printer(self, list_t: PyFasmType) -> str:
+        elem_t = getattr(list_t, "element_type", None)
+        if elem_t is None:
+            return "_pyfasm_print_list"
+        if elem_t.is_str():
+            return "_pyfasm_print_list_str"
+        if elem_t.is_float():
+            return "_pyfasm_print_list_float"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_print_list_int"
+        if elem_t.is_list():
+            inner = getattr(elem_t, "element_type", None)
+            if inner is None:
+                return "_pyfasm_print_list_2d_auto"
+            if inner.is_str():
+                return "_pyfasm_print_list_2d_str"
+            if inner.is_float():
+                return "_pyfasm_print_list_2d_float"
+            if inner.is_int() or inner.is_bool():
+                return "_pyfasm_print_list_2d_int"
+            if inner.is_list():
+                return "_pyfasm_print_list_3d_int"
+            return "_pyfasm_print_list_2d_auto"
+        return "_pyfasm_print_list"
+
+    def _select_win64_tuple_printer(self, tup_t: PyFasmType) -> str:
+        elem_t = getattr(tup_t, "element_type", None)
+        if elem_t is None:
+            return "_pyfasm_print_tuple"
+        if elem_t.is_str():
+            return "_pyfasm_print_tuple_str"
+        if elem_t.is_float():
+            return "_pyfasm_print_tuple_float"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_print_tuple_int"
+        if elem_t.is_list():
+            return "_pyfasm_print_tuple_list"
+        return "_pyfasm_print_tuple"
+
+    def _select_win64_elem_to_str(self, elem_t: Optional[PyFasmType]) -> str:
+        if elem_t is None:
+            return "_pyfasm_auto_to_repr"
+        if elem_t.is_str():
+            return "_pyfasm_str_to_repr"
+        if elem_t.is_float():
+            return "_pyfasm_float_to_str"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_int_to_str"
+        if elem_t.is_list():
+            return self._select_win64_list_to_str(elem_t)
+        if elem_t.is_tuple():
+            return self._select_win64_tuple_to_str(elem_t)
+        return "_pyfasm_auto_to_repr"
+
+    def _select_win64_list_to_str(self, list_t: PyFasmType) -> str:
+        elem_t = getattr(list_t, "element_type", None)
+        if elem_t is None:
+            return "_pyfasm_list_to_str"
+        if elem_t.is_str():
+            return "_pyfasm_list_str_to_str"
+        if elem_t.is_float():
+            return "_pyfasm_list_float_to_str"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_list_int_to_str"
+        if elem_t.is_list():
+            inner = getattr(elem_t, "element_type", None)
+            if inner is None:
+                return "_pyfasm_list_2d_auto_to_str"
+            if inner.is_str():
+                return "_pyfasm_list_2d_str_to_str"
+            if inner.is_float():
+                return "_pyfasm_list_2d_float_to_str"
+            if inner.is_int() or inner.is_bool():
+                return "_pyfasm_list_2d_int_to_str"
+            if inner.is_list():
+                return "_pyfasm_list_3d_int_to_str"
+            return "_pyfasm_list_2d_auto_to_str"
+        return "_pyfasm_list_to_str"
+
+    def _select_win64_tuple_to_str(self, tup_t: PyFasmType) -> str:
+        elem_t = getattr(tup_t, "element_type", None)
+        if elem_t is None:
+            return "_pyfasm_tuple_to_str"
+        if elem_t.is_str():
+            return "_pyfasm_tuple_str_to_str"
+        if elem_t.is_float():
+            return "_pyfasm_tuple_float_to_str"
+        if elem_t.is_int() or elem_t.is_bool():
+            return "_pyfasm_tuple_int_to_str"
+        if elem_t.is_list():
+            return "_pyfasm_tuple_list_to_str"
+        return "_pyfasm_tuple_to_str"
+
+    def _emit_win64_to_str(
+        self,
+        expr: ast.AST,
+        is_repr: bool = False,
+        call_node: Optional[ast.Call] = None,
+    ) -> None:
+        """Convert `expr` to a null-terminated UTF-8 string pointer in RAX."""
+        cls_name = self.resolve_instance_class(expr)
+        vkey = "__repr__" if is_repr else "__str__"
+        if is_repr:
+            str_m = (self.resolve_class_method(cls_name, "__repr__") or self.resolve_class_method(cls_name, "__str__")) if cls_name else None
+        else:
+            str_m = (self.resolve_class_method(cls_name, "__str__") or self.resolve_class_method(cls_name, "__repr__")) if cls_name else None
+        if str_m:
+            self._generate_expr(expr)
+            self.emit("mov rcx, rax", "pass self to __str__")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit(f"call {self._method_call_target(cls_name, vkey, str_m)}")
+            self.emit("add rsp, 32")
+            return
+
+        if isinstance(expr, ast.Constant) and expr.value is None:
+            self.emit("lea rax, [none_str]")
+            return
+
+        part_type = self._infer_expr_type(expr)
+        self._generate_expr(expr)
+        if (
+            part_type.is_str()
+            or isinstance(expr, ast.JoinedStr)
+            or (isinstance(expr, ast.Constant) and isinstance(expr.value, str))
+        ):
+            if is_repr:
+                self.emit("mov rcx, rax")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_str_to_repr")
+                self.emit("add rsp, 32")
+            return
+        if part_type.is_float():
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_float_to_str")
+            self.emit("add rsp, 32")
+            return
+        if part_type.is_list():
+            helper = self._select_win64_list_to_str(part_type)
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit(f"call {helper}")
+            self.emit("add rsp, 32")
+            return
+        if part_type.is_tuple():
+            helper = self._select_win64_tuple_to_str(part_type)
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit(f"call {helper}")
+            self.emit("add rsp, 32")
+            return
+        if part_type.is_dict():
+            kt = getattr(part_type, "key_type", None)
+            vt = getattr(part_type, "val_type", None)
+            k_fn = self._select_win64_elem_to_str(kt)
+            v_fn = self._select_win64_elem_to_str(vt)
+            self.emit("mov rcx, rax")
+            self.emit(f"lea rdx, [{k_fn}]")
+            self.emit(f"lea r8, [{v_fn}]")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_dict_to_str_with")
+            self.emit("add rsp, 32")
+            return
+        if part_type.is_set():
+            et = getattr(part_type, "element_type", None)
+            e_fn = self._select_win64_elem_to_str(et)
+            self.emit("mov rcx, rax")
+            self.emit(f"lea rdx, [{e_fn}]")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_set_to_str_with")
+            self.emit("add rsp, 32")
+            return
+        if not part_type.is_bool() and self._is_ambiguous_dynamic_expr(expr):
+            self.emit("mov rcx, rax")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit(f"call {'_pyfasm_auto_to_repr' if is_repr else '_pyfasm_auto_to_str'}")
+            self.emit("add rsp, 32")
+            return
+
+        if call_node is not None and not is_repr:
+            self.emit("mov rcx, rax")
+            self._record_unresolved("str", call_node)
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call fn_str")
+            self.emit("add rsp, 32")
+            return
+
+        self.emit("mov rcx, rax")
+        self.emit("sub rsp, 32", "shadow space")
+        self.emit("call _pyfasm_int_to_str")
+        self.emit("add rsp, 32")
+
     def _generate_fstring_part(self, part: ast.AST) -> None:
         if isinstance(part, ast.Constant):
             self._emit_string_pointer("rax", str(part.value))
         elif isinstance(part, ast.FormattedValue):
+            if self.target in ("win64", "dll"):
+                self._emit_win64_to_str(part.value, is_repr=False)
+                return
             cls_name = self.resolve_instance_class(part.value)
             str_m = (
                 self.resolve_class_method(cls_name, "__str__")
@@ -409,7 +972,7 @@ class X64CodeGen:
                 self._generate_expr(part.value)
                 self.emit("mov rcx, rax", "pass self to __str__")
                 self.emit("sub rsp, 32", "shadow space")
-                self.emit(f"call {safe_asm_label(str_m)}")
+                self.emit(f"call {self._method_call_target(cls_name, '__str__', str_m)}")
                 self.emit("add rsp, 32")
                 return
 
@@ -420,12 +983,6 @@ class X64CodeGen:
                 or isinstance(part.value, ast.JoinedStr)
                 or (isinstance(part.value, ast.Constant) and isinstance(part.value.value, str))
             ):
-                return
-            if part_type.is_float() and self.target in ("win64", "dll"):
-                self.emit("mov rcx, rax")
-                self.emit("sub rsp, 32", "shadow space")
-                self.emit("call _pyfasm_float_to_str")
-                self.emit("add rsp, 32")
                 return
             self.emit("mov rcx, rax")
             self.emit("sub rsp, 32", "shadow space")
@@ -712,8 +1269,9 @@ class X64CodeGen:
                 gval = 1 if gval else 0
             elif not isinstance(gval, int):
                 gval = 0
-            lines.append(f"    _pyfasm_global_{gname} dq {gval}")
+            lines.append(f"    {safe_global_label(gname)} dq {gval}")
 
+        lines.append("    _pyfasm_stop_iter dq 0")
         return "\n".join(lines)
 
     def _get_runtime_code(self) -> str:
@@ -791,6 +1349,7 @@ class X64CodeGen:
     def _get_functions_section(self) -> str:
         old_lines = self.lines
         self.lines = []
+        self.emit_raw("_pyfasm_funcs_start:")
 
         fn_to_names: dict[int, list[str]] = {}
         for name, fn in self.module.functions.items():
@@ -824,6 +1383,9 @@ class X64CodeGen:
                 filtered_names = names
             self._generate_function(fn, aliases=filtered_names)
 
+        self._emit_vcall_trampolines()
+        self.emit_raw("_pyfasm_funcs_end:")
+
         # Fallback stubs for unresolved external Python symbols
         if self.unresolved_symbols:
             self.emit_raw("")
@@ -831,7 +1393,7 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
-                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce", "set", "count", "math_gcd"):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce", "set", "count", "math_gcd", "_pyfasm_closure_new", "_pyfasm_closure_get", "StopIteration"):
                     continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
@@ -1013,9 +1575,16 @@ include 'functions.inc'
         return optimize_fasm_code(raw)
 
     def _generate_constructor_body(self, cls_sym: Any) -> None:
+        n_ctor_args = len(self.current_func.args) if self.current_func else 0
+        self_slot = max(40, (n_ctor_args + 1) * 8)
         self.emit("mov ecx, 2048", f"allocate 2048 bytes for class '{cls_sym.name}' instance")
         self.emit("call _pyfasm_alloc")
-        self.emit("mov [rbp - 40], rax", "save self instance pointer")
+        self.emit(f"mov [rbp - {self_slot}], rax", "save self instance pointer")
+        cid = self._class_ids.get(cls_sym.name, 0)
+        if cid:
+            self.emit("mov r10, 505946434C535447h", f"class tag PYFCLSTG for '{cls_sym.name}'")
+            self.emit("mov [rax + 2032], r10")
+            self.emit(f"mov qword [rax + 2040], {cid}", f"class_id = {cid}")
 
         # Check if Background System Tray Application (Punto Switcher, pystray)
         module_imports = getattr(self.module, "imports", [])
@@ -1032,12 +1601,12 @@ include 'functions.inc'
 
         if is_tray and self.target in ("win64", "dll"):
             self.emit("call _pyfasm_init_tray", "initialize native background system tray icon")
-            self.emit("mov rax, [rbp - 40]")
+            self.emit(f"mov rax, [rbp - {self_slot}]")
             self.emit("mov [_pyfasm_last_gui_instance], rax", "store tray instance pointer")
         elif is_gui and self.target in ("win64", "dll"):
             self.emit("call _pyfasm_init_gui", "initialize native GUI system")
             self.emit("call _pyfasm_ensure_window", "ensure native Win32 window is created")
-            self.emit("mov rax, [rbp - 40]")
+            self.emit(f"mov rax, [rbp - {self_slot}]")
             self.emit("mov [_pyfasm_last_gui_instance], rax", "store GUI instance pointer for callbacks")
 
         # Call __init__ if present (including inherited __init__)
@@ -1049,13 +1618,22 @@ include 'functions.inc'
                 init_target = f"{cls_sym.name}___init__"
 
         if init_target:
-            self.emit("mov rcx, [rbp - 40]", "pass self as first arg")
+            extra_args = list(self.current_func.args[3:]) if (self.current_func and len(self.current_func.args) > 3) else []
+            pad = 8 if (len(extra_args) % 2 == 1) else 0
+            if pad:
+                self.emit(f"sub rsp, {pad}", "align stack for extra __init__ args")
+            for extra_arg in reversed(extra_args):
+                self.emit(f"mov rax, [rbp - {extra_arg.stack_offset}]")
+                self.emit("push rax", f"forward ctor arg {extra_arg.name}")
+            self.emit(f"mov rcx, [rbp - {self_slot}]", "pass self as first arg")
             self.emit("mov rdx, [rbp - 8]", "pass arg 1")
             self.emit("mov r8, [rbp - 16]", "pass arg 2")
             self.emit("mov r9, [rbp - 24]", "pass arg 3")
+            self.emit("sub rsp, 32", "shadow space for __init__")
             self.emit(f"call {safe_asm_label(init_target)}")
+            self.emit(f"add rsp, {32 + len(extra_args) * 8 + pad}", "cleanup __init__ call")
 
-        self.emit("mov rax, [rbp - 40]", "return instance self pointer")
+        self.emit(f"mov rax, [rbp - {self_slot}]", "return instance self pointer")
 
     def _generate_function(self, fn: FunctionSymbol, aliases: Optional[List[str]] = None) -> None:
         if getattr(fn, "is_generator", False):
@@ -1067,6 +1645,12 @@ include 'functions.inc'
         if fn.class_name:
             self.local_var_classes["self"] = fn.class_name
             self.local_var_classes["this"] = fn.class_name
+        for vname, vsym in fn.local_vars.items():
+            if isinstance(vsym.var_type, InstanceType):
+                self.local_var_classes[vname] = vsym.var_type.class_name
+        for asym in fn.args:
+            if isinstance(asym.var_type, InstanceType):
+                self.local_var_classes[asym.name] = asym.var_type.class_name
         self.emit_raw("; ============================================================")
         self.emit_raw(f"; Function: {fn.name}")
         self.emit_raw("; ============================================================")
@@ -1123,6 +1707,7 @@ include 'functions.inc'
         used_local_end = max(
             [v.stack_offset for v in fn.local_vars.values()]
             + [a.stack_offset for a in fn.args]
+            + ([max(40, (len(fn.args) + 1) * 8)] if fn.name in self.module.classes else [])
             + [0]
         )
         save_base = ((used_local_end + 7) // 8) * 8
@@ -1323,7 +1908,7 @@ include 'functions.inc'
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
-                                self.emit(f"mov [_pyfasm_global_{tgt_elt.id}], rax", f"store global {tgt_elt.id}")
+                                self.emit(f"mov [{safe_global_label(tgt_elt.id)}], rax", f"store global {tgt_elt.id}")
                     return
                 elif has_starred:
                     star_idx = next(i for i, elt in enumerate(target_tup.elts) if isinstance(elt, ast.Starred))
@@ -1344,7 +1929,7 @@ include 'functions.inc'
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt.id in self.current_func.global_names) or (tgt.id in self.module.global_vars):
-                                self.emit(f"mov [_pyfasm_global_{tgt.id}], rax", f"store global {tgt.id}")
+                                self.emit(f"mov [{safe_global_label(tgt.id)}], rax", f"store global {tgt.id}")
 
                     for idx, tgt in enumerate(suffix_targets):
                         offset_from_end = n_suffix - idx
@@ -1356,7 +1941,7 @@ include 'functions.inc'
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt.id in self.current_func.global_names) or (tgt.id in self.module.global_vars):
-                                self.emit(f"mov [_pyfasm_global_{tgt.id}], rax", f"store global {tgt.id}")
+                                self.emit(f"mov [{safe_global_label(tgt.id)}], rax", f"store global {tgt.id}")
 
                     lbl_star_ok = self.new_label("star_len_ok")
                     lbl_star_done = self.new_label("star_done")
@@ -1393,7 +1978,7 @@ include 'functions.inc'
                         if var:
                             self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                         elif (self.current_func and hasattr(self.current_func, "global_names") and starred_target.id in self.current_func.global_names) or (starred_target.id in self.module.global_vars):
-                            self.emit(f"mov [_pyfasm_global_{starred_target.id}], rax", f"store global {starred_target.id}")
+                            self.emit(f"mov [{safe_global_label(starred_target.id)}], rax", f"store global {starred_target.id}")
                     return
                 else:
                     self._generate_expr(stmt.value)
@@ -1410,7 +1995,7 @@ include 'functions.inc'
                             if var:
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
-                                self.emit(f"mov [_pyfasm_global_{tgt_elt.id}], rax", f"store global {tgt_elt.id}")
+                                self.emit(f"mov [{safe_global_label(tgt_elt.id)}], rax", f"store global {tgt_elt.id}")
                         elif isinstance(tgt_elt, ast.Attribute):
                             self.emit("push rax", "save unpacked value")
                             self._generate_expr(tgt_elt.value)
@@ -1425,15 +2010,7 @@ include 'functions.inc'
                     return
 
             self._generate_expr(stmt.value)  # result in RAX
-            assigned_cls = None
-            if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Name):
-                func_id = stmt.value.func.id
-                if func_id in self.module.classes:
-                    assigned_cls = func_id
-            elif isinstance(stmt.value, ast.Name):
-                assigned_cls = self.local_var_classes.get(stmt.value.id)
-            elif isinstance(stmt.value, ast.BinOp):
-                assigned_cls = self.resolve_instance_class(stmt.value.left)
+            assigned_cls = self.resolve_instance_class(stmt.value)
 
             if assigned_cls:
                 for target in stmt.targets:
@@ -1445,11 +2022,11 @@ include 'functions.inc'
                     if var:
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                     elif (self.current_func and hasattr(self.current_func, "global_names") and target.id in self.current_func.global_names) or (target.id in self.module.global_vars):
-                        self.emit(f"mov [_pyfasm_global_{target.id}], rax", f"store global {target.id}")
+                        self.emit(f"mov [{safe_global_label(target.id)}], rax", f"store global {target.id}")
                         if self.current_func and self.current_func.name.startswith("_pyfasm_modinit_"):
                             curr_mod = self.current_func.name[len("_pyfasm_modinit_"):]
                             if f"{curr_mod}_{target.id}" in self.module.global_vars:
-                                self.emit(f"mov [_pyfasm_global_{curr_mod}_{target.id}], rax", f"store module global {curr_mod}_{target.id}")
+                                self.emit(f"mov [{safe_global_label(f'{curr_mod}_{target.id}')}], rax", f"store module global {curr_mod}_{target.id}")
                 elif isinstance(target, ast.Subscript):
                     if isinstance(target.value, ast.Attribute) and getattr(target.value, "attr", None) == "rcParams":
                         self.emit("xor eax, eax", "safe no-op for rcParams configuration")
@@ -1567,9 +2144,9 @@ include 'functions.inc'
                         namespaced = f"{mod_name}_{target.attr}"
                         if namespaced not in self.module.global_vars:
                             self.module.global_vars[namespaced] = 0
-                        self.emit(f"mov [_pyfasm_global_{namespaced}], rax", f"assign module global {namespaced}")
+                        self.emit(f"mov [{safe_global_label(namespaced)}], rax", f"assign module global {namespaced}")
                         if target.attr in self.module.global_vars:
-                            self.emit(f"mov [_pyfasm_global_{target.attr}], rax", f"assign global {target.attr}")
+                            self.emit(f"mov [{safe_global_label(target.attr)}], rax", f"assign global {target.attr}")
                     else:
                         # Check if property setter exists
                         prop = self.resolve_property_for_expr(target.value, target.attr)
@@ -1598,16 +2175,62 @@ include 'functions.inc'
             if stmt.value:
                 self._generate_expr(stmt.value)
                 if isinstance(stmt.target, ast.Name):
-                    var = self.current_func.local_vars.get(stmt.target.id)
+                    assigned_cls = self.resolve_instance_class(stmt.value)
+                    if assigned_cls:
+                        self.local_var_classes[stmt.target.id] = assigned_cls
+                    var = self.current_func.local_vars.get(stmt.target.id) if self.current_func else None
                     if var:
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
+                    elif (self.current_func and hasattr(self.current_func, "global_names") and stmt.target.id in self.current_func.global_names) or (stmt.target.id in self.module.global_vars):
+                        self.emit(f"mov [{safe_global_label(stmt.target.id)}], rax", f"store global {stmt.target.id}")
 
         elif isinstance(stmt, ast.AugAssign):
             # Target += Expr
             if isinstance(stmt.target, ast.Name):
                 var = self.current_func.local_vars.get(stmt.target.id) if self.current_func else None
                 is_global = (self.current_func and hasattr(self.current_func, "global_names") and stmt.target.id in self.current_func.global_names) or (stmt.target.id in self.module.global_vars)
-                if var:
+                aug_dunder_map = {
+                    ast.Add: ("__iadd__", "__add__"),
+                    ast.Sub: ("__isub__", "__sub__"),
+                    ast.Mult: ("__imul__", "__mul__"),
+                    ast.FloorDiv: ("__ifloordiv__", "__floordiv__"),
+                    ast.Div: ("__itruediv__", "__truediv__"),
+                    ast.Mod: ("__imod__", "__mod__"),
+                    ast.Pow: ("__ipow__", "__pow__"),
+                    ast.BitAnd: ("__iand__", "__and__"),
+                    ast.BitOr: ("__ior__", "__or__"),
+                    ast.BitXor: ("__ixor__", "__xor__"),
+                    ast.LShift: ("__ilshift__", "__lshift__"),
+                    ast.RShift: ("__irshift__", "__rshift__"),
+                }
+                tgt_cls = self.resolve_instance_class(stmt.target)
+                aug_m = None
+                aug_key = None
+                if tgt_cls and type(stmt.op) in aug_dunder_map:
+                    inplace_d, fallback_d = aug_dunder_map[type(stmt.op)]
+                    aug_m = self.resolve_class_method(tgt_cls, inplace_d)
+                    if aug_m:
+                        aug_key = inplace_d
+                    else:
+                        aug_m = self.resolve_class_method(tgt_cls, fallback_d)
+                        if aug_m:
+                            aug_key = fallback_d
+                if aug_m and aug_key and (var or is_global):
+                    self._generate_expr(stmt.value)
+                    self.emit("push rax", "save augassign rhs")
+                    if var:
+                        self.emit(f"mov rcx, [rbp - {var.stack_offset}]", f"load {var.name}")
+                    else:
+                        self.emit(f"mov rcx, [{safe_global_label(stmt.target.id)}]", f"load global {stmt.target.id}")
+                    self.emit("pop rdx", "restore rhs")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {self._method_call_target(tgt_cls, aug_key, aug_m)}")
+                    self.emit("add rsp, 32")
+                    if var:
+                        self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
+                    else:
+                        self.emit(f"mov [{safe_global_label(stmt.target.id)}], rax", f"update global {stmt.target.id}")
+                elif var:
                     if var.var_type.is_str() and isinstance(stmt.op, ast.Add):
                         self.emit(f"mov rcx, [rbp - {var.stack_offset}]", f"load {var.name}")
                         self.emit("push rcx")
@@ -1625,13 +2248,13 @@ include 'functions.inc'
                         self._generate_binop_instr(stmt.op)
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"update {var.name}")
                 elif is_global:
-                    self.emit(f"mov rax, [_pyfasm_global_{stmt.target.id}]", f"load global {stmt.target.id}")
+                    self.emit(f"mov rax, [{safe_global_label(stmt.target.id)}]", f"load global {stmt.target.id}")
                     self.emit("push rax")
                     self._generate_expr(stmt.value)
                     self.emit("mov r11, rax")
                     self.emit("pop rax")
                     self._generate_binop_instr(stmt.op)
-                    self.emit(f"mov [_pyfasm_global_{stmt.target.id}], rax", f"update global {stmt.target.id}")
+                    self.emit(f"mov [{safe_global_label(stmt.target.id)}], rax", f"update global {stmt.target.id}")
             elif isinstance(stmt.target, ast.Subscript):
                 slice_unwrapped = _unwrap_slice(stmt.target.slice)
                 is_list_target = False
@@ -1700,20 +2323,7 @@ include 'functions.inc'
             l_else = self.new_label("if_else")
             l_end = self.new_label("if_end")
 
-            self._generate_expr(stmt.test)  # test result in RAX
-            is_seq = False
-            vt = self._infer_expr_type(stmt.test)
-            if vt.is_list() or vt.is_tuple() or vt.is_dict() or vt.is_set():
-                is_seq = True
-            elif isinstance(stmt.test, ast.Name) and self.current_func:
-                v = self.current_func.local_vars.get(stmt.test.id)
-                if v and (v.var_type.is_list() or v.var_type.is_tuple() or v.var_type.is_dict() or v.var_type.is_set()):
-                    is_seq = True
-            self.emit("test rax, rax")
-            self.emit(f"jz {l_else}")
-            if is_seq:
-                self.emit("cmp qword [rax], 0", "check empty container")
-                self.emit(f"jz {l_else}")
+            self._emit_truthy_check(stmt.test, l_else)
 
             # Then body
             for s in stmt.body:
@@ -1736,9 +2346,7 @@ include 'functions.inc'
             self.loop_stack.append((l_start, l_break))
 
             self.emit_raw(f"{l_start}:")
-            self._generate_expr(stmt.test)
-            self.emit("test rax, rax")
-            self.emit(f"jz {l_normal}")
+            self._emit_truthy_check(stmt.test, l_normal)
 
             for s in stmt.body:
                 self._generate_statement(s)
@@ -1778,34 +2386,7 @@ include 'functions.inc'
             pass
 
         elif isinstance(stmt, ast.With):
-            for item in stmt.items:
-                self._generate_expr(item.context_expr)
-                opt_var = item.optional_vars if isinstance(item.optional_vars, ast.Name) else None
-                handle_offset = None
-                if opt_var and self.current_func:
-                    var = self.current_func.local_vars.get(opt_var.id)
-                    if var:
-                        handle_offset = var.stack_offset
-                        self.emit(f"mov [rbp - {handle_offset}], rax", f"assign {var.name}")
-
-                if handle_offset is None:
-                    self.emit("push rax", "save anonymous with handle")
-
-                for s in stmt.body:
-                    self._generate_statement(s)
-
-                if handle_offset is not None:
-                    self.emit(f"mov rcx, [rbp - {handle_offset}]", "handle to close")
-                else:
-                    self.emit("pop rcx", "restore anonymous with handle")
-
-                lbl_skip_close = self.new_label("skip_close")
-                self.emit("test rcx, rcx")
-                self.emit(f"jz {lbl_skip_close}")
-                self.emit("cmp rcx, -1")
-                self.emit(f"je {lbl_skip_close}")
-                self.emit("call _pyfasm_file_close")
-                self.emit_raw(f"{lbl_skip_close}:")
+            self._emit_with_items(list(stmt.items), list(stmt.body))
 
         elif isinstance(stmt, ast.Try):
             lbl_except = self.new_label("except")
@@ -1846,20 +2427,39 @@ include 'functions.inc'
             self.emit_raw(f"{lbl_end}:")
 
         elif isinstance(stmt, ast.Raise):
-            if stmt.exc:
-                self._generate_expr(stmt.exc)
-            else:
-                self.emit("mov rax, 1", "default error code")
-            if self.try_stack:
-                self.emit(f"jmp {self.try_stack[-1]}", "jump to active except handler")
-            else:
-                if self.current_func:
-                    self.emit("xor eax, eax", "unhandled raise in function returns 0")
+            is_stop_iter = False
+            if isinstance(stmt.exc, ast.Name) and stmt.exc.id == "StopIteration":
+                is_stop_iter = True
+            elif isinstance(stmt.exc, ast.Call) and isinstance(stmt.exc.func, ast.Name) and stmt.exc.func.id == "StopIteration":
+                is_stop_iter = True
+
+            if is_stop_iter:
+                self.emit("mov qword [_pyfasm_stop_iter], 1", "signal StopIteration")
+                self.emit("mov rax, 1")
+                if self.try_stack:
+                    self.emit(f"jmp {self.try_stack[-1]}", "jump to active except handler")
+                elif self.current_func:
+                    self.emit("xor eax, eax", "return from __next__ on StopIteration")
                     self._emit_func_exit()
                 else:
-                    self.emit("mov ecx, eax")
+                    self.emit("xor ecx, ecx")
                     self.emit("sub rsp, 40")
                     self.emit("call [ExitProcess]")
+            else:
+                if stmt.exc:
+                    self._generate_expr(stmt.exc)
+                else:
+                    self.emit("mov rax, 1", "default error code")
+                if self.try_stack:
+                    self.emit(f"jmp {self.try_stack[-1]}", "jump to active except handler")
+                else:
+                    if self.current_func:
+                        self.emit("xor eax, eax", "unhandled raise in function returns 0")
+                        self._emit_func_exit()
+                    else:
+                        self.emit("mov ecx, eax")
+                        self.emit("sub rsp, 40")
+                        self.emit("call [ExitProcess]")
 
         elif isinstance(stmt, ast.Assert):
             lbl_ok = self.new_label("assert_ok")
@@ -1889,13 +2489,102 @@ include 'functions.inc'
         elif isinstance(stmt, _AST_MATCH):
             self._generate_match(stmt)
 
+    def _emit_with_items(self, items: List[ast.withitem], body: List[ast.stmt]) -> None:
+        if not items:
+            for s in body:
+                self._generate_statement(s)
+            return
+
+        item = items[0]
+        rest = items[1:]
+        ctx_cls = self.resolve_instance_class(item.context_expr)
+        enter_m = self.resolve_class_method(ctx_cls, "__enter__") if ctx_cls else None
+        exit_m = self.resolve_class_method(ctx_cls, "__exit__") if ctx_cls else None
+
+        if enter_m or exit_m:
+            self._generate_expr(item.context_expr)
+            self.emit("sub rsp, 16", "aligned slot for with context manager")
+            self.emit("mov [rsp], rax", "save context object")
+
+            if enter_m:
+                lbl_skip_enter = self.new_label("skip_enter")
+                self.emit("test rax, rax")
+                self.emit(f"jz {lbl_skip_enter}")
+                self.emit("mov rcx, [rsp]", "pass self to __enter__")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {self._method_call_target(ctx_cls, '__enter__', enter_m)}")
+                self.emit("add rsp, 32")
+                self.emit_raw(f"{lbl_skip_enter}:")
+
+            if item.optional_vars is not None:
+                if isinstance(item.optional_vars, ast.Name):
+                    enter_cls = ctx_cls
+                    if enter_m and enter_m in self.module.functions:
+                        rt = self.module.functions[enter_m].return_type
+                        if isinstance(rt, InstanceType):
+                            enter_cls = rt.class_name
+                        elif rt != TYPE_VOID:
+                            enter_cls = None
+                    if enter_cls:
+                        self.local_var_classes[item.optional_vars.id] = enter_cls
+                self._assign_target(item.optional_vars, "rax")
+
+            self._emit_with_items(rest, body)
+
+            if exit_m:
+                lbl_skip_exit = self.new_label("skip_exit")
+                self.emit("mov rcx, [rsp]", "pass self to __exit__")
+                self.emit("test rcx, rcx")
+                self.emit(f"jz {lbl_skip_exit}")
+                self.emit("xor edx, edx", "exc_type = None")
+                self.emit("xor r8d, r8d", "exc_val = None")
+                self.emit("xor r9d, r9d", "exc_tb = None")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {self._method_call_target(ctx_cls, '__exit__', exit_m)}")
+                self.emit("add rsp, 32")
+                self.emit_raw(f"{lbl_skip_exit}:")
+
+            self.emit("add rsp, 16", "release with context slot")
+            return
+
+        # Default Win32 / file handle context manager (e.g. with open(...) as f:)
+        self._generate_expr(item.context_expr)
+        opt_var = item.optional_vars if isinstance(item.optional_vars, ast.Name) else None
+        handle_offset = None
+        if opt_var and self.current_func:
+            var = self.current_func.local_vars.get(opt_var.id)
+            if var:
+                handle_offset = var.stack_offset
+                self.emit(f"mov [rbp - {handle_offset}], rax", f"assign {var.name}")
+        if handle_offset is None and item.optional_vars is not None:
+            self._assign_target(item.optional_vars, "rax")
+        if handle_offset is None:
+            self.emit("sub rsp, 16", "aligned slot for anonymous with handle")
+            self.emit("mov [rsp], rax", "save anonymous with handle")
+
+        self._emit_with_items(rest, body)
+
+        if handle_offset is not None:
+            self.emit(f"mov rcx, [rbp - {handle_offset}]", "handle to close")
+        else:
+            self.emit("mov rcx, [rsp]", "restore anonymous with handle")
+            self.emit("add rsp, 16", "release anonymous with handle slot")
+
+        lbl_skip_close = self.new_label("skip_close")
+        self.emit("test rcx, rcx")
+        self.emit(f"jz {lbl_skip_close}")
+        self.emit("cmp rcx, -1")
+        self.emit(f"je {lbl_skip_close}")
+        self.emit("call _pyfasm_file_close")
+        self.emit_raw(f"{lbl_skip_close}:")
+
     def _assign_target(self, target_node: ast.AST, value_reg: str = "rax") -> None:
         if isinstance(target_node, ast.Name):
             var = self.current_func.local_vars.get(target_node.id) if self.current_func else None
             if var:
                 self.emit(f"mov [rbp - {var.stack_offset}], {value_reg}", f"assign {var.name}")
             elif target_node.id in self.module.global_vars:
-                self.emit(f"mov [_pyfasm_global_{target_node.id}], {value_reg}", f"assign global {target_node.id}")
+                self.emit(f"mov [{safe_global_label(target_node.id)}], {value_reg}", f"assign global {target_node.id}")
         elif isinstance(target_node, (ast.Tuple, ast.List)):
             if value_reg != "r10":
                 self.emit(f"mov r10, {value_reg}", "container item to unpack")
@@ -1909,7 +2598,7 @@ include 'functions.inc'
                         self.emit(f"mov [rbp - {e_var.stack_offset}], rax")
                     elif elt.id in self.module.global_vars:
                         self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", f"unpack global {elt.id}")
-                        self.emit(f"mov [_pyfasm_global_{elt.id}], rax")
+                        self.emit(f"mov [{safe_global_label(elt.id)}], rax")
                 elif isinstance(elt, (ast.Tuple, ast.List)):
                     self.emit("push r10")
                     self.emit(f"mov rax, [r10 + {idx * 8 + 8}]", "load inner container")
@@ -1988,15 +2677,147 @@ include 'functions.inc'
             self.emit_raw(f"{lbl_null}:")
             return
 
+        iter_cls = self.resolve_instance_class(stmt.iter)
+        if iter_cls:
+            iter_m = self.resolve_class_method(iter_cls, "__iter__")
+            eff_iter_cls = iter_cls
+            if iter_m and iter_m in self.module.functions:
+                it_rt = self.module.functions[iter_m].return_type
+                if isinstance(it_rt, InstanceType):
+                    eff_iter_cls = it_rt.class_name
+            next_m = self.resolve_class_method(eff_iter_cls, "__next__")
+            if next_m:
+                if iter_m:
+                    self.emit("mov rcx, rax", "pass self to __iter__")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {self._method_call_target(iter_cls, '__iter__', iter_m)}")
+                    self.emit("add rsp, 32")
+                    self.emit("test rax, rax", "check null iterator")
+                    self.emit(f"jz {lbl_normal if stmt.orelse else lbl_null}")
+
+                if buf_var:
+                    self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "save custom iter_ptr")
+                else:
+                    self.emit("sub rsp, 16", "aligned slot for custom iter_ptr")
+                    self.emit("mov [rsp], rax", "save custom iter_ptr")
+
+                if isinstance(stmt.target, ast.Name) and next_m in self.module.functions:
+                    nt = self.module.functions[next_m].return_type
+                    if isinstance(nt, InstanceType):
+                        self.local_var_classes[stmt.target.id] = nt.class_name
+
+                self.loop_stack.append((lbl_step, lbl_break))
+                self.emit_raw(f"{lbl_start}:")
+                if buf_var:
+                    self.emit(f"mov rcx, [rbp - {buf_var.stack_offset}]", "custom iter_ptr")
+                else:
+                    self.emit("mov rcx, [rsp]", "custom iter_ptr")
+                self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration flag")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {self._method_call_target(eff_iter_cls, '__next__', next_m)}")
+                self.emit("add rsp, 32")
+                self.emit("cmp qword [_pyfasm_stop_iter], 0", "check StopIteration")
+                self.emit(f"jne {lbl_normal}")
+                self._assign_target(stmt.target, "rax")
+
+                for s in stmt.body:
+                    self._generate_statement(s)
+
+                self.emit_raw(f"{lbl_step}:")
+                self.emit(f"jmp {lbl_start}")
+
+                if stmt.orelse:
+                    self.emit_raw(f"{lbl_normal}:")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration")
+                    if not buf_var:
+                        self.emit("add rsp, 16", "cleanup custom iter_ptr")
+                    for s in stmt.orelse:
+                        self._generate_statement(s)
+                    self.emit(f"jmp {lbl_end}")
+                    self.emit_raw(f"{lbl_break}:")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration")
+                    if not buf_var:
+                        self.emit("add rsp, 16", "cleanup custom iter_ptr")
+                    self.emit_raw(f"{lbl_end}:")
+                else:
+                    self.emit_raw(f"{lbl_end}:")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration")
+                    if not buf_var:
+                        self.emit("add rsp, 16", "cleanup custom iter_ptr")
+
+                self.loop_stack.pop()
+                self.emit_raw(f"{lbl_null}:")
+                return
+
+        iter_t = self._infer_expr_type(stmt.iter)
+        if isinstance(stmt.target, ast.Name):
+            elt_t = None
+            if iter_t.is_list() or iter_t.is_tuple() or iter_t.is_set():
+                elt_t = getattr(iter_t, "element_type", None)
+            elif iter_t.is_dict():
+                elt_t = getattr(iter_t, "key_type", None)
+            if isinstance(elt_t, InstanceType):
+                self.local_var_classes[stmt.target.id] = elt_t.class_name
+        if iter_t.is_str() and self.target in ("win64", "dll"):
+            if buf_var and idx_var:
+                self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "str ptr to stack slot")
+                self.emit(f"mov qword [rbp - {idx_var.stack_offset}], 0", "utf8 byte offset = 0")
+            else:
+                self.emit("push rax", "str ptr")
+                self.emit("push 0", "utf8 byte offset = 0")
+
+            self.loop_stack.append((lbl_step, lbl_break))
+            self.emit_raw(f"{lbl_start}:")
+            if buf_var and idx_var:
+                self.emit(f"mov rcx, [rbp - {buf_var.stack_offset}]", "str ptr")
+                self.emit(f"mov rdx, [rbp - {idx_var.stack_offset}]", "byte offset")
+            else:
+                self.emit("mov rdx, [rsp]", "byte offset")
+                self.emit("mov rcx, [rsp + 8]", "str ptr")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_utf8_next_char")
+            self.emit("add rsp, 32")
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_normal}")
+            if buf_var and idx_var:
+                self.emit(f"mov [rbp - {idx_var.stack_offset}], rdx", "advance utf8 offset")
+            else:
+                self.emit("mov [rsp], rdx", "advance utf8 offset")
+            self._assign_target(stmt.target, "rax")
+
+            for s in stmt.body:
+                self._generate_statement(s)
+
+            self.emit_raw(f"{lbl_step}:")
+            self.emit(f"jmp {lbl_start}")
+
+            if stmt.orelse:
+                self.emit_raw(f"{lbl_normal}:")
+                if not (buf_var and idx_var):
+                    self.emit("add rsp, 16", "cleanup str & offset from stack")
+                for s in stmt.orelse:
+                    self._generate_statement(s)
+                self.emit(f"jmp {lbl_end}")
+                self.emit_raw(f"{lbl_break}:")
+                if not (buf_var and idx_var):
+                    self.emit("add rsp, 16", "cleanup str & offset from stack")
+                self.emit_raw(f"{lbl_end}:")
+            else:
+                self.emit_raw(f"{lbl_end}:")
+                if not (buf_var and idx_var):
+                    self.emit("add rsp, 16", "cleanup str & offset from stack")
+
+            self.loop_stack.pop()
+            self.emit_raw(f"{lbl_null}:")
+            return
+
         is_hash_table = False
         if isinstance(stmt.iter, ast.Name) and self.current_func:
             var_sym = self.current_func.local_vars.get(stmt.iter.id)
             if var_sym and (var_sym.var_type.is_set() or var_sym.var_type.is_dict()):
                 is_hash_table = True
-        else:
-            iter_t = self._infer_expr_type(stmt.iter)
-            if iter_t.is_set() or iter_t.is_dict():
-                is_hash_table = True
+        if not is_hash_table and (iter_t.is_set() or iter_t.is_dict()):
+            is_hash_table = True
 
         if buf_var and idx_var:
             self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "container ptr to stack slot")
@@ -2136,9 +2957,53 @@ include 'functions.inc'
         self.emit_raw(f"{l_end}:")
         self.loop_stack.pop()
 
+    def _merge_expr_element_types(self, types: List[Optional[PyFasmType]]) -> Optional[PyFasmType]:
+        """Return common element type across elements or None if heterogeneous."""
+        concrete = [t for t in types if t is not None]
+        if not concrete:
+            return None
+        first = concrete[0]
+        if all(t == first for t in concrete):
+            return first
+        if all(isinstance(t, InstanceType) for t in concrete):
+            def _ancestors(cname: str) -> List[str]:
+                res: List[str] = []
+                q = [cname]
+                while q:
+                    cur = q.pop(0)
+                    if cur not in res:
+                        res.append(cur)
+                        cs = self.module.classes.get(cur)
+                        if cs:
+                            q.extend(cs.bases)
+                return res
+
+            base_ancestors = _ancestors(concrete[0].class_name)
+            other_sets = [set(_ancestors(t.class_name)) for t in concrete[1:]]
+            for anc in base_ancestors:
+                if all(anc in s for s in other_sets):
+                    return InstanceType(class_name=anc)
+            return None
+        if all(t.is_list() for t in concrete):
+            inner = [getattr(t, "element_type", None) for t in concrete if getattr(t, "element_type", None) is not None]
+            if inner:
+                merged_inner = self._merge_expr_element_types(inner)
+                if merged_inner is not None:
+                    return ListType(element_type=merged_inner)
+            return TYPE_LIST
+        if all(t.is_dict() for t in concrete):
+            return TYPE_DICT
+        if all(t.is_set() for t in concrete):
+            return TYPE_SET
+        if all(t.is_tuple() for t in concrete):
+            return TYPE_TUPLE
+        return None
+
     def _infer_expr_type(self, expr: Optional[ast.AST]) -> PyFasmType:
         if expr is None:
             return TYPE_INT
+        if hasattr(ast, "Index") and isinstance(expr, ast.Index):
+            return self._infer_expr_type(expr.value)
         if isinstance(expr, ast.Constant):
             if isinstance(expr.value, str):
                 return TYPE_STR
@@ -2150,6 +3015,9 @@ include 'functions.inc'
         if isinstance(expr, ast.Name):
             if self.current_func and hasattr(self.current_func, "local_vars") and expr.id in self.current_func.local_vars:
                 return self.current_func.local_vars[expr.id].var_type
+            gvt = getattr(self.module, "global_var_types", None)
+            if gvt and expr.id in gvt:
+                return gvt[expr.id]
             if expr.id in ("__name__", "__doc__", "__file__", "__package__"):
                 return TYPE_STR
             if any(k in expr.id.lower() for k in ("name", "text", "str", "url", "path", "title", "msg", "message", "prompt", "line", "word", "tag", "sep", "prefix", "suffix", "ext", "key", "hdr", "phrase")):
@@ -2157,9 +3025,7 @@ include 'functions.inc'
             if any(k in expr.id.lower() for k in ("dict", "map", "table", "cache", "lookup", "modules", "headers", "params", "environ", "registry", "vars")):
                 return TYPE_DICT
         if isinstance(expr, ast.List):
-            elem_t = None
-            if expr.elts:
-                elem_t = self._infer_expr_type(expr.elts[0])
+            elem_t = self._merge_expr_element_types([self._infer_expr_type(e) for e in expr.elts]) if expr.elts else None
             return ListType(element_type=elem_t) if elem_t else TYPE_LIST
         if isinstance(expr, ast.ListComp):
             elem_t = self._infer_expr_type(expr.elt)
@@ -2173,35 +3039,49 @@ include 'functions.inc'
                 return self._infer_expr_type(expr.values[-1])
             return TYPE_BOOL
         if isinstance(expr, ast.Dict):
-            kt = None
-            vt = None
-            if expr.keys and expr.keys[0] is not None:
-                kt = self._infer_expr_type(expr.keys[0])
-            if expr.values:
-                vt = self._infer_expr_type(expr.values[0])
+            kt = self._merge_expr_element_types([self._infer_expr_type(k) for k in expr.keys if k is not None])
+            vt = self._merge_expr_element_types([self._infer_expr_type(v) for v in expr.values])
             return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
         if isinstance(expr, ast.DictComp):
             kt = self._infer_expr_type(expr.key)
             vt = self._infer_expr_type(expr.value)
             return DictType(key_type=kt, val_type=vt) if (kt or vt) else TYPE_DICT
         if isinstance(expr, ast.Set):
-            elem_t = None
-            if expr.elts:
-                elem_t = self._infer_expr_type(expr.elts[0])
+            elem_t = self._merge_expr_element_types([self._infer_expr_type(e) for e in expr.elts]) if expr.elts else None
             return SetType(element_type=elem_t) if elem_t else TYPE_SET
         if isinstance(expr, ast.SetComp):
             elem_t = self._infer_expr_type(expr.elt)
             return SetType(element_type=elem_t) if elem_t else TYPE_SET
         if isinstance(expr, ast.Tuple):
-            return TYPE_TUPLE
+            if not expr.elts:
+                return TYPE_TUPLE
+            elt_ts = tuple(self._infer_expr_type(e) for e in expr.elts)
+            elem_t = self._merge_expr_element_types(list(elt_ts))
+            return TupleType(element_type=elem_t, element_types=elt_ts)
         if isinstance(expr, ast.Subscript):
             val_type = self._infer_expr_type(expr.value)
+            sub_slice = expr.slice.value if (hasattr(ast, "Index") and isinstance(expr.slice, ast.Index)) else expr.slice
             if val_type.is_str():
                 return TYPE_STR
-            if isinstance(expr.slice, ast.Slice):
+            if isinstance(sub_slice, ast.Slice):
                 return val_type
-            if val_type.is_list() and hasattr(val_type, "element_type") and val_type.element_type:
-                return val_type.element_type
+            if val_type.is_list():
+                if hasattr(val_type, "element_type") and val_type.element_type:
+                    return val_type.element_type
+                return TYPE_INT
+            if val_type.is_tuple():
+                if (
+                    isinstance(sub_slice, ast.Constant)
+                    and isinstance(sub_slice.value, int)
+                    and getattr(val_type, "element_types", None)
+                ):
+                    idx = sub_slice.value
+                    ets = val_type.element_types
+                    if -len(ets) <= idx < len(ets):
+                        return ets[idx]
+                if getattr(val_type, "element_type", None):
+                    return val_type.element_type
+                return TYPE_INT
             if val_type.is_dict() and hasattr(val_type, "val_type") and val_type.val_type:
                 return val_type.val_type
             if isinstance(expr.value, ast.Name):
@@ -2214,6 +3094,18 @@ include 'functions.inc'
         if isinstance(expr, ast.BinOp):
             if isinstance(expr.op, ast.MatMult):
                 return ListType(element_type=TYPE_LIST)
+            binop_dunders = {
+                ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__",
+                ast.FloorDiv: "__floordiv__", ast.Div: "__truediv__", ast.Mod: "__mod__",
+                ast.Pow: "__pow__", ast.BitAnd: "__and__", ast.BitOr: "__or__",
+                ast.BitXor: "__xor__", ast.LShift: "__lshift__", ast.RShift: "__rshift__",
+            }
+            if type(expr.op) in binop_dunders:
+                lcls = self.resolve_instance_class(expr.left)
+                if lcls:
+                    op_m = self.resolve_class_method(lcls, binop_dunders[type(expr.op)])
+                    if op_m and op_m in self.module.functions and self.module.functions[op_m].return_type != TYPE_VOID:
+                        return self.module.functions[op_m].return_type
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
             if isinstance(expr.op, ast.Mult) and (lt.is_list() or rt.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple))):
@@ -2224,33 +3116,139 @@ include 'functions.inc'
                 return TYPE_STR
             if lt.is_float() or rt.is_float():
                 return TYPE_FLOAT
+        if isinstance(expr, ast.UnaryOp):
+            if isinstance(expr.op, ast.Not):
+                return TYPE_BOOL
+            u_map = {ast.USub: "__neg__", ast.UAdd: "__pos__", ast.Invert: "__invert__"}
+            if type(expr.op) in u_map:
+                ocls = self.resolve_instance_class(expr.operand)
+                if ocls:
+                    um = self.resolve_class_method(ocls, u_map[type(expr.op)])
+                    if um and um in self.module.functions and self.module.functions[um].return_type != TYPE_VOID:
+                        return self.module.functions[um].return_type
+            if isinstance(expr.op, (ast.USub, ast.UAdd)):
+                ot = self._infer_expr_type(expr.operand)
+                if ot.is_float():
+                    return TYPE_FLOAT
         if isinstance(expr, ast.JoinedStr):
             return TYPE_STR
         if isinstance(expr, ast.Call):
             if isinstance(expr.func, ast.Name):
                 fn_id = expr.func.id
-                if fn_id in ("str", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct", "get_simd_isa"):
+                if fn_id in ("str", "repr", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct", "get_simd_isa"):
                     return TYPE_STR
                 if fn_id in ("float",):
                     return TYPE_FLOAT
-                if fn_id in ("bool", "isinstance", "any", "all", "isdigit", "isascii"):
+                if fn_id in ("bool", "isinstance", "issubclass", "any", "all", "isdigit", "isascii"):
                     return TYPE_BOOL
-                if fn_id in ("list", "range", "map", "filter", "zip", "enumerate", "chain", "accumulate", "sorted", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                if fn_id in self.module.classes:
+                    return InstanceType(class_name=fn_id)
+                if getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args:
+                    if fn_id == self.current_func.args[0].name and self.current_func.class_name:
+                        return InstanceType(class_name=self.current_func.class_name)
+                if fn_id == "next" and expr.args:
+                    it_cls = self.resolve_instance_class(expr.args[0])
+                    if it_cls:
+                        nm = self.resolve_class_method(it_cls, "__next__")
+                        if nm and nm in self.module.functions and self.module.functions[nm].return_type != TYPE_VOID:
+                            return self.module.functions[nm].return_type
+                inst_cls = self.resolve_instance_class(expr.func)
+                if inst_cls:
+                    cm = self.resolve_class_method(inst_cls, "__call__")
+                    if cm and cm in self.module.functions and self.module.functions[cm].return_type != TYPE_VOID:
+                        return self.module.functions[cm].return_type
+                if fn_id == "range":
+                    return ListType(element_type=TYPE_INT)
+                if fn_id in ("list", "sorted", "reversed"):
+                    if expr.args:
+                        a0 = expr.args[0]
+                        a0_t = self._infer_expr_type(a0)
+                        if a0_t.is_str():
+                            return ListType(element_type=TYPE_STR)
+                        if a0_t.is_list() or a0_t.is_set():
+                            inner = getattr(a0_t, "element_type", None)
+                            if inner is not None:
+                                return ListType(element_type=inner)
+                        elif a0_t.is_tuple():
+                            inner = getattr(a0_t, "element_type", None)
+                            if inner is None and getattr(a0_t, "element_types", None):
+                                inner = self._merge_expr_element_types(list(a0_t.element_types))
+                            if inner is not None:
+                                return ListType(element_type=inner)
+                        elif a0_t.is_dict():
+                            kt = getattr(a0_t, "key_type", None)
+                            if kt is not None:
+                                return ListType(element_type=kt)
+                        elif isinstance(a0, ast.Call) and isinstance(a0.func, ast.Name) and a0.func.id == "range":
+                            return ListType(element_type=TYPE_INT)
+                    return TYPE_LIST
+                if fn_id == "map" and len(expr.args) >= 2 and isinstance(expr.args[0], ast.Name):
+                    m_fn = expr.args[0].id
+                    if m_fn == "str":
+                        return ListType(element_type=TYPE_STR)
+                    if m_fn == "float":
+                        return ListType(element_type=TYPE_FLOAT)
+                    if m_fn == "int":
+                        return ListType(element_type=TYPE_INT)
+                    if m_fn == "bool":
+                        return ListType(element_type=TYPE_BOOL)
+                    if m_fn in self.module.functions and self.module.functions[m_fn].return_type != TYPE_VOID:
+                        return ListType(element_type=self.module.functions[m_fn].return_type)
+                    return TYPE_LIST
+                if fn_id in ("filter", "zip", "enumerate", "chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
                     if fn_id in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
                 if fn_id in ("dict",):
                     return TYPE_DICT
                 if fn_id in ("set",):
+                    if expr.args:
+                        a0_t = self._infer_expr_type(expr.args[0])
+                        if a0_t.is_str():
+                            return SetType(element_type=TYPE_STR)
+                        if (a0_t.is_list() or a0_t.is_set() or a0_t.is_tuple()) and getattr(a0_t, "element_type", None):
+                            return SetType(element_type=a0_t.element_type)
                     return TYPE_SET
+                if fn_id in ("tuple",):
+                    if expr.args:
+                        a0_t = self._infer_expr_type(expr.args[0])
+                        if a0_t.is_str():
+                            return TupleType(element_type=TYPE_STR)
+                        if a0_t.is_list() or a0_t.is_set() or a0_t.is_tuple():
+                            return TupleType(
+                                element_type=getattr(a0_t, "element_type", None),
+                                element_types=getattr(a0_t, "element_types", None),
+                            )
+                    return TYPE_TUPLE
                 if fn_id in self.module.functions:
                     return self.module.functions[fn_id].return_type
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
-                if attr in ("matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise", "split", "findall"):
+                if attr in ("split", "splitlines"):
+                    return ListType(element_type=TYPE_STR)
+                if attr in ("matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise", "findall"):
                     if attr in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
+                if attr == "keys":
+                    recv_t = self._infer_expr_type(expr.func.value)
+                    kt = getattr(recv_t, "key_type", None) if recv_t.is_dict() else None
+                    return ListType(element_type=kt) if kt else TYPE_LIST
+                if attr == "values":
+                    recv_t = self._infer_expr_type(expr.func.value)
+                    vt = getattr(recv_t, "val_type", None) if recv_t.is_dict() else None
+                    return ListType(element_type=vt) if vt else TYPE_LIST
+                if attr == "items":
+                    recv_t = self._infer_expr_type(expr.func.value)
+                    if recv_t.is_dict():
+                        kt = getattr(recv_t, "key_type", None) or TYPE_INT
+                        vt = getattr(recv_t, "val_type", None) or TYPE_INT
+                        return ListType(element_type=TupleType(element_types=(kt, vt)))
+                    return TYPE_LIST
+                if attr == "copy":
+                    recv_t = self._infer_expr_type(expr.func.value)
+                    if recv_t.is_list() or recv_t.is_dict() or recv_t.is_set():
+                        return recv_t
                 if attr in ("isdigit", "isascii"):
                     return TYPE_BOOL
                 if attr in ("bit_length", "count", "find", "index"):
@@ -2260,26 +3258,45 @@ include 'functions.inc'
                 if attr == "loads":
                     if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "json":
                         return TYPE_DICT
-                if attr == "get":
+                if attr in ("get", "pop"):
                     obj_type = self._infer_expr_type(expr.func.value)
-                    if obj_type.is_dict() and len(expr.args) >= 2:
+                    if attr == "pop" and obj_type.is_list() and getattr(obj_type, "element_type", None):
+                        return obj_type.element_type
+                    if obj_type.is_dict() and getattr(obj_type, "val_type", None):
+                        return obj_type.val_type
+                    if len(expr.args) >= 2:
                         return self._infer_expr_type(expr.args[1])
-                    return TYPE_PTR
+                    return TYPE_INT
                 if attr == "choice":
                     return TYPE_STR
-                if attr in ("lower", "upper", "strip", "replace", "format", "join", "removeprefix", "removesuffix"):
+                if attr in ("lower", "upper", "strip", "lstrip", "rstrip", "title", "capitalize", "replace", "format", "join", "removeprefix", "removesuffix"):
                     return TYPE_STR
-                if attr in ("count", "find", "index"):
-                    return TYPE_INT
-                if attr in ("keys", "values", "items", "chain", "accumulate"):
+                if attr in ("chain", "accumulate"):
                     return TYPE_LIST
+                if isinstance(expr.func.value, ast.Name) and expr.func.value.id in self.module.classes:
+                    c_name = expr.func.value.id
+                    m = self.resolve_class_method(c_name, attr)
+                    if m and m in self.module.functions:
+                        fn_sym = self.module.functions[m]
+                        if getattr(fn_sym, "is_classmethod", False) and (
+                            isinstance(fn_sym.return_type, InstanceType) or fn_sym.return_type == TYPE_VOID
+                        ):
+                            return InstanceType(class_name=c_name)
+                        if fn_sym.return_type != TYPE_VOID:
+                            return fn_sym.return_type
+                recv_cls = self.resolve_instance_class(expr.func.value)
+                if not recv_cls and isinstance(expr.func.value, ast.Name) and expr.func.value.id == "cls":
+                    if getattr(self.current_func, "is_classmethod", False):
+                        recv_cls = self.current_func.class_name
+                if recv_cls:
+                    m = self.resolve_class_method(recv_cls, attr)
+                    if m and m in self.module.functions and self.module.functions[m].return_type != TYPE_VOID:
+                        return self.module.functions[m].return_type
                 if isinstance(expr.func.value, ast.Name):
                     pfx = expr.func.value.id
-                    cls_name = getattr(self.current_func, "class_name", None) if pfx in ("self", "this") else self.local_var_classes.get(pfx)
-                    if cls_name:
-                        m = self.resolve_class_method(cls_name, attr)
-                        if m and m in self.module.functions:
-                            return self.module.functions[m].return_type
+                    pref = f"{pfx}_{attr}"
+                    if pref in self.module.functions and self.module.functions[pref].return_type != TYPE_VOID:
+                        return self.module.functions[pref].return_type
                 for cls in self.module.classes.values():
                     m = self.resolve_class_method(cls.name, attr)
                     if m and m in self.module.functions:
@@ -2288,11 +3305,24 @@ include 'functions.inc'
             prop = self.resolve_property_for_expr(expr.value, expr.attr)
             if prop and getattr(prop, "getter_name", None) and prop.getter_name in self.module.functions:
                 return self.module.functions[prop.getter_name].return_type
-            curr_cls = getattr(self.current_func, "class_name", None)
-            if curr_cls and curr_cls in self.module.classes:
-                cls_sym = self.module.classes[curr_cls]
-                if hasattr(cls_sym, "field_types") and expr.attr in cls_sym.field_types:
-                    return cls_sym.field_types[expr.attr]
+            owner_cls = self.resolve_instance_class(expr.value)
+            if not owner_cls and isinstance(expr.value, ast.Name) and expr.value.id in self.module.classes:
+                owner_cls = expr.value.id
+            if not owner_cls:
+                owner_cls = getattr(self.current_func, "class_name", None)
+            if owner_cls:
+                seen_f: Set[str] = set()
+                fq = [owner_cls]
+                while fq:
+                    cn = fq.pop(0)
+                    if cn in seen_f:
+                        continue
+                    seen_f.add(cn)
+                    cs = self.module.classes.get(cn)
+                    if cs:
+                        if hasattr(cs, "field_types") and expr.attr in cs.field_types:
+                            return cs.field_types[expr.attr]
+                        fq.extend(cs.bases)
             if any(k in expr.attr.lower() for k in ("dict", "map", "vars", "entries", "table", "cache", "lookup", "plot", "status", "disc", "modules", "headers", "params", "environ", "cookies", "meta", "registry", "data", "mapping", "config", "state")):
                 return TYPE_DICT
         return TYPE_INT
@@ -2343,7 +3373,7 @@ include 'functions.inc'
             if var:
                 self.emit(f"mov rax, [rbp - {var.stack_offset}]", f"load {var.name}")
             elif (self.current_func and hasattr(self.current_func, "global_names") and expr.id in self.current_func.global_names) or (expr.id in self.module.global_vars):
-                self.emit(f"mov rax, [_pyfasm_global_{expr.id}]", f"load global {expr.id}")
+                self.emit(f"mov rax, [{safe_global_label(expr.id)}]", f"load global {expr.id}")
             elif expr.id in self.module.functions:
                 safe_fn = safe_asm_label(expr.id)
                 self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
@@ -2365,6 +3395,9 @@ include 'functions.inc'
                 if isinstance(node, ast.Name):
                     if node.id in ("self", "this"):
                         return False
+                    if getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args:
+                        if node.id == self.current_func.args[0].name:
+                            return True
                     if self.current_func and hasattr(self.current_func, "local_vars") and node.id in self.current_func.local_vars:
                         return False
                     return True
@@ -2376,23 +3409,59 @@ include 'functions.inc'
                 val_handled = False
                 mod_name = expr.value.id if isinstance(expr.value, ast.Name) else None
                 if mod_name:
-                    if mod_name in self.module.classes:
-                        cls_sym = self.module.classes[mod_name]
-                        if hasattr(cls_sym, "class_attrs") and expr.attr in cls_sym.class_attrs:
-                            c_val = cls_sym.class_attrs[expr.attr]
-                            if isinstance(c_val, int):
-                                self.emit(f"mov rax, {c_val}", f"load class attribute {mod_name}.{expr.attr}")
-                                val_handled = True
-                            elif isinstance(c_val, str):
-                                self._emit_string_pointer("rax", c_val)
-                                val_handled = True
+                    cls_lookup = mod_name
+                    if getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args:
+                        if mod_name == self.current_func.args[0].name and self.current_func.class_name:
+                            cls_lookup = self.current_func.class_name
+                    if cls_lookup in self.module.classes:
+                        seen_c: Set[str] = set()
+                        cq = [cls_lookup]
+                        while cq and not val_handled:
+                            curr_c = cq.pop(0)
+                            if curr_c in seen_c:
+                                continue
+                            seen_c.add(curr_c)
+                            cls_sym = self.module.classes.get(curr_c)
+                            if not cls_sym:
+                                continue
+                            if hasattr(cls_sym, "class_attrs") and expr.attr in cls_sym.class_attrs:
+                                c_val = cls_sym.class_attrs[expr.attr]
+                                if isinstance(c_val, bool):
+                                    self.emit(f"mov rax, {1 if c_val else 0}", f"load class attribute {curr_c}.{expr.attr}")
+                                    val_handled = True
+                                elif isinstance(c_val, int):
+                                    self.emit(f"mov rax, {c_val}", f"load class attribute {curr_c}.{expr.attr}")
+                                    val_handled = True
+                                elif isinstance(c_val, str):
+                                    self._emit_string_pointer("rax", c_val)
+                                    val_handled = True
+                            if not val_handled:
+                                for b in cls_sym.bases:
+                                    if b not in seen_c:
+                                        cq.append(b)
+                        if not val_handled:
+                            cq2 = [cls_lookup]
+                            seen_c2: Set[str] = set()
+                            while cq2:
+                                curr_c = cq2.pop(0)
+                                if curr_c in seen_c2:
+                                    continue
+                                seen_c2.add(curr_c)
+                                cand_g = f"{curr_c}_{expr.attr}"
+                                if cand_g in self.module.global_vars:
+                                    self.emit(f"mov rax, [{safe_global_label(cand_g)}]", f"load class global {cand_g}")
+                                    val_handled = True
+                                    break
+                                cs2 = self.module.classes.get(curr_c)
+                                if cs2:
+                                    cq2.extend(cs2.bases)
                     if not val_handled:
                         if expr.attr in ("modules", "environ", "argv", "path"):
                             namespaced_global = f"{mod_name}_{expr.attr}"
                             if namespaced_global not in self.module.global_vars:
                                 self.module.global_vars[namespaced_global] = 0
                             lbl_has_obj = self.new_label("has_mod_obj")
-                            self.emit(f"mov rax, [_pyfasm_global_{namespaced_global}]")
+                            self.emit(f"mov rax, [{safe_global_label(namespaced_global)}]")
                             self.emit("test rax, rax")
                             self.emit(f"jnz {lbl_has_obj}")
                             if expr.attr in ("modules", "environ"):
@@ -2401,16 +3470,16 @@ include 'functions.inc'
                             else:
                                 self.emit("mov ecx, 16")
                                 self.emit("call _pyfasm_list_create")
-                            self.emit(f"mov [_pyfasm_global_{namespaced_global}], rax")
+                            self.emit(f"mov [{safe_global_label(namespaced_global)}], rax")
                             self.emit_raw(f"{lbl_has_obj}:")
                             val_handled = True
                     if not val_handled:
                         namespaced_global = f"{mod_name}_{expr.attr}"
                         if namespaced_global in self.module.global_vars:
-                            self.emit(f"mov rax, [_pyfasm_global_{namespaced_global}]", f"load module global {mod_name}.{expr.attr}")
+                            self.emit(f"mov rax, [{safe_global_label(namespaced_global)}]", f"load module global {mod_name}.{expr.attr}")
                             val_handled = True
                         elif expr.attr in self.module.global_vars:
-                            self.emit(f"mov rax, [_pyfasm_global_{expr.attr}]", f"load global {expr.attr}")
+                            self.emit(f"mov rax, [{safe_global_label(expr.attr)}]", f"load global {expr.attr}")
                             val_handled = True
                     if not val_handled:
                         namespaced_func = f"{mod_name}_{expr.attr}"
@@ -2456,21 +3525,36 @@ include 'functions.inc'
                 offset = self._get_attribute_offset(expr.attr)
                 lbl_null = self.new_label("null_attr")
                 lbl_done = self.new_label("done_attr")
-                curr_cls = getattr(self.current_func, "class_name", None)
-                fallback_global = f"{curr_cls}_{expr.attr}" if curr_cls else None
+                curr_cls = self.resolve_instance_class(expr.value) or getattr(self.current_func, "class_name", None)
+                fallback_global = None
+                if curr_cls:
+                    seen_fg: Set[str] = set()
+                    fq = [curr_cls]
+                    while fq:
+                        fc = fq.pop(0)
+                        if fc in seen_fg:
+                            continue
+                        seen_fg.add(fc)
+                        cand_fg = f"{fc}_{expr.attr}"
+                        if cand_fg in self.module.global_vars:
+                            fallback_global = cand_fg
+                            break
+                        fcs = self.module.classes.get(fc)
+                        if fcs:
+                            fq.extend(fcs.bases)
                 self.emit("test r8, r8", "check null pointer")
                 self.emit(f"jz {lbl_null}")
                 self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
-                if fallback_global and fallback_global in self.module.global_vars:
+                if fallback_global:
                     self.emit("test rax, rax", "check if instance field is set")
                     lbl_has_inst = self.new_label("has_inst")
                     self.emit(f"jnz {lbl_has_inst}")
-                    self.emit(f"mov rax, [_pyfasm_global_{fallback_global}]", f"fallback to class attribute {fallback_global}")
+                    self.emit(f"mov rax, [{safe_global_label(fallback_global)}]", f"fallback to class attribute {fallback_global}")
                     self.emit_raw(f"{lbl_has_inst}:")
                 self.emit(f"jmp {lbl_done}")
                 self.emit_raw(f"{lbl_null}:")
-                if fallback_global and fallback_global in self.module.global_vars:
-                    self.emit(f"mov rax, [_pyfasm_global_{fallback_global}]", f"fallback to class attribute {fallback_global}")
+                if fallback_global:
+                    self.emit(f"mov rax, [{safe_global_label(fallback_global)}]", f"fallback to class attribute {fallback_global}")
                 else:
                     self.emit("xor eax, eax", "null pointer default")
                 self.emit_raw(f"{lbl_done}:")
@@ -2503,7 +3587,7 @@ include 'functions.inc'
                     self.emit("mov rcx, rax", "pass self")
                     self.emit("pop rdx", "pass other")
                     self.emit("sub rsp, 32", "shadow space")
-                    self.emit(f"call {safe_asm_label(op_m)}")
+                    self.emit(f"call {self._method_call_target(cls_name, dunder_name, op_m)}")
                     self.emit("add rsp, 32")
                     return
 
@@ -2640,6 +3724,25 @@ include 'functions.inc'
             self._generate_binop_instr(expr.op)
 
         elif isinstance(expr, ast.UnaryOp):
+            u_dunders = {
+                ast.USub: "__neg__",
+                ast.UAdd: "__pos__",
+                ast.Invert: "__invert__",
+            }
+            if type(expr.op) in u_dunders:
+                d_name = u_dunders[type(expr.op)]
+                ocls = self.resolve_instance_class(expr.operand)
+                um = self.resolve_class_method(ocls, d_name) if ocls else None
+                if um:
+                    self._generate_expr(expr.operand)
+                    self.emit("mov rcx, rax", f"pass self to {d_name}")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {self._method_call_target(ocls, d_name, um)}")
+                    self.emit("add rsp, 32")
+                    return
+            if isinstance(expr.op, ast.Not):
+                self._emit_to_bool(expr.operand, negate=True)
+                return
             self._generate_expr(expr.operand)
             if isinstance(expr.op, ast.USub):
                 t = self._infer_expr_type(expr.operand)
@@ -2652,10 +3755,6 @@ include 'functions.inc'
                     self.emit("neg rax")
             elif isinstance(expr.op, ast.Invert):
                 self.emit("not rax")
-            elif isinstance(expr.op, ast.Not):
-                self.emit("test rax, rax")
-                self.emit("setz al")
-                self.emit("movzx rax, al")
 
         elif isinstance(expr, ast.BoolOp):
             lbl_end = self.new_label("boolop_end")
@@ -2987,7 +4086,7 @@ include 'functions.inc'
                 self.emit("mov rcx, rax", "pass self")
                 self.emit("pop rdx", "pass key")
                 self.emit("sub rsp, 32", "shadow space")
-                self.emit(f"call {safe_asm_label(getitem_m)}")
+                self.emit(f"call {self._method_call_target(cls_name, '__getitem__', getitem_m)}")
                 self.emit("add rsp, 32")
                 return
 
@@ -3075,32 +4174,39 @@ include 'functions.inc'
                 self.emit("cmp rax, 65536", "check valid user-mode pointer")
                 self.emit(f"jb {lbl_null_arr}")
 
-                if not is_str_val and not is_ptr_val:
-                    lbl_idx_pos = self.new_label("idx_pos")
-                    self.emit("test r11, r11", "check negative index")
-                    self.emit(f"jns {lbl_idx_pos}")
-                    self.emit("add r11, [rax]", "negative index: len + idx")
-                    self.emit_raw(f"{lbl_idx_pos}:")
-
-                self.emit("test r11, r11", "check negative index")
-                self.emit(f"js {lbl_null_arr}")
-                self.emit("cmp r11, 1000000", "check index bounds")
-                self.emit(f"jae {lbl_null_arr}")
-
-                if is_str_val:
-                    self.emit("push rax", "save str ptr")
-                    self.emit("push r11", "save idx")
-                    self.emit("mov ecx, 2", "alloc 2 bytes for char string")
-                    self.emit("call _pyfasm_alloc")
-                    self.emit("pop r11", "restore idx")
-                    self.emit("pop rdx", "restore str ptr")
-                    self.emit("movzx r10d, byte [rdx + r11]", "read char byte")
-                    self.emit("mov byte [rax], r10b", "store char byte")
-                    self.emit("mov byte [rax + 1], 0", "store null terminator")
-                elif is_ptr_val:
-                    self.emit("mov rax, [rax + r11 * 8]", "load mem[idx]")
+                if is_str_val and self.target in ("win64", "dll"):
+                    self.emit("mov rcx, rax", "utf8 string pointer")
+                    self.emit("mov rdx, r11", "codepoint index")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_utf8_getitem")
+                    self.emit("add rsp, 32")
                 else:
-                    self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
+                    if not is_str_val and not is_ptr_val:
+                        lbl_idx_pos = self.new_label("idx_pos")
+                        self.emit("test r11, r11", "check negative index")
+                        self.emit(f"jns {lbl_idx_pos}")
+                        self.emit("add r11, [rax]", "negative index: len + idx")
+                        self.emit_raw(f"{lbl_idx_pos}:")
+
+                    self.emit("test r11, r11", "check negative index")
+                    self.emit(f"js {lbl_null_arr}")
+                    self.emit("cmp r11, 1000000", "check index bounds")
+                    self.emit(f"jae {lbl_null_arr}")
+
+                    if is_str_val:
+                        self.emit("push rax", "save str ptr")
+                        self.emit("push r11", "save idx")
+                        self.emit("mov ecx, 2", "alloc 2 bytes for char string")
+                        self.emit("call _pyfasm_alloc")
+                        self.emit("pop r11", "restore idx")
+                        self.emit("pop rdx", "restore str ptr")
+                        self.emit("movzx r10d, byte [rdx + r11]", "read char byte")
+                        self.emit("mov byte [rax], r10b", "store char byte")
+                        self.emit("mov byte [rax + 1], 0", "store null terminator")
+                    elif is_ptr_val:
+                        self.emit("mov rax, [rax + r11 * 8]", "load mem[idx]")
+                    else:
+                        self.emit("mov rax, [rax + (r11 + 1) * 8]", "load list[idx]")
                 self.emit(f"jmp {lbl_done_arr}")
                 self.emit_raw(f"{lbl_null_arr}:")
                 self.emit("xor eax, eax", "null array default")
@@ -3595,7 +4701,7 @@ include 'functions.inc'
                     if var:
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"capture {pattern.name}")
                     elif hasattr(self.current_func, "global_names") and pattern.name in self.current_func.global_names:
-                        self.emit(f"mov [_pyfasm_global_{pattern.name}], rax", f"capture global {pattern.name}")
+                        self.emit(f"mov [{safe_global_label(pattern.name)}], rax", f"capture global {pattern.name}")
                 self.emit(f"jmp {lbl_success}")
 
         elif isinstance(pattern, _AST_MATCH_OR):
@@ -3712,6 +4818,7 @@ include 'functions.inc'
         func_name = ""
         attr_name = ""
         prefix = ""
+        recv_cls_hint: Optional[str] = None
 
         if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
             if isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "super":
@@ -3742,6 +4849,7 @@ include 'functions.inc'
                     prefix = call.func.value.id
                     if prefix in ("self", "this"):
                         current_cls = getattr(self.current_func, "class_name", None)
+                        recv_cls_hint = current_cls
                         resolved = self.resolve_class_method(current_cls, attr_name, skip_cls=False)
                         if resolved:
                             func_name = resolved
@@ -3751,8 +4859,16 @@ include 'functions.inc'
                             func_name = f"self_{attr_name}"
                         else:
                             func_name = f"{current_cls}_{attr_name}" if current_cls else f"self_{attr_name}"
+                    elif getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args and prefix == self.current_func.args[0].name:
+                        recv_cls_hint = self.current_func.class_name
+                        resolved = self.resolve_class_method(recv_cls_hint, attr_name, skip_cls=False)
+                        if resolved:
+                            func_name = resolved
+                        else:
+                            func_name = f"{recv_cls_hint}_{attr_name}" if recv_cls_hint else f"{prefix}_{attr_name}"
                     else:
                         if prefix in self.module.classes:
+                            recv_cls_hint = prefix
                             resolved = self.resolve_class_method(prefix, attr_name, skip_cls=False)
                             if resolved:
                                 func_name = resolved
@@ -3762,8 +4878,9 @@ include 'functions.inc'
                             else:
                                 func_name = f"{prefix}_{attr_name}"
                         else:
-                            prefix_cls = self.local_var_classes.get(prefix)
+                            prefix_cls = self.resolve_instance_class(call.func.value)
                             if prefix_cls:
+                                recv_cls_hint = prefix_cls
                                 resolved = self.resolve_class_method(prefix_cls, attr_name, skip_cls=False)
                                 if resolved:
                                     func_name = resolved
@@ -3781,13 +4898,20 @@ include 'functions.inc'
                                 if not func_name:
                                     func_name = f"{prefix}_{attr_name}"
                 else:
-                    for cls in self.module.classes.values():
-                        if attr_name in ("__init__", "__new__"):
-                            continue
-                        resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                    expr_cls = self.resolve_instance_class(call.func.value)
+                    if expr_cls:
+                        recv_cls_hint = expr_cls
+                        resolved = self.resolve_class_method(expr_cls, attr_name, skip_cls=False)
                         if resolved:
                             func_name = resolved
-                            break
+                    if not func_name:
+                        for cls in self.module.classes.values():
+                            if attr_name in ("__init__", "__new__"):
+                                continue
+                            resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                            if resolved:
+                                func_name = resolved
+                                break
                     if not func_name:
                         func_name = attr_name
 
@@ -3799,6 +4923,32 @@ include 'functions.inc'
                 self.emit("mov ecx, 2048", f"allocate instance for {prefix}.{attr_name}")
                 self.emit("call _pyfasm_alloc")
                 return
+
+        if func_name == "_pyfasm_closure_new" and call.args:
+            n_caps = len(call.args) - 1
+            size_bytes = (2 + n_caps) * 8
+            self.emit(f"mov ecx, {size_bytes}", "allocate closure object")
+            self.emit("call _pyfasm_alloc")
+            self.emit("sub rsp, 16", "aligned slot for closure ptr")
+            self.emit("mov [rsp], rax", "save closure ptr")
+            self.emit("mov r10, 505946434C4F5355h", "PYFCLOSU tag")
+            self.emit("mov [rax], r10")
+            self._generate_expr(call.args[0])
+            self.emit("mov r10, [rsp]", "restore closure ptr")
+            self.emit("mov [r10 + 8], rax", "store closure fn ptr")
+            for idx, cap_arg in enumerate(call.args[1:]):
+                self._generate_expr(cap_arg)
+                self.emit("mov r10, [rsp]", "restore closure ptr")
+                self.emit(f"mov [r10 + {(idx + 2) * 8}], rax", f"store captured var {idx}")
+            self.emit("mov rax, [rsp]", "return closure ptr")
+            self.emit("add rsp, 16", "release closure slot")
+            return
+
+        if func_name == "_pyfasm_closure_get" and len(call.args) >= 2:
+            cap_idx = call.args[1].value if isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, int) else 0
+            self._generate_expr(call.args[0])
+            self.emit(f"mov rax, [rax + {(cap_idx + 2) * 8}]", f"load closure capture {cap_idx}")
+            return
 
         # Ecosystem adapters (darkdetect, requests, beautifulsoup4)
         if func_name in ("isDark", "is_dark", "darkdetect_isDark") or (attr_name in ("isDark", "is_dark") and prefix == "darkdetect"):
@@ -3888,6 +5038,22 @@ include 'functions.inc'
             self.emit("mov rcx, rax", "separator")
             self.emit("pop rdx", "sequence")
             self.emit("call _pyfasm_str_join")
+            return
+
+        if attr_name == "split" and isinstance(call.func, ast.Attribute) and self.target in ("win64", "dll"):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "sep")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "target string")
+                self.emit("pop rdx", "sep")
+            else:
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "target string")
+                self.emit("xor edx, edx", "whitespace split")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_str_split")
+            self.emit("add rsp, 32")
             return
 
         # Dict get method / HTTP get method
@@ -4115,40 +5281,160 @@ include 'functions.inc'
 
         # int(val) conversion / cast
         if func_name == "int" and call.args:
-            arg_type = self._infer_expr_type(call.args[0])
-            self._generate_expr(call.args[0])
+            arg0 = call.args[0]
+            arg_type = self._infer_expr_type(arg0)
+            self._generate_expr(arg0)
             if arg_type.is_float():
                 self.emit("movq xmm0, rax")
                 self.emit("cvttsd2si rax, xmm0", "float to int cast")
+            elif (arg_type.is_str() or self._is_ambiguous_dynamic_expr(arg0)) and self.target in ("win64", "dll"):
+                self.emit("mov rcx, rax", "string ptr or int")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_str_to_int")
+                self.emit("add rsp, 32")
             return
 
         # float(val) conversion / cast
         if func_name == "float" and call.args:
-            arg_type = self._infer_expr_type(call.args[0])
-            self._generate_expr(call.args[0])
+            arg0 = call.args[0]
+            arg_type = self._infer_expr_type(arg0)
+            self._generate_expr(arg0)
             if not arg_type.is_float():
-                self.emit("cvtsi2sd xmm0, rax")
-                self.emit("movq rax, xmm0", "int to float cast")
+                if (arg_type.is_str() or self._is_ambiguous_dynamic_expr(arg0)) and self.target in ("win64", "dll"):
+                    self.emit("mov rcx, rax", "string ptr or int")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_str_to_float")
+                    self.emit("add rsp, 32")
+                else:
+                    self.emit("cvtsi2sd xmm0, rax")
+                    self.emit("movq rax, xmm0", "int to float cast")
             return
 
         # bool(val) conversion
         if func_name == "bool" and call.args:
-            self._generate_expr(call.args[0])
-            self.emit("test rax, rax")
-            self.emit("setnz al")
-            self.emit("movzx rax, al", "to boolean 0 or 1")
+            self._emit_to_bool(call.args[0], negate=False)
             return
 
-        # str(val) conversion
+        # isinstance(obj, class_or_tuple) & issubclass(cls, class_or_tuple)
+        if func_name in ("isinstance", "issubclass") and len(call.args) >= 2:
+            def _extract_t_names(node: ast.AST) -> List[str]:
+                if isinstance(node, ast.Name):
+                    return [node.id]
+                if isinstance(node, ast.Tuple):
+                    out: List[str] = []
+                    for elt in node.elts:
+                        out.extend(_extract_t_names(elt))
+                    return out
+                return []
+
+            t_names = _extract_t_names(call.args[1])
+            user_targets = [t for t in t_names if t in self.module.classes]
+            matching_subs: List[str] = []
+            seen_subs: Set[str] = set()
+            for tgt in user_targets:
+                for sub in self._all_subclasses(tgt):
+                    if sub not in seen_subs:
+                        seen_subs.add(sub)
+                        matching_subs.append(sub)
+
+            if func_name == "issubclass":
+                c0 = call.args[0]
+                if isinstance(c0, ast.Name) and c0.id in self.module.classes:
+                    res = 1 if ("object" in t_names or c0.id in seen_subs) else 0
+                    self.emit(f"mov rax, {res}", f"issubclass({c0.id}, ...)")
+                    return
+                self._generate_expr(c0)
+                lbl_true = self.new_label("issub_true")
+                lbl_done = self.new_label("issub_done")
+                cands = sorted(self.module.classes.keys()) if "object" in t_names else matching_subs
+                for sub in cands:
+                    self.emit(f"lea r10, [{safe_asm_label(sub)}]")
+                    self.emit("cmp rax, r10")
+                    self.emit(f"je {lbl_true}")
+                self.emit("xor eax, eax")
+                self.emit(f"jmp {lbl_done}")
+                self.emit_raw(f"{lbl_true}:")
+                self.emit("mov rax, 1")
+                self.emit_raw(f"{lbl_done}:")
+                return
+
+            # isinstance(obj, ...)
+            builtin_targets = [t for t in t_names if t not in self.module.classes]
+            arg0 = call.args[0]
+            arg0_cls = self.resolve_instance_class(arg0)
+            arg0_t = self._infer_expr_type(arg0)
+            if not user_targets:
+                static_match = False
+                if arg0_cls:
+                    static_match = "object" in builtin_targets
+                else:
+                    if "object" in builtin_targets:
+                        static_match = True
+                    elif "int" in builtin_targets and (arg0_t.is_int() or arg0_t.is_bool()):
+                        static_match = True
+                    elif "bool" in builtin_targets and arg0_t.is_bool():
+                        static_match = True
+                    elif "float" in builtin_targets and arg0_t.is_float():
+                        static_match = True
+                    elif "str" in builtin_targets and arg0_t.is_str():
+                        static_match = True
+                    elif "list" in builtin_targets and arg0_t.is_list():
+                        static_match = True
+                    elif "dict" in builtin_targets and arg0_t.is_dict():
+                        static_match = True
+                    elif "set" in builtin_targets and arg0_t.is_set():
+                        static_match = True
+                    elif "tuple" in builtin_targets and arg0_t.is_tuple():
+                        static_match = True
+                if self.target in ("win64", "dll") and self._is_ambiguous_dynamic_expr(arg0) and ("str" in builtin_targets or "int" in builtin_targets):
+                    self._generate_expr(arg0)
+                    self.emit("mov rcx, rax")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_is_utf8_str_ptr")
+                    self.emit("add rsp, 32")
+                    if "str" not in builtin_targets:
+                        self.emit("xor rax, 1")
+                    return
+                self._generate_expr(arg0)
+                self.emit(f"mov rax, {1 if static_match else 0}", "isinstance builtin result")
+                return
+
+            matching_ids = [self._class_ids[sub] for sub in matching_subs if sub in self._class_ids]
+            self._generate_expr(arg0)
+            lbl_false = self.new_label("isinst_false")
+            lbl_true = self.new_label("isinst_true")
+            lbl_done = self.new_label("isinst_done")
+            self.emit("cmp rax, 65536", "check heap instance pointer")
+            self.emit(f"jb {lbl_false}")
+            self.emit("mov r10, 505946434C535447h", "PYFCLSTG")
+            self.emit("cmp [rax + 2032], r10")
+            self.emit(f"jne {lbl_false}")
+            self.emit("mov r10, [rax + 2040]", "load class_id")
+            for cid in matching_ids:
+                self.emit(f"cmp r10, {cid}")
+                self.emit(f"je {lbl_true}")
+            self.emit_raw(f"{lbl_false}:")
+            self.emit("xor eax, eax")
+            self.emit(f"jmp {lbl_done}")
+            self.emit_raw(f"{lbl_true}:")
+            self.emit("mov rax, 1")
+            self.emit_raw(f"{lbl_done}:")
+            return
+
+        # str(val) / repr(val) conversion
         if func_name in ("str", "repr") and call.args:
             arg0 = call.args[0]
+            if self.target in ("win64", "dll"):
+                self._emit_win64_to_str(arg0, is_repr=(func_name == "repr"), call_node=call)
+                return
             cls_name = self.resolve_instance_class(arg0)
+            vkey = "__repr__" if func_name == "repr" else "__str__"
             str_m = (self.resolve_class_method(cls_name, "__str__") or self.resolve_class_method(cls_name, "__repr__")) if cls_name else None
             if str_m:
                 self._generate_expr(arg0)
                 self.emit("mov rcx, rax", "pass self to __str__")
                 self.emit("sub rsp, 32", "shadow space")
-                self.emit(f"call {safe_asm_label(str_m)}")
+                self.emit(f"call {self._method_call_target(cls_name, vkey, str_m)}")
                 self.emit("add rsp, 32")
                 return
 
@@ -4776,7 +6062,7 @@ include 'functions.inc'
                     self._generate_expr(arg)
                     self.emit("mov rcx, rax", "pass self to __str__")
                     self.emit("sub rsp, 32", "shadow space")
-                    self.emit(f"call {safe_asm_label(str_m)}")
+                    self.emit(f"call {self._method_call_target(cls_name, '__str__', str_m)}")
                     self.emit("add rsp, 32")
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_print_str")
@@ -4793,15 +6079,63 @@ include 'functions.inc'
                         elif arg_type.is_float():
                             self.emit("movq xmm0, rax")
                             self.emit("call _pyfasm_print_float")
-                        elif arg_type.is_list() or arg_type.is_tuple():
+                        elif arg_type.is_list():
                             self.emit("mov rcx, rax")
-                            self.emit("call _pyfasm_print_list")
-                        elif arg_type.is_int() or arg_type.is_bool():
+                            if self.target in ("win64", "dll"):
+                                helper = self._select_win64_list_printer(arg_type)
+                                self.emit("sub rsp, 32", "shadow space")
+                                self.emit(f"call {helper}")
+                                self.emit("add rsp, 32")
+                            else:
+                                self.emit("call _pyfasm_print_list")
+                        elif arg_type.is_tuple():
+                            self.emit("mov rcx, rax")
+                            if self.target in ("win64", "dll"):
+                                helper = self._select_win64_tuple_printer(arg_type)
+                                self.emit("sub rsp, 32", "shadow space")
+                                self.emit(f"call {helper}")
+                                self.emit("add rsp, 32")
+                            else:
+                                self.emit("call _pyfasm_print_list")
+                        elif arg_type.is_dict() and self.target in ("win64", "dll"):
+                            kt = getattr(arg_type, "key_type", None)
+                            vt = getattr(arg_type, "val_type", None)
+                            k_fn = self._select_win64_elem_printer(kt)
+                            v_fn = self._select_win64_elem_printer(vt)
+                            self.emit("mov rcx, rax")
+                            self.emit(f"lea rdx, [{k_fn}]")
+                            self.emit(f"lea r8, [{v_fn}]")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit("call _pyfasm_print_dict_with")
+                            self.emit("add rsp, 32")
+                        elif arg_type.is_set() and self.target in ("win64", "dll"):
+                            et = getattr(arg_type, "element_type", None)
+                            e_fn = self._select_win64_elem_printer(et)
+                            self.emit("mov rcx, rax")
+                            self.emit(f"lea rdx, [{e_fn}]")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit("call _pyfasm_print_set_with")
+                            self.emit("add rsp, 32")
+                        elif arg_type.is_bool():
                             self.emit("mov rcx, rax")
                             self.emit("call _pyfasm_print_int")
+                        elif arg_type.is_int():
+                            if self.target in ("win64", "dll") and self._is_ambiguous_dynamic_expr(arg):
+                                self.emit("mov rcx, rax")
+                                self.emit("sub rsp, 32", "shadow space")
+                                self.emit("call _pyfasm_print_auto")
+                                self.emit("add rsp, 32")
+                            else:
+                                self.emit("mov rcx, rax")
+                                self.emit("call _pyfasm_print_int")
                         else:
                             self.emit("mov rcx, rax")
-                            self.emit("call _pyfasm_print_auto")
+                            if self.target in ("win64", "dll"):
+                                self.emit("sub rsp, 32", "shadow space")
+                                self.emit("call _pyfasm_print_auto")
+                                self.emit("add rsp, 32")
+                            else:
+                                self.emit("call _pyfasm_print_auto")
             self.emit("call _pyfasm_print_newline")
             return
 
@@ -4850,6 +6184,37 @@ include 'functions.inc'
             return
 
         if func_name == "next" and call.args:
+            it_cls = self.resolve_instance_class(call.args[0])
+            next_m = self.resolve_class_method(it_cls, "__next__") if it_cls else None
+            if next_m:
+                if len(call.args) == 1:
+                    self._generate_expr(call.args[0])
+                    self.emit("mov rcx, rax", "pass self to __next__")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration flag")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {self._method_call_target(it_cls, '__next__', next_m)}")
+                    self.emit("add rsp, 32")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration flag")
+                    return
+                else:
+                    lbl_ok = self.new_label("next_inst_ok")
+                    self._generate_expr(call.args[0])
+                    self.emit("sub rsp, 16", "aligned slot for custom next()")
+                    self.emit("mov [rsp], rax", "save iterator")
+                    self._generate_expr(call.args[1])
+                    self.emit("mov [rsp + 8], rax", "save default value")
+                    self.emit("mov rcx, [rsp]", "pass self to __next__")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration flag")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {self._method_call_target(it_cls, '__next__', next_m)}")
+                    self.emit("add rsp, 32")
+                    self.emit("cmp qword [_pyfasm_stop_iter], 0", "check StopIteration")
+                    self.emit(f"je {lbl_ok}")
+                    self.emit("mov qword [_pyfasm_stop_iter], 0", "clear StopIteration flag")
+                    self.emit("mov rax, [rsp + 8]", "use default value")
+                    self.emit_raw(f"{lbl_ok}:")
+                    self.emit("add rsp, 16", "cleanup custom next() slot")
+                    return
             if len(call.args) == 1:
                 self._generate_expr(call.args[0])
                 self.emit("mov rcx, rax", "gen_ptr")
@@ -5245,7 +6610,7 @@ include 'functions.inc'
                     self._generate_expr(arg0)
                     self.emit("mov rcx, rax", "pass self to __len__")
                     self.emit("sub rsp, 32", "shadow space")
-                    self.emit(f"call {safe_asm_label(len_m)}")
+                    self.emit(f"call {self._method_call_target(cls_name, '__len__', len_m)}")
                     self.emit("add rsp, 32")
                     return
 
@@ -5266,7 +6631,12 @@ include 'functions.inc'
                 self._generate_expr(arg0)
                 if is_str_arg:
                     self.emit("mov rcx, rax")
-                    self.emit("call _pyfasm_str_len")
+                    if func_name == "len" and self.target in ("win64", "dll"):
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit("call _pyfasm_utf8_len")
+                        self.emit("add rsp, 32")
+                    else:
+                        self.emit("call _pyfasm_str_len")
                 elif is_dict_arg:
                     self.emit("mov rcx, rax")
                     self.emit("call _pyfasm_dict_len")
@@ -5701,26 +7071,66 @@ include 'functions.inc'
                 self.emit("call _pyfasm_atomic_sub")
             return
 
+        # Check callable class instance obj(...) via __call__
+        is_callable_inst = False
+        if not is_super_call and func_name not in self.module.functions:
+            callable_cls = self.resolve_instance_class(call.func)
+            if callable_cls:
+                call_dunder = self.resolve_class_method(callable_cls, "__call__", skip_cls=False)
+                if call_dunder and call_dunder in self.module.functions:
+                    func_name = call_dunder
+                    recv_cls_hint = callable_cls
+                    is_callable_inst = True
+
         # User Function / Method Call (x64 ABI)
+        is_bound_method = False
         if func_name in self.module.functions:
             fn_sym = self.module.functions[func_name]
-            if is_super_call:
+            if is_callable_inst:
+                args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=call.func)
+            elif is_super_call:
                 args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=ast.Name(id="self", ctx=ast.Load()))
-            elif isinstance(call.func, ast.Attribute) and fn_sym.args and fn_sym.args[0].name == "self":
-                args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=call.func.value)
+            elif isinstance(call.func, ast.Attribute):
+                if getattr(fn_sym, "is_staticmethod", False):
+                    args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=False)
+                elif getattr(fn_sym, "is_classmethod", False):
+                    if isinstance(call.func.value, ast.Name) and call.func.value.id in self.module.classes:
+                        cls_arg_expr: ast.AST = ast.Name(id=call.func.value.id, ctx=ast.Load())
+                    elif getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args and isinstance(call.func.value, ast.Name) and call.func.value.id == self.current_func.args[0].name:
+                        cls_arg_expr = ast.Name(id=call.func.value.id, ctx=ast.Load())
+                    else:
+                        cls_arg_expr = ast.Name(id=(recv_cls_hint or fn_sym.class_name or prefix), ctx=ast.Load())
+                    args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=cls_arg_expr)
+                elif fn_sym.args and fn_sym.args[0].name == "self" and not (isinstance(call.func.value, ast.Name) and call.func.value.id in self.module.classes):
+                    is_bound_method = True
+                    args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=True, self_expr=call.func.value)
+                else:
+                    args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=False)
             else:
                 args_to_pass = self._prepare_call_args(call, fn_sym, is_method_call=False)
         else:
-            args_to_pass = list(call.args)
-            if is_super_call:
-                args_to_pass = [ast.Name(id="self", ctx=ast.Load())] + list(call.args)
+            if (
+                getattr(self.current_func, "is_classmethod", False)
+                and self.current_func
+                and self.current_func.args
+                and isinstance(call.func, ast.Name)
+                and call.func.id == self.current_func.args[0].name
+                and self.current_func.class_name in self.module.functions
+            ):
+                args_to_pass = self._prepare_call_args(call, self.module.functions[self.current_func.class_name], is_method_call=False)
+            else:
+                args_to_pass = list(call.args)
+                if is_super_call:
+                    args_to_pass = [ast.Name(id="self", ctx=ast.Load())] + list(call.args)
 
         # Evaluate arguments and push them in reverse order
         is_indirect = False
         indirect_local_var = None
         is_indirect_global = False
 
-        if isinstance(call.func, ast.Name):
+        if is_callable_inst:
+            is_indirect = False
+        elif isinstance(call.func, ast.Name):
             if self.current_func and call.func.id in self.current_func.local_vars:
                 is_indirect = True
                 indirect_local_var = self.current_func.local_vars[call.func.id]
@@ -5749,33 +7159,165 @@ include 'functions.inc'
             if indirect_local_var:
                 self.emit(f"mov r10, [rbp - {indirect_local_var.stack_offset}]", f"indirect callee {indirect_local_var.name}")
             elif is_indirect_global:
-                self.emit(f"mov r10, [_pyfasm_global_{call.func.id}]", f"indirect global callee {call.func.id}")
+                self.emit(f"mov r10, [{safe_global_label(call.func.id)}]", f"indirect global callee {call.func.id}")
             else:
                 if n_args <= 4:
                     self.emit("pop r10", "restore indirect callee from stack")
                 else:
                     self.emit(f"mov r10, [rsp + {(n_args - 4) * 8}]", "read indirect callee above extra stack args")
-            callee_target = "r10"
-        else:
-            if func_name not in self.module.functions:
-                self._record_unresolved(func_name, call)
-            callee_target = safe_asm_label(func_name)
 
-        # Allocate 32 bytes shadow space
-        self.emit("sub rsp, 32", "shadow space for callee")
-        if is_indirect:
+            has_any_call_dunder = any(
+                self.resolve_class_method(cname, "__call__") for cname in self.module.classes
+            )
             lbl_skip = self.new_label("skip_null_call")
+            lbl_normal_call = self.new_label("indirect_normal")
+            lbl_check_obj = self.new_label("indirect_check_obj")
+            lbl_closure_call = self.new_label("indirect_closure")
+            lbl_dunder_call = self.new_label("indirect_dunder_call") if has_any_call_dunder else ""
+            lbl_done_call = self.new_label("done_indirect_call")
+
             self.emit("cmp r10, 65536", "check for invalid/null function pointer")
             self.emit(f"jb {lbl_skip}")
+            self.emit("lea r11, [_pyfasm_funcs_start]")
+            self.emit("cmp r10, r11")
+            self.emit(f"jb {lbl_check_obj}")
+            self.emit("lea r11, [_pyfasm_funcs_end]")
+            self.emit("cmp r10, r11")
+            self.emit(f"jb {lbl_normal_call}")
+            self.emit_raw(f"{lbl_check_obj}:")
+            self.emit("mov r11, 505946434C4F5355h", "PYFCLOSU")
+            self.emit("cmp [r10], r11")
+            self.emit(f"je {lbl_closure_call}")
+            if has_any_call_dunder:
+                self.emit("mov r11, 505946434C535447h", "PYFCLSTG")
+                self.emit("cmp [r10 + 2032], r11")
+                self.emit(f"je {lbl_dunder_call}")
+
+            self.emit_raw(f"{lbl_normal_call}:")
+            for unused_reg in ["ecx", "edx", "r8d", "r9d"][n_args:]:
+                self.emit(f"xor {unused_reg}, {unused_reg}", "zero unused indirect arg reg")
+            self.emit("sub rsp, 32", "shadow space for callee")
             self.emit("call r10")
-            lbl_done_call = self.new_label("done_indirect_call")
+            self.emit("add rsp, 32", "restore shadow space")
             self.emit(f"jmp {lbl_done_call}")
+
+            def _emit_env_self_call(is_dunder: bool) -> None:
+                # Prepends r10 (closure env or instance self) before the n_args user arguments.
+                if n_args == 0:
+                    self.emit("mov rcx, r10", "pass env/self")
+                    self.emit("xor edx, edx")
+                    self.emit("xor r8d, r8d")
+                    self.emit("xor r9d, r9d")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]", "load closure fn ptr")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit("add rsp, 32")
+                elif n_args == 1:
+                    self.emit("mov rdx, rcx")
+                    self.emit("mov rcx, r10")
+                    self.emit("xor r8d, r8d")
+                    self.emit("xor r9d, r9d")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit("add rsp, 32")
+                elif n_args == 2:
+                    self.emit("mov r8, rdx")
+                    self.emit("mov rdx, rcx")
+                    self.emit("mov rcx, r10")
+                    self.emit("xor r9d, r9d")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit("add rsp, 32")
+                elif n_args == 3:
+                    self.emit("mov r9, r8")
+                    self.emit("mov r8, rdx")
+                    self.emit("mov rdx, rcx")
+                    self.emit("mov rcx, r10")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit("add rsp, 32")
+                elif n_args == 4:
+                    self.emit("sub rsp, 8", "align stack before 5th arg push")
+                    self.emit("push r9", "shift 4th arg to stack")
+                    self.emit("mov r9, r8")
+                    self.emit("mov r8, rdx")
+                    self.emit("mov rdx, rcx")
+                    self.emit("mov rcx, r10")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit("add rsp, 48", "cleanup shadow + 5th arg + align pad")
+                else:
+                    m_extra = n_args - 4
+                    c_callee = 1 if needs_stack_callee else 0
+                    pad = 8 if ((c_callee + m_extra + 1) % 2 == 1) else 0
+                    self.emit(f"sub rsp, {8 + pad}", "make room for shifted 5th arg")
+                    if pad > 0:
+                        for i_ex in range(m_extra):
+                            self.emit(f"mov rax, [rsp + {8 + pad + i_ex * 8}]")
+                            self.emit(f"mov [rsp + {8 + i_ex * 8}], rax")
+                    self.emit("mov [rsp], r9", "place shifted 5th arg")
+                    self.emit("mov r9, r8")
+                    self.emit("mov r8, rdx")
+                    self.emit("mov rdx, rcx")
+                    self.emit("mov rcx, r10")
+                    if is_dunder:
+                        self._used_vcalls.add("__call__")
+                        self.emit(f"lea r10, [{self._vcall_label('__call__')}]")
+                    else:
+                        self.emit("mov r10, [r10 + 8]")
+                    self.emit("sub rsp, 32")
+                    self.emit("call r10")
+                    self.emit(f"add rsp, {32 + 8 + pad}")
+
+            self.emit_raw(f"{lbl_closure_call}:")
+            _emit_env_self_call(is_dunder=False)
+            self.emit(f"jmp {lbl_done_call}")
+
+            if has_any_call_dunder:
+                self.emit_raw(f"{lbl_dunder_call}:")
+                _emit_env_self_call(is_dunder=True)
+                self.emit(f"jmp {lbl_done_call}")
+
             self.emit_raw(f"{lbl_skip}:")
             self.emit("xor eax, eax", "safe fallback return 0 for unresolvable call")
             self.emit_raw(f"{lbl_done_call}:")
         else:
+            if is_callable_inst:
+                callee_target = self._method_call_target(recv_cls_hint, "__call__", func_name)
+            elif is_bound_method and self._method_has_polymorphic_impls(recv_cls_hint, attr_name):
+                self._used_vcalls.add(attr_name)
+                callee_target = self._vcall_label(attr_name)
+            else:
+                if func_name not in self.module.functions:
+                    self._record_unresolved(func_name, call)
+                callee_target = safe_asm_label(func_name)
+            self.emit("sub rsp, 32", "shadow space for callee")
             self.emit(f"call {callee_target}")
-        self.emit("add rsp, 32", "restore shadow space")
+            self.emit("add rsp, 32", "restore shadow space")
 
         # If more than 4 arguments, cleanup extra stack args
         if needs_stack_callee and n_args > 4:
