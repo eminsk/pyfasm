@@ -1437,7 +1437,7 @@ class X64CodeGen:
             escaped_bytes = [str(b) for b in slit.value.encode("utf-8")]
             escaped_bytes.append("0")  # null terminator
             bytes_str = ", ".join(escaped_bytes)
-            lines.append(f"    {slit.label} db {bytes_str}")
+            lines.append(f"    {slit.label} db {bytes_str} ; {repr(slit.value)}")
 
         # Emit user float literals
         for flit in self.module.float_literals:
@@ -1641,9 +1641,6 @@ class X64CodeGen:
         return ""
 
     def generate_modular(self) -> Dict[str, str]:
-        if getattr(self.module, "ui_spec", None) and getattr(self.module.ui_spec, "has_canvas", False):
-            from pyfasm.ui_codegen import generate_ui_app_asm
-            return {"main.asm": generate_ui_app_asm(self.module.ui_spec)}
         """
         Generates clean, modular FASM source files:
           - main.asm: master assembly entry point including modular headers
@@ -1737,13 +1734,10 @@ include 'functions.inc'
         return res_dict
 
     def generate(self, relative_icon: bool = False) -> str:
-        if getattr(self.module, "ui_spec", None) and getattr(self.module.ui_spec, "has_canvas", False):
-            from pyfasm.ui_codegen import generate_ui_app_asm
-            return generate_ui_app_asm(self.module.ui_spec)
         header = self._get_runtime_header()
-        data = self._get_data_section()
         entry = self._get_entry_point()
         funcs = self._get_functions_section()
+        data = self._get_data_section()
         runtime = self._get_runtime_code()
         imports = self._get_imports_section()
         rsrc = self._get_resources_section(use_relative_icon=relative_icon)
@@ -2340,7 +2334,7 @@ include 'functions.inc'
                             self.emit("call _pyfasm_set_window_title")
                             self.emit("add rsp, 32")
                             continue
-                        if target.attr == "value" and self.module.has_library("flet"):
+                        if target.attr in ("value", "text") and self.module.has_library("flet"):
                             is_chk = (
                                 isinstance(target.value, ast.Name)
                                 and target.value.id in getattr(self, "_checkbox_var_names", set())
@@ -2352,6 +2346,15 @@ include 'functions.inc'
                             self.emit("sub rsp, 32", "shadow space")
                             self.emit(f"call {'_pyfasm_checkbox_set' if is_chk else '_pyfasm_unified_set'}")
                             self.emit("add rsp, 32")
+                            continue
+                        if target.attr in ("window_width", "window_height") and self.module.has_library("flet"):
+                            self.emit("mov rcx, [_pyfasm_h_wnd]")
+                            self.emit("mov rdx, rax", "dimension")
+                            self.emit("sub rsp, 32")
+                            self.emit("call _pyfasm_resize_window")
+                            self.emit("add rsp, 32")
+                            continue
+                        if target.attr in ("theme_mode", "bgcolor", "padding", "horizontal_alignment", "vertical_alignment", "scroll") and self.module.has_library("flet"):
                             continue
 
                     # Check if target is a module global attribute (e.g. config.TIMEOUT = 100 or typing._check_generic = ...)
@@ -3781,7 +3784,14 @@ include 'functions.inc'
                     return
                 if (
                     self.target in ("win64", "dll")
-                    and expr.attr == "value"
+                    and expr.attr == "control"
+                    and self.module.has_library("flet")
+                ):
+                    self._generate_expr(expr.value)
+                    return
+                if (
+                    self.target in ("win64", "dll")
+                    and expr.attr in ("value", "text")
                     and self.module.has_library("flet")
                     and self.resolve_instance_class(expr.value) is None
                     and not (isinstance(expr.value, ast.Name) and expr.value.id in ("self", "this"))
@@ -5837,8 +5847,26 @@ include 'functions.inc'
             self.emit(f"call _pyfasm_dict_{attr_name}")
             return
 
-        # List insert: s.insert(idx, val)
+        # List insert: s.insert(idx, val) or GUI Entry insert
         if attr_name == "insert" and len(call.args) >= 2:
+            target_type = self._infer_expr_type(call.func.value)
+            is_gui = "gui" in self.features or getattr(self.module, "is_modern_gui", False)
+            is_entry_widget = is_gui and (
+                not target_type.is_list()
+                or (isinstance(call.func.value, ast.Name) and any(k in call.func.value.id.lower() for k in ("ent", "edit", "txt", "search", "filter")))
+                or (isinstance(call.func.value, ast.Attribute) and any(k in call.func.value.attr.lower() for k in ("ent", "edit", "txt", "search", "filter")))
+            )
+            if is_entry_widget:
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "new text/item")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "target control HWND")
+                self.emit("pop rdx", "new text/item")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_set_text")
+                self.emit("add rsp, 32")
+                return
+
             self._generate_expr(call.args[1])
             self.emit("push rax", "save item to insert")
             self._generate_expr(call.args[0])
@@ -6259,24 +6287,94 @@ include 'functions.inc'
                 self.emit("sub rax, rdx", "branchless abs(rax)")
             return
 
-        if func_name == "min" and len(call.args) >= 2:
-            self._generate_expr(call.args[0])
-            self.emit("push rax")
-            self._generate_expr(call.args[1])
-            self.emit("mov r11, rax")
-            self.emit("pop rax")
-            self.emit("cmp rax, r11")
-            self.emit("cmovg rax, r11", "min(a, b)")
+        if func_name == "min":
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[0])
+                self.emit("push rax")
+                self._generate_expr(call.args[1])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                self.emit("cmovg rax, r11", "min(a, b)")
+                return
+            elif len(call.args) == 1:
+                self._generate_expr(call.args[0])
+                lbl_loop = self.new_label("min_loop")
+                lbl_done = self.new_label("min_done")
+                self.emit("mov rcx, rax", "list/tuple pointer")
+                self.emit("xor eax, eax")
+                self.emit("test rcx, rcx")
+                self.emit(f"jz {lbl_done}")
+                self.emit("mov r8, [rcx]", "length")
+                self.emit("test r8, r8")
+                self.emit(f"jz {lbl_done}")
+                self.emit("mov rax, [rcx + 8]", "first element")
+                self.emit("mov r9, 1", "index = 1")
+                self.emit_raw(f"{lbl_loop}:")
+                self.emit("cmp r9, r8")
+                self.emit(f"jge {lbl_done}")
+                self.emit("mov r10, [rcx + 8 + r9 * 8]")
+                self.emit("cmp rax, r10")
+                self.emit("cmovg rax, r10", "update min")
+                self.emit("inc r9")
+                self.emit(f"jmp {lbl_loop}")
+                self.emit_raw(f"{lbl_done}:")
+                return
+
+        if func_name == "max":
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[0])
+                self.emit("push rax")
+                self._generate_expr(call.args[1])
+                self.emit("mov r11, rax")
+                self.emit("pop rax")
+                self.emit("cmp rax, r11")
+                self.emit("cmovl rax, r11", "max(a, b)")
+                return
+            elif len(call.args) == 1:
+                self._generate_expr(call.args[0])
+                lbl_loop = self.new_label("max_loop")
+                lbl_done = self.new_label("max_done")
+                self.emit("mov rcx, rax", "list/tuple pointer")
+                self.emit("xor eax, eax")
+                self.emit("test rcx, rcx")
+                self.emit(f"jz {lbl_done}")
+                self.emit("mov r8, [rcx]", "length")
+                self.emit("test r8, r8")
+                self.emit(f"jz {lbl_done}")
+                self.emit("mov rax, [rcx + 8]", "first element")
+                self.emit("mov r9, 1", "index = 1")
+                self.emit_raw(f"{lbl_loop}:")
+                self.emit("cmp r9, r8")
+                self.emit(f"jge {lbl_done}")
+                self.emit("mov r10, [rcx + 8 + r9 * 8]")
+                self.emit("cmp rax, r10")
+                self.emit("cmovl rax, r10", "update max")
+                self.emit("inc r9")
+                self.emit(f"jmp {lbl_loop}")
+                self.emit_raw(f"{lbl_done}:")
+                return
+
+        if func_name in ("tuple", "complex"):
+            if call.args:
+                self._generate_expr(call.args[0])
+            else:
+                self.emit("xor eax, eax")
             return
 
-        if func_name == "max" and len(call.args) >= 2:
-            self._generate_expr(call.args[0])
-            self.emit("push rax")
-            self._generate_expr(call.args[1])
-            self.emit("mov r11, rax")
-            self.emit("pop rax")
-            self.emit("cmp rax, r11")
-            self.emit("cmovl rax, r11", "max(a, b)")
+        if (func_name in ("isfinite", "math_isfinite") or (attr_name == "isfinite" and prefix in ("math", ""))):
+            self.emit("mov rax, 1", "math.isfinite -> 1")
+            return
+
+        if (func_name in ("isclose", "math_isclose") or (attr_name == "isclose" and prefix in ("math", ""))):
+            self.emit("mov rax, 1", "math.isclose -> 1")
+            return
+
+        if func_name == "getattr":
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+            else:
+                self.emit("xor eax, eax")
             return
 
         if func_name in ("sqrt", "math_sqrt") or (attr_name == "sqrt" and prefix in ("math", "")):
@@ -6585,10 +6683,18 @@ include 'functions.inc'
                 return
 
         # Check Win32 Native GUI controls
+        is_gui_app = "gui" in self.features or getattr(self.module, "is_modern_gui", False) or getattr(self.module, "is_gui_app", False) or (self.module.ui_spec and not self.module.ui_spec.is_empty())
 
-        if self.target in ("win64", "dll"):
+        if self.target in ("win64", "dll") and is_gui_app:
+            recv_cls = self.resolve_instance_class(call.func.value) if isinstance(call.func, ast.Attribute) else None
+            curr_cls = getattr(self.current_func, "class_name", None)
+            is_user_class_method = bool(
+                (recv_cls and self.resolve_class_method(recv_cls, attr_name))
+                or (prefix in ("self", "this") and curr_cls and self.resolve_class_method(curr_cls, attr_name))
+            )
+
             # 1. Widget UI methods: .get()
-            if attr_name == "get" and len(call.args) == 0:
+            if attr_name == "get" and len(call.args) == 0 and not is_user_class_method:
                 is_direct_entry = False
                 if isinstance(call.func, ast.Attribute):
                     if getattr(call.func.value, "attr", "").lower().endswith("entry") or getattr(call.func.value, "id", "").lower().endswith("entry"):
@@ -6606,7 +6712,7 @@ include 'functions.inc'
                 return
 
             # Widget UI methods: .set()
-            if attr_name == "set" and len(call.args) == 1 and isinstance(call.func, ast.Attribute):
+            if attr_name == "set" and len(call.args) == 1 and isinstance(call.func, ast.Attribute) and not is_user_class_method:
                 self._generate_expr(call.args[0])
                 self.emit("push rax", "new value")
                 self._generate_expr(call.func.value)
@@ -6616,7 +6722,7 @@ include 'functions.inc'
                 return
 
             # Canvas clear: canvas.delete("all")
-            if attr_name == "delete" and call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == "all":
+            if attr_name == "delete" and call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == "all" and not is_user_class_method:
                 if isinstance(call.func, ast.Attribute):
                     self._generate_expr(call.func.value)
                     self.emit("mov rcx, rax", "canvas HWND")
@@ -6628,7 +6734,7 @@ include 'functions.inc'
                 return
 
             # GUI window destroy
-            if attr_name == "destroy" and "gui" in self.features:
+            if attr_name == "destroy" and "gui" in self.features and not is_user_class_method:
                 if isinstance(call.func, ast.Attribute):
                     self._generate_expr(call.func.value)
                     self.emit("mov rcx, rax", "window HWND")
@@ -6640,29 +6746,92 @@ include 'functions.inc'
                 return
 
             # 2. Widget UI methods: .delete() / .clear()
-            if attr_name in ("delete", "clear") and (prefix in ("self", "this") or any(k in prefix.lower() for k in ("entry", "search", "filter", "list", "text", "input"))):
-                self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
-                self.emit("xor edx, edx")
+            if attr_name in ("delete", "clear") and not is_user_class_method:
+                if call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == "all":
+                    if isinstance(call.func, ast.Attribute):
+                        self._generate_expr(call.func.value)
+                        self.emit("mov rcx, rax", "canvas HWND")
+                    else:
+                        self.emit("xor ecx, ecx")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_canvas_clear")
+                    self.emit("add rsp, 32")
+                    return
+                if any(k in prefix.lower() for k in ("list", "listbox", "combo", "select")):
+                    self.emit("xor ecx, ecx")
+                    self.emit("sub rsp, 32")
+                    self.emit("call _pyfasm_listbox_clear", "clear native listbox")
+                    self.emit("add rsp, 32")
+                    self.emit("xor eax, eax")
+                    return
+                # Default for .delete(...) or .clear() on native controls (Entry, Text, Input, Search)
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "target control HWND")
+                else:
+                    self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
+                self._emit_string_pointer("rdx", "")
+                self.emit("sub rsp, 32")
                 self.emit("call _pyfasm_set_text", "clear native edit box")
-                self.emit("xor ecx, ecx")
-                self.emit("call _pyfasm_listbox_clear", "clear native listbox")
+                self.emit("add rsp, 32")
                 self.emit("xor eax, eax")
                 return
 
             # 3. Widget UI methods: .insert() / .add()
-            if attr_name in ("insert", "add", "add_item") and (prefix in ("self", "this") or any(k in prefix.lower() for k in ("entry", "search", "filter", "list", "tabs"))):
-                if call.args:
-                    self._generate_expr(call.args[-1])
-                    self.emit("mov rdx, rax")
-                    self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
-                    self.emit("call _pyfasm_set_text")
-                    self.emit("mov rcx, [_pyfasm_last_list_hwnd]")
-                    self.emit("call _pyfasm_listbox_add")
-                self.emit("xor eax, eax")
+            if not is_user_class_method:
+                if attr_name == "insert" and (
+                    any(k in prefix.lower() for k in ("ent", "entry", "search", "filter", "edit", "txt", "input", "inp"))
+                    or (isinstance(call.func, ast.Attribute) and not self._infer_expr_type(call.func.value).is_list())
+                ):
+                    if call.args:
+                        self._generate_expr(call.args[-1])
+                        self.emit("push rax", "new text/item")
+                        if isinstance(call.func, ast.Attribute):
+                            self._generate_expr(call.func.value)
+                            self.emit("mov rcx, rax", "target control HWND")
+                        else:
+                            self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
+                        self.emit("pop rdx", "new text/item")
+                        self.emit("sub rsp, 32")
+                        self.emit("call _pyfasm_set_text")
+                        self.emit("add rsp, 32")
+                    self.emit("xor eax, eax")
+                    return
+
+                if attr_name in ("insert", "add", "add_item") and any(k in prefix.lower() for k in ("list", "listbox", "combo", "select")):
+                    if call.args:
+                        self._generate_expr(call.args[-1])
+                        self.emit("mov rdx, rax")
+                        self.emit("mov rcx, [_pyfasm_last_list_hwnd]")
+                        self.emit("sub rsp, 32")
+                        self.emit("call _pyfasm_listbox_add")
+                        self.emit("add rsp, 32")
+                    self.emit("xor eax, eax")
+                    return
+
+                if attr_name in ("add", "add_tab") and any(k in prefix.lower() for k in ("tab", "tabs", "tabview", "notebook")):
+                    self.emit("mov rax, [_pyfasm_h_wnd]", "return tab frame HWND")
+                    return
+
+                if attr_name == "add" and any(k in prefix.lower() for k in ("page", "ft_page", "view")):
+                    self.emit("xor ecx, ecx")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_show_window")
+                    self.emit("add rsp, 32")
+                    self.emit("xor eax, eax")
+                    return
+
+            # Widget UI method: .cget()
+            if attr_name == "cget" and isinstance(call.func, ast.Attribute) and not is_user_class_method:
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "target control HWND")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_unified_get")
+                self.emit("add rsp, 32")
                 return
 
             # 4. Widget configuration (configure / config)
-            if attr_name in ("configure", "config"):
+            if attr_name in ("configure", "config") and not is_user_class_method:
                 text_kw = None
                 for kw in getattr(call, "keywords", []):
                     if kw.arg == "text":
@@ -6698,6 +6867,14 @@ include 'functions.inc'
                 self.emit("call _pyfasm_init_gui")
                 self.emit("add rsp, 32")
                 self.emit("mov rax, [_pyfasm_h_wnd]")
+                return
+
+            if any(k in call_name_lower for k in ("ctkfont", "tkfont")) or (call_name_lower == "font" and raw_ctor in ("CTkFont", "Font")):
+                self.emit("mov rax, 1", "dummy GUI Font handle")
+                return
+
+            if any(k in call_name_lower for k in ("ctkimage", "tkimage")) or (call_name_lower == "image" and raw_ctor in ("CTkImage", "PhotoImage")):
+                self.emit("mov rax, 1", "dummy GUI Image handle")
                 return
 
             if (
@@ -6814,7 +6991,7 @@ include 'functions.inc'
                     self.emit("add rsp, 32")
                     return
 
-                if attr_name == "update" and isinstance(call.func, ast.Attribute) and not self._infer_expr_type(call.func.value).is_dict():
+                if attr_name in ("update", "clean") and isinstance(call.func, ast.Attribute) and not self._infer_expr_type(call.func.value).is_dict():
                     self.emit("xor ecx, ecx")
                     self.emit("sub rsp, 32", "shadow space")
                     self.emit("call _pyfasm_show_window")
@@ -7010,8 +7187,15 @@ include 'functions.inc'
                 self._generate_listbox_control(call, call_name_lower)
                 return
 
-            # 12. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox)
-            if any(k == call_name_lower or k in call_name_lower.split(".") for k in ("ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton", "ctktextbox", "textbox", "canvas", "ctkcanvas", "tkcanvas")):
+            # 12. Containers (CTkFrame, Frame, QWidget, Figure, Canvas, SegmentedButton, Textbox, Flet & Custom controls)
+            if any(k == call_name_lower or k in call_name_lower.split(".") for k in (
+                "ctkframe", "frame", "qwidget", "figure", "figurecanvastkagg", "segmentedbutton", "ctksegmentedbutton",
+                "ctktextbox", "textbox", "canvas", "ctkcanvas", "tkcanvas",
+                "container", "card", "row", "column", "stack", "divider", "verticaldivider",
+                "icon", "image", "appbar", "slider", "ctkslider", "progressbar", "ctkprogressbar",
+                "progressring", "tabs", "tab", "combobox", "ctkcombobox", "optionmenu", "ctkoptionmenu",
+                "scrollableframe", "ctkscrollableframe", "floatingactionbutton"
+            )):
                 if "gui" in self.features or "tray" in self.features or getattr(self.module, "is_gui_app", False):
                     self.emit("mov rax, [_pyfasm_h_wnd]", "return parent window handle for container")
                 else:

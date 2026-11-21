@@ -495,3 +495,68 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=3)
+
+
+def test_customtkinter_canvas_no_template_hijack_and_flet_controls(tmp_path: Path):
+    """Verify CustomTkinter and Flet code compiles authentically without falling back to hardcoded quadratic solver template."""
+    code = """
+import customtkinter as ctk
+
+class MyDrawingStudio(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("My Unique Studio")
+        self.geometry("800x600")
+        f = ctk.CTkFont(family="Consolas", size=14, weight="bold")
+        lbl = ctk.CTkLabel(self, text="Real Studio Label", font=f)
+        btn = ctk.CTkButton(self, text="Custom Action", font=f)
+        ent = ctk.CTkEntry(self, font=f)
+        ent.delete(0, "end")
+        ent.insert(0, "42")
+        vals = [10, 5, 20, 1]
+        lo = min(vals)
+        hi = max(vals)
+        print("STUDIO_LOADED", lo, hi)
+
+def main() -> int:
+    app = MyDrawingStudio()
+    return 0
+"""
+    asm, exe, _ = _compile_strict_win64(tmp_path, code, "ctk_studio_real")
+    assert "a  ·  коэффициент при x²" not in asm
+    assert "_pyfasm_h_btn_solve" not in asm
+    assert "Real Studio Label" in asm
+    assert "My Unique Studio" in asm
+    if sys.platform == "win32":
+        res = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8", timeout=10)
+        assert res.returncode == 0, res.stderr
+        assert "STUDIO_LOADED 1 20" in res.stdout
+
+
+def test_flet_advanced_controls_and_events_strict_win64(tmp_path: Path):
+    """Verify advanced Flet controls (Card, Container, TextField, clean, window properties) compile cleanly in strict mode."""
+    code = """
+import flet as ft
+
+def page_handler(page) -> int:
+    page.title = "Flet Modern App"
+    page.window_width = 800
+    page.window_height = 600
+    txt = ft.Text("Hello Flet")
+    inp = ft.TextField(value="Input Text")
+    btn = ft.ElevatedButton("Submit")
+    card = ft.Card(content=ft.Container(content=txt))
+    page.add(card, inp, btn)
+    page.clean()
+    page.update()
+    print("FLET_STUDIO_OK")
+    return 0
+
+def main() -> int:
+    ft.app(target=page_handler)
+    return 0
+"""
+    asm, _exe, _ = _compile_strict_win64(tmp_path, code, "flet_advanced")
+    assert "Flet Modern App" in asm
+    assert "Hello Flet" in asm
+
