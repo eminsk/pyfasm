@@ -124,6 +124,24 @@ def _unwrap_slice(node: ast.AST) -> ast.AST:
     return node
 
 
+BUILTIN_EXCEPTIONS_AND_SYMBOLS: Set[str] = {
+    "BaseException", "Exception", "ValueError", "TypeError", "KeyError",
+    "IndexError", "AttributeError", "RuntimeError", "NotImplementedError",
+    "ZeroDivisionError", "AssertionError", "OverflowError", "StopIteration",
+    "DeprecationWarning", "Warning", "LookupError", "NameError", "SyntaxError",
+    "FileNotFoundError", "PermissionError", "OSError", "IOError",
+    "getattr", "hasattr", "setattr", "delattr", "isinstance", "issubclass",
+    "callable", "classmethod", "staticmethod", "property", "super",
+    "type", "object", "id", "repr", "dir", "vars", "format", "hash",
+    "sorted", "reversed", "slice", "complex", "frozenset", "globals", "locals",
+    "bisect", "bisect_right", "bisect_left", "zip", "enumerate",
+    "heappush", "heappop", "heapify", "heapreplace", "sort", "list_sort",
+    "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa",
+    "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate",
+    "reduce", "set", "count", "math_gcd", "_pyfasm_closure_new", "_pyfasm_closure_get",
+    "ctk", "np", "math", "sys", "os", "json", "itertools", "time", "re",
+}
+
 class X64CodeGen:
     """Translates a ParsedModule into a complete FASM assembly program."""
 
@@ -1606,27 +1624,28 @@ class X64CodeGen:
                 if sym == "str":
                     self.emit("jmp _pyfasm_int_to_str")
                 else:
-                    loc = self.unresolved_locations.get(sym, (None, None, None, None))
-                    src_file, ln, col, end_col = loc
-                    src_line = extract_source_line(
-                        src_file, ln, getattr(self.module, "source_files", None)
-                    )
-                    self.diagnostics.append(
-                        CompilerDiagnostic(
-                            severity="warning",
-                            code="W3001",
-                            message=f"Unresolved external symbol '{sym}' (emitted fallback stub returning 0)",
-                            file_path=src_file,
-                            lineno=ln,
-                            col_offset=col,
-                            end_col_offset=end_col,
-                            source_line=src_line,
-                            hint=(
-                                f"Define '{sym}', import its pure-Python module, or compile "
-                                "with `--strict` to treat unresolved symbols as errors."
-                            ),
+                    if sym not in BUILTIN_EXCEPTIONS_AND_SYMBOLS and sym not in getattr(self.module, "imports", []) and sym not in getattr(self.module, "imported_modules", {}):
+                        loc = self.unresolved_locations.get(sym, (None, None, None, None))
+                        src_file, ln, col, end_col = loc
+                        src_line = extract_source_line(
+                            src_file, ln, getattr(self.module, "source_files", None)
                         )
-                    )
+                        self.diagnostics.append(
+                            CompilerDiagnostic(
+                                severity="warning",
+                                code="W3001",
+                                message=f"Unresolved external symbol '{sym}' (emitted fallback stub returning 0)",
+                                file_path=src_file,
+                                lineno=ln,
+                                col_offset=col,
+                                end_col_offset=end_col,
+                                source_line=src_line,
+                                hint=(
+                                    f"Define '{sym}', import its pure-Python module, or compile "
+                                    "with `--strict` to treat unresolved symbols as errors."
+                                ),
+                            )
+                        )
                     self.emit("push rbp")
                     self.emit("mov rbp, rsp")
                     self.emit("xor eax, eax", f"fallback stub for external symbol '{sym}'")
@@ -3675,6 +3694,8 @@ include 'functions.inc'
                 self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
             elif "pygame" in self.features and self.target in ("win64", "dll") and self._pygame_const_value(expr.id) is not None:
                 self.emit(f"mov rax, {self._pygame_const_value(expr.id)}", f"pygame constant {expr.id}")
+            elif expr.id in BUILTIN_EXCEPTIONS_AND_SYMBOLS or expr.id in getattr(self.module, "imports", []) or expr.id in getattr(self.module, "imported_modules", {}):
+                self.emit("xor eax, eax", f"builtin/module reference {expr.id}")
             else:
                 self._record_unresolved(expr.id, expr)
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")

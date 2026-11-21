@@ -3,11 +3,189 @@ Command-Line Interface (CLI) for PyFASM compiler.
 """
 from __future__ import annotations
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import List, Optional, Set, Tuple
 from pyfasm import __version__
 from pyfasm.compiler import PyFasmCompiler
+
+
+def _format_markdown_table(table_lines: List[str]) -> List[str]:
+    """Formats markdown table into aligned terminal box drawing table."""
+    rows: List[List[str]] = []
+    for line in table_lines:
+        line_clean = line.strip().strip("|")
+        cells = [c.strip() for c in line_clean.split("|")]
+        # Skip separator line (| :--- | :--- |)
+        if all(re.match(r"^:?-+:?$", c) for c in cells if c):
+            continue
+        clean_cells = []
+        for c in cells:
+            c = re.sub(r"\*\*([^*]+)\*\*", r"\1", c)
+            c = re.sub(r"`([^`]+)`", r"\1", c)
+            c = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", c)
+            clean_cells.append(c)
+        rows.append(clean_cells)
+    if not rows:
+        return table_lines
+
+    num_cols = max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < num_cols:
+            r.append("")
+
+    col_widths = [max(len(r[i]) for r in rows) for i in range(num_cols)]
+    col_widths = [max(w, 3) for w in col_widths]
+
+    top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
+    sep = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
+    bot = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
+
+    out = [top]
+    for idx, r in enumerate(rows):
+        row_str = "│" + "│".join(f" {r[i]:<{col_widths[i]}} " for i in range(num_cols)) + "│"
+        out.append(row_str)
+        if idx == 0 and len(rows) > 1:
+            out.append(sep)
+    out.append(bot)
+    return out
+
+
+def format_markdown_for_terminal(text: str, is_tty: bool = False) -> str:
+    """Renders raw Markdown into clean, readable terminal text."""
+    lines = text.splitlines()
+    out: List[str] = []
+    i = 0
+    n = len(lines)
+
+    in_code_block = False
+    code_block_lang = ""
+    table_lines: List[str] = []
+
+    def flush_table():
+        nonlocal table_lines
+        if table_lines:
+            formatted = _format_markdown_table(table_lines)
+            out.extend(formatted)
+            table_lines = []
+
+    bold = "\033[1m" if is_tty else ""
+    cyan = "\033[36m" if is_tty else ""
+    yellow = "\033[33m" if is_tty else ""
+    green = "\033[32m" if is_tty else ""
+    dim = "\033[2m" if is_tty else ""
+    reset = "\033[0m" if is_tty else ""
+
+    while i < n:
+        raw_line = lines[i]
+        line = raw_line.rstrip()
+
+        # Handle code blocks
+        if line.startswith("```"):
+            if not in_code_block:
+                flush_table()
+                in_code_block = True
+                code_block_lang = line[3:].strip()
+                tag = f" [{code_block_lang}] " if code_block_lang else " "
+                out.append(f"  {dim}┌──{tag}{'─' * max(2, 60 - len(tag))}{reset}")
+            else:
+                in_code_block = False
+                out.append(f"  {dim}└──{'─' * 60}{reset}")
+            i += 1
+            continue
+
+        if in_code_block:
+            out.append(f"  {dim}│{reset}  {green}{line}{reset}")
+            i += 1
+            continue
+
+        # Handle markdown tables
+        if line.startswith("|") and line.endswith("|"):
+            table_lines.append(line)
+            i += 1
+            continue
+        else:
+            flush_table()
+
+        # Skip shields.io / web badge lines
+        if line.startswith("[![") or "img.shields.io" in line:
+            i += 1
+            continue
+
+        # Skip language switcher lines (e.g. > 🌐 Language / Язык: ...)
+        if line.startswith("> 🌐 **Language") or line.startswith("> 🌐 **Язык"):
+            i += 1
+            continue
+
+        # H1
+        if line.startswith("# "):
+            title = line[2:].strip()
+            border = "═" * min(80, max(60, len(title) + 4))
+            out.append("")
+            out.append(f"{cyan}{border}{reset}")
+            out.append(f"{bold}{cyan}  {title}{reset}")
+            out.append(f"{cyan}{border}{reset}")
+            out.append("")
+            i += 1
+            continue
+
+        # H2
+        if line.startswith("## "):
+            title = line[3:].strip()
+            border_len = max(2, 76 - len(title))
+            out.append("")
+            out.append(f"{bold}{cyan}── {title} {'─' * border_len}{reset}")
+            out.append("")
+            i += 1
+            continue
+
+        # H3
+        if line.startswith("### "):
+            title = line[4:].strip()
+            out.append("")
+            out.append(f"{bold}{yellow}▶ {title}{reset}")
+            i += 1
+            continue
+
+        # Horizontal rule ---
+        if re.match(r"^[-*_]{3,}$", line.strip()):
+            out.append(f"{dim}{'─' * 80}{reset}")
+            i += 1
+            continue
+
+        # Blockquote >
+        if line.startswith("> "):
+            quote_text = line[2:].strip()
+            quote_text = re.sub(r"\*\*([^*]+)\*\*", rf"{bold}\1{reset}", quote_text)
+            out.append(f"  {cyan}│{reset} {quote_text}")
+            i += 1
+            continue
+
+        # Bullet list
+        if re.match(r"^\s*[\*\-]\s+", line):
+            indent_m = re.match(r"^(\s*)[\*\-]\s+(.*)$", line)
+            if indent_m:
+                ind, body = indent_m.group(1), indent_m.group(2)
+                body = re.sub(r"\*\*([^*]+)\*\*", rf"{bold}\1{reset}", body)
+                body = re.sub(r"`([^`]+)`", rf"{green}\1{reset}", body)
+                body = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", body)
+                out.append(f"{ind}  • {body}")
+                i += 1
+                continue
+
+        # Clean links and bold in prose
+        cleaned = line
+        cleaned = re.sub(r"\*\*([^*]+)\*\*", rf"{bold}\1{reset}", cleaned)
+        cleaned = re.sub(r"`([^`]+)`", rf"{green}\1{reset}", cleaned)
+        cleaned = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", cleaned)
+
+        out.append(cleaned)
+        i += 1
+
+    flush_table()
+    return "\n".join(out)
 
 
 def main() -> int:
@@ -131,7 +309,9 @@ def main() -> int:
                 return 1
 
         content = doc_path.read_text(encoding="utf-8")
-        print(content)
+        is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+        formatted = format_markdown_for_terminal(content, is_tty=is_tty)
+        print(formatted)
         return 0
 
     py_ver_opt = getattr(args, "python_version", None)

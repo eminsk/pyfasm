@@ -910,22 +910,74 @@ class GeneratorExpLifter(ast.NodeTransformer):
         "next", "iter", "open", "round", "pow", "ord", "chr", "input",
         "any", "all", "map", "filter", "zip", "enumerate",
         "bisect", "bisect_right", "bisect_left", "heappush", "heappop",
-        "gcd", "lcm", "isqrt", "factorial", "accumulate", "chain", "reduce"
+        "gcd", "lcm", "isqrt", "factorial", "accumulate", "chain", "reduce",
+        # Inspection & Object model
+        "getattr", "hasattr", "setattr", "delattr", "isinstance", "issubclass",
+        "callable", "classmethod", "staticmethod", "property", "super",
+        "type", "object", "id", "repr", "dir", "vars", "format", "hash",
+        "sorted", "reversed", "slice", "complex", "frozenset", "globals", "locals",
+        # Built-in Exceptions & Warnings
+        "BaseException", "Exception", "ValueError", "TypeError", "KeyError",
+        "IndexError", "AttributeError", "RuntimeError", "NotImplementedError",
+        "ZeroDivisionError", "AssertionError", "OverflowError", "StopIteration",
+        "DeprecationWarning", "Warning", "LookupError", "NameError", "SyntaxError",
+        "FileNotFoundError", "PermissionError", "OSError", "IOError",
     }
 
-    def __init__(self):
+    def __init__(self, known_globals: Optional[Set[str]] = None):
         super().__init__()
         self.generators: List[ast.FunctionDef] = []
         self.counter: int = 0
+        self.known_globals: Set[str] = set(known_globals or set())
 
     def _find_free_names(self, node: ast.AST, bound_names: Set[str]) -> List[str]:
         free_names: List[str] = []
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
-                nid = sub.id
-                if nid not in bound_names and nid not in self.BUILTIN_NAMES:
+
+        def _collect(curr: ast.AST, bound: Set[str]):
+            if isinstance(curr, ast.Lambda):
+                lambda_bound = set(bound)
+                for a in getattr(curr.args, "posonlyargs", []):
+                    lambda_bound.add(a.arg)
+                for a in curr.args.args:
+                    lambda_bound.add(a.arg)
+                for a in getattr(curr.args, "kwonlyargs", []):
+                    lambda_bound.add(a.arg)
+                if curr.args.vararg:
+                    lambda_bound.add(curr.args.vararg.arg)
+                if curr.args.kwarg:
+                    lambda_bound.add(curr.args.kwarg.arg)
+                for d in curr.args.defaults + [kd for kd in getattr(curr.args, "kw_defaults", []) if kd is not None]:
+                    _collect(d, bound)
+                _collect(curr.body, lambda_bound)
+                return
+
+            if isinstance(curr, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                comp_bound = set(bound)
+                for gen in curr.generators:
+                    for sub in ast.walk(gen.target):
+                        if isinstance(sub, ast.Name):
+                            comp_bound.add(sub.id)
+                    for if_expr in gen.ifs:
+                        _collect(if_expr, comp_bound)
+                    _collect(gen.iter, bound)
+                if isinstance(curr, ast.DictComp):
+                    _collect(curr.key, comp_bound)
+                    _collect(curr.value, comp_bound)
+                else:
+                    _collect(getattr(curr, "elt"), comp_bound)
+                return
+
+            if isinstance(curr, ast.Name) and isinstance(curr.ctx, ast.Load):
+                nid = curr.id
+                if nid not in bound and nid not in self.BUILTIN_NAMES and nid not in self.known_globals:
                     if nid not in free_names:
                         free_names.append(nid)
+                return
+
+            for child in ast.iter_child_nodes(curr):
+                _collect(child, bound)
+
+        _collect(node, set(bound_names))
         return free_names
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
@@ -1020,7 +1072,23 @@ def preprocess_ast(
     tree = ChainedCompareTransformer().visit(tree)
     tree = ConstantFolder(py_version=py_version, py_micro=py_micro).visit(tree)
     tree = YieldFromTransformer().visit(tree)
-    gen_lifter = GeneratorExpLifter()
+
+    known_globals = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                known_globals.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                known_globals.add(alias.asname or alias.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            known_globals.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    known_globals.add(target.id)
+
+    gen_lifter = GeneratorExpLifter(known_globals=known_globals)
     tree = gen_lifter.visit(tree)
     for gen_def in gen_lifter.generators:
         tree.body.append(gen_def)
@@ -1432,17 +1500,21 @@ class AstAnalyzer:
     @staticmethod
     def _is_binary_extension_module(path: Path) -> bool:
         """Determines if a package/module relies on compiled C-extensions (.pyd, .so, .dll)."""
-        root_name = path.stem.lower() if path.is_file() else path.name.lower()
-        if root_name in (
+        parts = [p.lower() for p in path.parts]
+        known = {
             "numpy", "scipy", "matplotlib", "torch", "cv2", "pandas",
             "cryptography", "win32api", "win32gui", "pythoncom", "ctypes",
             "customtkinter", "tkinter", "ttkbootstrap", "pil", "pillow",
             "pygame", "pyqt5", "pyqt6", "pyside6", "pyside2", "flet",
             "fastapi", "uvicorn", "starlette",
             "pyfasm", "pyfasm64", "nanogemm",
-        ):
+        }
+        if any(k in parts for k in known):
             return True
-        if path.is_dir():
+        if path.is_file():
+            if path.suffix.lower() in (".pyd", ".so", ".dll"):
+                return True
+        elif path.is_dir():
             if any(path.glob("*.pyd")) or any(path.glob("*.so")):
                 return True
         return False
@@ -1506,6 +1578,17 @@ class AstAnalyzer:
             return None
 
         parts = mod_name.split(".")
+        top_pkg = parts[0].lower() if parts else ""
+        known_ext = {
+            "numpy", "scipy", "matplotlib", "torch", "cv2", "pandas",
+            "cryptography", "win32api", "win32gui", "pythoncom", "ctypes",
+            "customtkinter", "tkinter", "ttkbootstrap", "pil", "pillow",
+            "pygame", "pyqt5", "pyqt6", "pyside6", "pyside2", "flet",
+            "fastapi", "uvicorn", "starlette",
+            "pyfasm", "pyfasm64", "nanogemm",
+        }
+        if top_pkg in known_ext:
+            return None
         # 1. Try relative to current directory
         cand1 = current_dir.joinpath(*parts).with_suffix(".py")
         if cand1.exists() and cand1.is_file():
