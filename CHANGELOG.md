@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [2.0.2] - 2026-11-21
+
+### Fixed & Enhanced
+- **Win64 Runtime & Stack Safety**:
+  - **`DrawTextW` Buffer Overrun**: Replaced `mov r8d, -1` with `mov r8, -1` across all Win32 GDI text rendering routines, preventing zero-extension to 4.2GB length and resolving Access Violation (`0xC0000005`).
+  - **Registry Stack Parameter Overlap**: Expanded `_pyfasm_is_dark_theme` stack frame to 80 bytes, eliminating an overlap where 6th argument `lpcbData` (`[rsp + 40]`) to `RegQueryValueExA` directly overwrote local `hKey` (`[rbp - 8]`), resolving `STATUS_INVALID_HANDLE (0xC0000008)` on `RegCloseKey`.
+  - **Win64 16-Byte Stack Alignment**: Added shadow space reservation and alignment around `_pyfasm_darkdetect_theme`, `_pyfasm_stringvar_create`, `_pyfasm_list_create`, and `_pyfasm_dict_set`.
+  - **Static ABI Cleanliness**: Removed duplicate `ret` epilogue instructions in `_pyfasm_enumerate`.
+  - **Control HWND Safety**: Added null handle guards in `_pyfasm_set_text` and `_pyfasm_get_edit_text` to protect against early UI property initialization.
+- **Type-Safe Sequence & Collection Operations**:
+  - **List Concatenation Integrity**: Restricted `ast.Add` list concatenation to `(is_left_list and is_right_list)`, preventing invalid dereferencing of numeric/float operands as list pointers.
+  - **List Repetition Type Safety**: Restricted `ast.Mult` sequence repetition to integer multipliers, directing float operations to native `mulsd` floating-point arithmetic.
+  - **`list.extend(...)`**: Added native `list.extend` support for lists, tuples, and automatic desugaring of `ast.GeneratorExp` to list comprehensions.
+  - **Array `tolist()`**: Added native passthrough for `tolist()` and `to_list()` array methods.
+- **NumPy & Math Built-in Parity**:
+  - Added native code generation for `np.arange`, `np.linspace`, `np.empty`, `np.sqrt`, `np.abs`, `np.min`, `np.max`, and `np.ptp`.
+  - Wired hardware `sqrtsd` and IEEE-754 bitwise absolute value for `np.sqrt` and `np.abs`.
+
+---
+
 ## [2.0.1] - 2026-11-21
 
 ### Fixed & Enhanced

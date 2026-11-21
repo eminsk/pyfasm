@@ -1044,7 +1044,7 @@ _pyfasm_is_dark_theme:
     ; HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize -> AppsUseLightTheme
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 48
+    sub     rsp, 80
     and     rsp, -16
 
     mov     ecx, 80000001h                 ; HKEY_CURRENT_USER
@@ -1063,16 +1063,17 @@ _pyfasm_is_dark_theme:
     lea     rdx, [_pyfasm_reg_theme_val]
     xor     r8d, r8d                       ; lpReserved = NULL
     xor     r9d, r9d                       ; lpType = NULL
+    mov     dword [_pyfasm_reg_val_size], 4
     lea     rax, [_pyfasm_reg_val_data]
     mov     [rsp + 32], rax                ; lpData
     lea     rax, [_pyfasm_reg_val_size]
     mov     [rsp + 40], rax                ; lpcbData
     call    [RegQueryValueExA]
 
-    push    rax
+    mov     [rbp - 16], rax
     mov     rcx, [rbp - 8]
     call    [RegCloseKey]
-    pop     rax
+    mov     rax, [rbp - 16]
 
     test    eax, eax
     jnz     .fallback_dark
@@ -3900,6 +3901,43 @@ _pyfasm_list_append:
     mov     rax, rcx
     ret
 
+_pyfasm_list_extend:
+    ; RCX = dest list pointer, RDX = src iterable/list pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    test    rcx, rcx
+    jz      .le_ret
+    test    rdx, rdx
+    jz      .le_ret
+    cmp     rdx, 65536
+    jb      .le_ret
+    mov     rsi, rcx
+    mov     rdi, rdx
+    mov     rbx, [rdi]              ; src len
+    test    rbx, rbx
+    jle     .le_ret
+    xor     ecx, ecx                ; i = 0
+.le_loop:
+    cmp     rcx, rbx
+    jge     .le_ret
+    mov     rdx, [rdi + rcx * 8 + 8]
+    mov     rax, [rsi]
+    mov     [rsi + rax * 8 + 8], rdx
+    inc     qword [rsi]
+    inc     rcx
+    jmp     .le_loop
+.le_ret:
+    mov     rax, rsi
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_insert:
     ; RCX = list pointer
     ; RDX = insertion index (signed 64-bit int)
@@ -3993,9 +4031,87 @@ _pyfasm_bisect_left:
     mov     rax, r8                 ; return lo
     ret
 
+_pyfasm_str_to_char_list:
+    ; RCX = string pointer -> RAX = list of 1-character string pointers
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    mov     r12, rcx
+    test    r12, r12
+    jz      .s2l_empty
+    mov     rcx, r12
+    call    _pyfasm_str_len
+    mov     r13, rax                ; r13 = length in bytes
+    mov     rcx, r13
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = list pointer
+    test    r13, r13
+    jz      .s2l_done
+    xor     r14, r14
+.s2l_loop:
+    cmp     r14, r13
+    jge     .s2l_done
+    movzx   eax, byte [r12 + r14]
+    mov     r15d, 1                 ; default 1 byte
+    cmp     al, 0C0h
+    jb      .s2l_got_len
+    cmp     al, 0E0h
+    jb      .s2l_len2
+    cmp     al, 0F0h
+    jb      .s2l_len3
+    mov     r15d, 4
+    jmp     .s2l_got_len
+.s2l_len2:
+    mov     r15d, 2
+    jmp     .s2l_got_len
+.s2l_len3:
+    mov     r15d, 3
+.s2l_got_len:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    lea     rsi, [r12 + r14]
+    xor     ecx, ecx
+.s2l_copy:
+    cmp     ecx, r15d
+    jge     .s2l_copied
+    mov     r8b, byte [rsi + rcx]
+    mov     byte [rax + rcx], r8b
+    inc     ecx
+    jmp     .s2l_copy
+.s2l_copied:
+    mov     byte [rax + rcx], 0     ; null terminator
+    add     r14, r15
+    mov     rcx, rbx
+    mov     rdx, rax
+    call    _pyfasm_list_append
+    jmp     .s2l_loop
+.s2l_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     rbx, rax
+.s2l_done:
+    mov     rax, rbx
+    lea     rsp, [rbp - 48]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 zip:
 _pyfasm_zip:
-    ; RCX = list a, RDX = list b
+    ; RCX = list a (or str a), RDX = list b (or str b)
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -4004,8 +4120,29 @@ _pyfasm_zip:
     push    r14
     push    r15
     sub     rsp, 40
+    and     rsp, -16
     mov     r12, rcx                ; r12 = list a
     mov     r13, rdx                ; r13 = list b
+    test    r12, r12
+    jz      .zip_a_ready
+    mov     rcx, r12
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .zip_a_ready
+    mov     rcx, r12
+    call    _pyfasm_str_to_char_list
+    mov     r12, rax
+.zip_a_ready:
+    test    r13, r13
+    jz      .zip_b_ready
+    mov     rcx, r13
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .zip_b_ready
+    mov     rcx, r13
+    call    _pyfasm_str_to_char_list
+    mov     r13, rax
+.zip_b_ready:
     xor     r14, r14                ; min_len = 0
     test    r12, r12
     jz      .zip_alloc_empty
@@ -4042,7 +4179,7 @@ _pyfasm_zip:
 
 .zip_ret:
     mov     rax, rbx
-    add     rsp, 40
+    lea     rsp, [rbp - 40]
     pop     r15
     pop     r14
     pop     r13
@@ -4054,7 +4191,7 @@ _pyfasm_zip:
 
 enumerate:
 _pyfasm_enumerate:
-    ; RCX = list a, RDX = start index
+    ; RCX = list a (or str a), RDX = start index
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -4063,8 +4200,19 @@ _pyfasm_enumerate:
     push    r14
     push    r15
     sub     rsp, 40
+    and     rsp, -16
     mov     r12, rcx                ; r12 = list a
     mov     r13, rdx                ; r13 = start index
+    test    r12, r12
+    jz      .enum_ready
+    mov     rcx, r12
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .enum_ready
+    mov     rcx, r12
+    call    _pyfasm_str_to_char_list
+    mov     r12, rax
+.enum_ready:
     xor     r14, r14                ; len = 0
     test    r12, r12
     jz      .enum_alloc_empty
@@ -4088,7 +4236,7 @@ _pyfasm_enumerate:
     mov     rdx, r15
     add     rdx, r13                ; i + start
     mov     [rax + 8], rdx
-    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     rdx, [r12 + r15 * 8 + 8] ; item
     mov     [rax + 16], rdx
     mov     [rbx + r15 * 8 + 8], rax
     inc     r15
@@ -4096,7 +4244,7 @@ _pyfasm_enumerate:
 
 .enum_ret:
     mov     rax, rbx
-    add     rsp, 40
+    lea     rsp, [rbp - 40]
     pop     r15
     pop     r14
     pop     r13
@@ -9188,6 +9336,8 @@ _pyfasm_get_edit_text:
     jnz     .ge_hwnd_ok
     mov     rcx, [_pyfasm_last_edit_hwnd]
 .ge_hwnd_ok:
+    test    rcx, rcx
+    jz      .ge_null_ret
     test    rdx, rdx
     jnz     .ge_buf_ok
     lea     rdx, [_pyfasm_edit_buf]
@@ -9199,6 +9349,11 @@ _pyfasm_get_edit_text:
     mov     [rsp + 32], rdx
     call    [GetWindowTextW]
     mov     rax, [rsp + 32]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.ge_null_ret:
+    lea     rax, [none_str]
     mov     rsp, rbp
     pop     rbp
     ret
@@ -9214,6 +9369,8 @@ _pyfasm_set_text:
     jnz     .st_hwnd_ok
     mov     rcx, [_pyfasm_last_label_hwnd]
 .st_hwnd_ok:
+    test    rcx, rcx
+    jz      .st_ret
     mov     rsi, rcx
     mov     rcx, rdx
     lea     rdx, [_pyfasm_wide_buf]
@@ -9223,6 +9380,7 @@ _pyfasm_set_text:
     mov     rcx, rsi
     lea     rdx, [_pyfasm_wide_buf]
     call    [SetWindowTextW]
+.st_ret:
     lea     rsp, [rbp - 8]
     pop     rsi
     mov     rsp, rbp
@@ -9842,7 +10000,7 @@ _pyfasm_wnd_proc:
     lea     rdx, [wszPillAns3]
 .draw_pill_lbl:
     mov     rcx, [rsi + 32]
-    mov     r8d, -1
+    mov     r8, -1
     mov     eax, dword [rsi + 40]
     add     eax, 12
     mov     dword [_pyfasm_rc_client], eax
@@ -9886,7 +10044,7 @@ _pyfasm_wnd_proc:
     lea     rdx, [wszCard2Meta]
 .draw_card_meta:
     mov     rcx, [rsi + 32]
-    mov     r8d, -1
+    mov     r8, -1
     mov     eax, dword [rsi + 40]
     add     eax, 74
     mov     dword [_pyfasm_rc_client], eax
@@ -9930,7 +10088,7 @@ _pyfasm_wnd_proc:
     lea     rdx, [wszCard2Title]
 .draw_title_str:
     mov     rcx, [rsi + 32]
-    mov     r8d, -1
+    mov     r8, -1
     mov     eax, dword [rsi + 40]
     add     eax, 12
     mov     dword [_pyfasm_rc_client], eax
@@ -9974,7 +10132,7 @@ _pyfasm_wnd_proc:
     lea     rdx, [wszCard2Excerpt]
 .draw_ex_str:
     mov     rcx, [rsi + 32]
-    mov     r8d, -1
+    mov     r8, -1
     mov     eax, dword [rsi + 40]
     add     eax, 12
     mov     dword [_pyfasm_rc_client], eax
@@ -10018,7 +10176,7 @@ _pyfasm_wnd_proc:
     lea     rdx, [wszCard2Tags]
 .draw_tag_str:
     mov     rcx, [rsi + 32]
-    mov     r8d, -1
+    mov     r8, -1
     mov     eax, dword [rsi + 40]
     add     eax, 12
     mov     dword [_pyfasm_rc_client], eax
@@ -10122,7 +10280,7 @@ _pyfasm_wnd_proc:
 
     mov     rcx, [rsi + 32]
     lea     rdx, [_pyfasm_card_text_buf]
-    mov     r8d, -1
+    mov     r8, -1
     lea     r9, [rsi + 40]
     mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
     call    [DrawTextW]
@@ -10177,7 +10335,7 @@ _pyfasm_wnd_proc:
 
     mov     rcx, [rsi + 32]
     lea     rdx, [wszSearchBtnText]
-    mov     r8d, -1
+    mov     r8, -1
     lea     r9, [rsi + 40]          ; rcItem
     mov     qword [rsp + 32], 825h  ; DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX
     call    [DrawTextW]
@@ -10223,7 +10381,7 @@ _pyfasm_wnd_proc:
 
     mov     rcx, [rsi + 32]
     lea     rdx, [wszClearBtnText]
-    mov     r8d, -1
+    mov     r8, -1
     lea     r9, [rsi + 40]
     mov     qword [rsp + 32], 825h
     call    [DrawTextW]
@@ -10269,7 +10427,7 @@ _pyfasm_wnd_proc:
 
     mov     rcx, [rsi + 32]
     lea     rdx, [wszBrandBadge]
-    mov     r8d, -1
+    mov     r8, -1
     lea     r9, [rsi + 40]
     mov     qword [rsp + 32], 825h
     call    [DrawTextW]
@@ -14582,6 +14740,43 @@ _pyfasm_list_append:
     mov     rax, rcx
     ret
 
+_pyfasm_list_extend:
+    ; RCX = dest list pointer, RDX = src iterable/list pointer
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    test    rcx, rcx
+    jz      .le_ret
+    test    rdx, rdx
+    jz      .le_ret
+    cmp     rdx, 65536
+    jb      .le_ret
+    mov     rsi, rcx
+    mov     rdi, rdx
+    mov     rbx, [rdi]              ; src len
+    test    rbx, rbx
+    jle     .le_ret
+    xor     ecx, ecx                ; i = 0
+.le_loop:
+    cmp     rcx, rbx
+    jge     .le_ret
+    mov     rdx, [rdi + rcx * 8 + 8]
+    mov     rax, [rsi]
+    mov     [rsi + rax * 8 + 8], rdx
+    inc     qword [rsi]
+    inc     rcx
+    jmp     .le_loop
+.le_ret:
+    mov     rax, rsi
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_insert:
     ; RCX = list pointer
     ; RDX = insertion index (signed 64-bit int)
@@ -14675,9 +14870,87 @@ _pyfasm_bisect_left:
     mov     rax, r8                 ; return lo
     ret
 
+_pyfasm_str_to_char_list:
+    ; RCX = string pointer -> RAX = list of 1-character string pointers
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 48
+    and     rsp, -16
+    mov     r12, rcx
+    test    r12, r12
+    jz      .s2l_empty
+    mov     rcx, r12
+    call    _pyfasm_str_len
+    mov     r13, rax                ; r13 = length in bytes
+    mov     rcx, r13
+    call    _pyfasm_list_create
+    mov     rbx, rax                ; rbx = list pointer
+    test    r13, r13
+    jz      .s2l_done
+    xor     r14, r14
+.s2l_loop:
+    cmp     r14, r13
+    jge     .s2l_done
+    movzx   eax, byte [r12 + r14]
+    mov     r15d, 1                 ; default 1 byte
+    cmp     al, 0C0h
+    jb      .s2l_got_len
+    cmp     al, 0E0h
+    jb      .s2l_len2
+    cmp     al, 0F0h
+    jb      .s2l_len3
+    mov     r15d, 4
+    jmp     .s2l_got_len
+.s2l_len2:
+    mov     r15d, 2
+    jmp     .s2l_got_len
+.s2l_len3:
+    mov     r15d, 3
+.s2l_got_len:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    lea     rsi, [r12 + r14]
+    xor     ecx, ecx
+.s2l_copy:
+    cmp     ecx, r15d
+    jge     .s2l_copied
+    mov     r8b, byte [rsi + rcx]
+    mov     byte [rax + rcx], r8b
+    inc     ecx
+    jmp     .s2l_copy
+.s2l_copied:
+    mov     byte [rax + rcx], 0     ; null terminator
+    add     r14, r15
+    mov     rcx, rbx
+    mov     rdx, rax
+    call    _pyfasm_list_append
+    jmp     .s2l_loop
+.s2l_empty:
+    xor     ecx, ecx
+    call    _pyfasm_list_create
+    mov     rbx, rax
+.s2l_done:
+    mov     rax, rbx
+    lea     rsp, [rbp - 48]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 zip:
 _pyfasm_zip:
-    ; RCX = list a, RDX = list b
+    ; RCX = list a (or str a), RDX = list b (or str b)
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -14686,8 +14959,29 @@ _pyfasm_zip:
     push    r14
     push    r15
     sub     rsp, 40
+    and     rsp, -16
     mov     r12, rcx                ; r12 = list a
     mov     r13, rdx                ; r13 = list b
+    test    r12, r12
+    jz      .zip_a_ready
+    mov     rcx, r12
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .zip_a_ready
+    mov     rcx, r12
+    call    _pyfasm_str_to_char_list
+    mov     r12, rax
+.zip_a_ready:
+    test    r13, r13
+    jz      .zip_b_ready
+    mov     rcx, r13
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .zip_b_ready
+    mov     rcx, r13
+    call    _pyfasm_str_to_char_list
+    mov     r13, rax
+.zip_b_ready:
     xor     r14, r14                ; min_len = 0
     test    r12, r12
     jz      .zip_alloc_empty
@@ -14724,7 +15018,7 @@ _pyfasm_zip:
 
 .zip_ret:
     mov     rax, rbx
-    add     rsp, 40
+    lea     rsp, [rbp - 40]
     pop     r15
     pop     r14
     pop     r13
@@ -14736,7 +15030,7 @@ _pyfasm_zip:
 
 enumerate:
 _pyfasm_enumerate:
-    ; RCX = list a, RDX = start index
+    ; RCX = list a (or str a), RDX = start index
     push    rbp
     mov     rbp, rsp
     push    rbx
@@ -14745,8 +15039,19 @@ _pyfasm_enumerate:
     push    r14
     push    r15
     sub     rsp, 40
+    and     rsp, -16
     mov     r12, rcx                ; r12 = list a
     mov     r13, rdx                ; r13 = start index
+    test    r12, r12
+    jz      .enum_ready
+    mov     rcx, r12
+    call    _pyfasm_is_utf8_str_ptr
+    test    eax, eax
+    jz      .enum_ready
+    mov     rcx, r12
+    call    _pyfasm_str_to_char_list
+    mov     r12, rax
+.enum_ready:
     xor     r14, r14                ; len = 0
     test    r12, r12
     jz      .enum_alloc_empty
@@ -14770,7 +15075,7 @@ _pyfasm_enumerate:
     mov     rdx, r15
     add     rdx, r13                ; i + start
     mov     [rax + 8], rdx
-    mov     rdx, [r12 + r15 * 8 + 8] ; a[i]
+    mov     rdx, [r12 + r15 * 8 + 8] ; item
     mov     [rax + 16], rdx
     mov     [rbx + r15 * 8 + 8], rax
     inc     r15
@@ -14778,7 +15083,7 @@ _pyfasm_enumerate:
 
 .enum_ret:
     mov     rax, rbx
-    add     rsp, 40
+    lea     rsp, [rbp - 40]
     pop     r15
     pop     r14
     pop     r13

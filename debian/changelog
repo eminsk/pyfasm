@@ -1,3 +1,15 @@
+python3-pyfasm64 (2.0.2-1) stable; urgency=medium
+
+  * Release 2.0.2: Native GUI Runtime Stability, Win64 Stack Safety & NumPy Parity.
+  * Fixed DrawTextW 4GB buffer overrun by replacing 32-bit register writes with 64-bit sign-extended length.
+  * Resolved _pyfasm_is_dark_theme stack overlap on RegQueryValueExA arguments preventing STATUS_INVALID_HANDLE.
+  * Fixed list concatenation to require both operands to be sequences, preventing float dereferencing crashes.
+  * Added native list.extend with generator expression desugaring and array tolist() conversions.
+  * Added native NumPy wrappers for arange, linspace, empty, sqrt, abs, min, max, and ptp.
+  * Added null HWND validation in GUI text routines for uninitialized controls.
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 16:45:00 -0500
+
 python3-pyfasm64 (2.0.1-1) stable; urgency=medium
 
   * Patch Release 2.0.1: Matplotlib native adaptation & strict mode diagnostic parity.

@@ -2207,6 +2207,23 @@ class AstAnalyzer:
                     cls_sym.field_types[fname] = ann_t
                     if isinstance(ann_t, InstanceType):
                         cls_sym.field_classes[fname] = ann_t.class_name
+                if item.value is not None:
+                    val = None
+                    if isinstance(item.value, ast.Constant):
+                        val = item.value.value
+                    cls_sym.class_attrs[fname] = val
+                    global_name = f"{cls_name}_{fname}"
+                    module.global_vars[global_name] = 0
+                    module.global_vars[fname] = 0
+                    if ann_t is None:
+                        vt = self._infer_node_type(item.value, {})
+                        cls_sym.field_types[fname] = vt
+                        if isinstance(vt, InstanceType):
+                            cls_sym.field_classes[fname] = vt.class_name
+                    class_assigns.append(ast.Assign(
+                        targets=[ast.Name(id=global_name, ctx=ast.Store())],
+                        value=item.value
+                    ))
             elif isinstance(item, ast.Assign):
                 for tgt in item.targets:
                     if isinstance(tgt, ast.Name):
