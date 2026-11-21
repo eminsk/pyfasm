@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [2.0.0] - 2026-11-21
+
+### Added
+- **Major Milestone: Next-Generation Native Python Architecture**:
+  - Full authentic AST compilation pipeline with complete removal of legacy template hacks and canvas substitutions.
+  - Complete support for Python 3.14 and 3.15 language features: PEP 695 `type` aliases, generic functions/classes (`def f[T]()`, `class Box[T]`), native `math.sumprod`, `itertools.batched`, and zero-overhead `os.cpu_count()`.
+  - Dynamic host Python version auto-detection (`sys.version`, `sys.version_info`, `sys.platform`, `sys._is_gil_enabled`) and compile-time version branch folding.
+  - Universal framework parity: CustomTkinter, Tkinter, PyQt5/6, Flet, Pygame 2D, and FastAPI Winsock2 HTTP REST.
+  - Beautiful terminal documentation renderer (`pyfasm docs` / `pyfasm docs --ru`) with auto-aligned box-drawing tables and framed code blocks.
+  - Enhanced CLI options: `--gui` / `-w`, `--console` / `-c`, `--python-version` / `--py-ver`, `--optimize` / `-O`, `--verbose` / `-v`.
+  - Modernized showcase suite: 11 comprehensive standalone examples.
+- **Fixed & Hardened Scoping**:
+  - Fixed generator expression and lambda variable capture: isolated lambda parameters, built-in functions (`getattr`, `isinstance`), built-in exceptions (`ValueError`, `TypeError`), and imported module names (`ctk`, `np`, `math`).
+  - Strict external package isolation: prevented recursive traversal into `.venv` for binary extension libraries (`numpy`, `matplotlib`, `scipy`, etc.).
+
+---
+
 ## [1.2.0] - 2026-11-21
 
 ### Added

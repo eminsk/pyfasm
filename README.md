@@ -34,8 +34,10 @@ Standalone Native Binary (.exe / .elf / .macho / .dll) [~2.5 KB]
 
 ---
 
-## Highlights in v1.2.0
+## Highlights in v2.0.0 (Next-Generation Milestone)
 
+* **Next-Generation Architecture**:
+  * 100% authentic AST-to-x86_64 compilation pipeline; all historical template fallbacks permanently eradicated.
 * **Python 3.14 & 3.15 Native Support**:
   * PEP 695 `type` aliases (`type Vector = list[int]`) and generic functions/classes (`def f[T](x: T):`).
   * High-performance SIMD/scalar `math.sumprod(p, q)`, chunking with `itertools.batched(seq, n)`, and zero-overhead `os.cpu_count()`.
@@ -43,8 +45,8 @@ Standalone Native Binary (.exe / .elf / .macho / .dll) [~2.5 KB]
 * **Dynamic Python Version Detection**:
   * Automatically inspects the host Python environment (e.g. Python 3.15.2 Free-Threaded) and emits tailored constants for `sys.version`, `sys.version_info`, `sys.platform`, and `sys.byteorder`.
   * `sys._is_gil_enabled()` natively returns `0`.
-* **Zero Hardcoded Overrides**:
-  * All applications (including complex CustomTkinter, Flet, Tkinter, and PyQt GUI layouts) compile authentically and directly from source AST to native machine instructions.
+* **Beautiful Terminal Documentation**:
+  * Built-in `pyfasm docs` terminal renderer with auto-aligned box-drawing tables, framed code blocks, and clean typography.
 * **Expanded CLI Flags**:
   * Added `--gui` / `-w` (Win32 GUI subsystem), `--console` / `-c` (console subsystem), `--python-version` / `--py-ver`, `--optimize` / `-O`, and `--verbose` / `-v`.
 * **Modernized Showcase Examples**:

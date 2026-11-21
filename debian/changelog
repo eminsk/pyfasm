@@ -1,3 +1,15 @@
+python3-pyfasm64 (2.0.0-1) stable; urgency=medium
+
+  * Major Milestone: Release PyFASM64 2.0.0 (Next-Gen Authentic Compiler & Python 3.15 Parity).
+  * 100% authentic AST-to-x86_64 compilation; all legacy template overrides permanently eradicated.
+  * Native Python 3.14 & 3.15 feature suite: PEP 695 type aliases, generic syntax, math.sumprod, itertools.batched, os.cpu_count.
+  * Dynamic host environment detection: sys.version, sys.version_info, sys.platform, sys._is_gil_enabled, and compile-time version branch folding.
+  * Universal framework parity: CustomTkinter, Tkinter, PyQt5/6, Flet, Pygame, and FastAPI.
+  * Beautiful terminal documentation viewer (pyfasm docs) with auto-aligned box-drawing tables and code frames.
+  * Robust comprehension and generator expression scoping; strict binary extension isolation.
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 15:15:00 -0500
+
 python3-pyfasm64 (1.2.0-1) stable; urgency=medium
 
   * Release PyFASM64 1.2.0 (Python 3.14/3.15 Modern Suite, Dynamic Host Architecture & CLI Overhaul).
