@@ -13,7 +13,7 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 | `int` | Signed 64-bit integer (`int64`) | Floor division (`//`) and modulo (`%`) follow Python sign semantics, not C truncation |
 | `float` | IEEE-754 double (`float64`, SSE2) | Exact bit representation including `-0.0`, `inf`, `-inf`, `nan`; leading fraction zeros preserved in `print()` |
 | `bool` | 64-bit integer (`0` / `1`) | Short-circuiting `and` / `or` and ternary expressions supported |
-| `str` | Null-terminated UTF-8/ASCII buffer pointer | UTF-8 codepoint `len()`, indexing `s[i]`, slicing `s[start:stop:step]`, `+` concatenation, f-strings, Cyrillic/ASCII `.lower()`, `.upper()` (including `Ё`/`ё`), `.strip()`, `.split()`, `.join()`, `.replace()`, `.startswith()`, `.endswith()`, `.count()`, `.removeprefix()`, `.removesuffix()` |
+| `str` | Null-terminated UTF-8/ASCII buffer pointer | UTF-8 codepoint `len()`, indexing `s[i]`, slicing `s[start:stop:step]`, `+` concatenation, f-strings (with `!r` and `:.Nf`/`:N.Mf`/`:x`/`:X`/`:b`/`:o`/`:0Nd`/`:Nd` specifiers on Win64), Cyrillic/ASCII `.lower()`, `.upper()` (including `Ё`/`ё`), `.strip()`, `.split()`, `.join()`, `.replace()`, `.startswith()`, `.endswith()`, `.count()`, `.removeprefix()`, `.removesuffix()` |
 | `list` | Heap buffer `[length, item0, item1, ...]` | Negative indexing, slicing with step, comprehensions, `.append()`, `.insert()`, `.pop()`, `.sort()`, `.count()`, `+`, `*`, `in` |
 | `tuple` | Heap buffer `[length, item0, item1, ...]` | Tuple unpacking, swap `a, b = b, a`, nested unpacking, tuple keys in `dict` |
 | `dict` | Open-addressing hash table (pow2 slots, tombstones `-1`) | `int` (including negative keys like `-1`), `str`, and `tuple` keys; `.get()`, `.pop(k[, default])`, `.keys()`, `.values()`, `.items()`, `in`, `len()`, comprehensions |
@@ -25,7 +25,7 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 ## 2. Functions, Control Flow & Modern Python Syntax
 
 * **Identifiers & Encoding**: Full UTF-8 / Cyrillic / Unicode identifiers for functions, classes, and local/global variables via collision-free hex-encoded FASM labels.
-* **Functions & Closures**: defaults, keyword arguments, recursion (16-byte stack aligned), 0–20+ arguments, real lexical closures (capturing lambdas and nested `def` functions usable directly, indirectly, and with `map()`/`filter()`), first-class functions & lambdas.
+* **Functions & Closures**: defaults, keyword arguments, recursion (16-byte stack aligned), 0–20+ arguments, real lexical closures (capturing lambdas and nested `def` functions including recursive and mutually-recursive nested `def`s, capturing recursive closures, and function-alias type inference, usable directly, indirectly, and with `map()`/`filter()`), first-class functions & lambdas.
 * **Control Flow**: `if`/`elif`/`else`, `while`/`for ... else`, `break`, `continue`, chained comparisons (`0 <= x < 10`), walrus operator (`:=`), `assert`, structural pattern matching (`match`/`case`), `try`/`except`/`finally`/`raise`.
 * **Generators & Comprehensions**: `yield`, `yield from`, generator expressions `(x * 2 for x in seq if ...)`, list/dict/set comprehensions.
 * **No-GIL Multithreading**: `spawn_thread(worker, param)`, `wait_thread(handle)`, `atomic_add(ptr, val)`, `atomic_sub(ptr, val)`, `get_tick_count()`, `sleep_ms(ms)`.
@@ -44,7 +44,7 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
 | Category | Supported in Native Codegen | Not Wired (`W2006` warning / `E2006` in `--strict`) |
 | :--- | :--- | :--- |
 | Lifecycle & Contexts | `__init__`, `__new__`, `__enter__`, `__exit__` | `__del__` |
-| Operators (Binary, Unary & In-Place) | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__floordiv__`, `__mod__`, `__pow__`, `__and__`, `__or__`, `__xor__`, `__lshift__`, `__rshift__`, `__neg__`, `__pos__`, `__invert__`, `__iadd__`..`__ixor__` | Reflected variants (`__radd__`, etc.) |
+| Operators (Binary, Unary & In-Place) | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__floordiv__`, `__mod__`, `__pow__`, `__radd__`, `__rsub__`, `__rmul__`, `__rtruediv__`, `__rfloordiv__`, `__rmod__`, `__and__`, `__or__`, `__xor__`, `__lshift__`, `__rshift__`, `__neg__`, `__pos__`, `__invert__`, `__abs__`, `__iadd__`..`__ixor__` | `__rpow__`, `__rand__`, `__ror__`, `__rxor__` |
 | Comparisons & Truthiness | `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`, `__bool__` | — |
 | Containers, Iteration, Callables & Formatting | `__len__`, `__getitem__`, `__setitem__`, `__contains__`, `__str__`, `__repr__`, `__call__`, `__iter__`, `__next__` (with `StopIteration`) | `__hash__`, `__format__`, `__getattr__`, `__getattribute__`, `__setattr__`, `__delattr__` |
 
@@ -62,9 +62,9 @@ PyFASM64 runs static type inference (`AstAnalyzer` + `X64CodeGen`), defaulting u
    Discovered automatically when they contain pure `.py` modules without compiled `.pyd`/`.so` extensions and use supported Python constructs.
 3. **Built-in / Natively Adapted Modules**:
    * **Stdlib subset**: `math` (`gcd`, `lcm`, `isqrt`, `factorial`), `json` (`json.loads`), `bisect` (`bisect`, `bisect_left`, `bisect_right`), `heapq` (`heappush`, `heappop`, `heapify`, `heapreplace`), `itertools` (`chain`, `accumulate`, `pairwise`), `functools` (`reduce`), `re` (basic match helpers), `with open(...)` file I/O.
-   * **Ecosystem adapters**: `requests.get(...).json()`, `bs4.BeautifulSoup`, `darkdetect` (`isDark()`, `isLight()`, `theme()`), `numpy` (`zeros`, `ones`, `matmul`, `flatnonzero` / NanoGEMM SIMD), native Win32 GUI/tray backends (`tkinter`, `customtkinter`, `pystray`).
+   * **Ecosystem adapters**: `requests.get(...).json()`, `bs4.BeautifulSoup`, `darkdetect` (`isDark()`, `isLight()`, `theme()`), `numpy` (`zeros`, `ones`, `matmul`, `flatnonzero` / NanoGEMM SIMD), native Win32 GUI/tray backends (`tkinter`, `customtkinter`, `PyQt5`, `PyQt6`, `PySide6`, `flet`, `pystray`), native Win32 GDI 2D engine (`pygame`), and native Winsock2 HTTP/1.1 + JSON server (`fastapi`, `uvicorn` with `APIRouter`, path/query/body parameters, await-free `async def` routes, `HTMLResponse`/`PlainTextResponse`/`JSONResponse`, and `/openapi.json`).
 4. **Unsupported External / C-Extension Libraries (`W2005` / `E2005` in `--strict`)**:
-   Frameworks such as `asyncio`, `pandas`, `torch`, `tensorflow`, `scipy`, `matplotlib`, `cv2`, `sqlite3`, `fastapi`, `flask`, `django`, `aiohttp`, `playwright`, `selenium`, `cryptography`, `pydantic`, `multiprocessing`, `subprocess`, `socket`, `datetime`, `decimal`, etc. cannot be AOT-compiled directly into FASM in standalone `compile` mode.
+   Frameworks such as `asyncio`, `pandas`, `torch`, `tensorflow`, `scipy`, `matplotlib`, `cv2`, `sqlite3`, `flask`, `django`, `aiohttp`, `playwright`, `selenium`, `cryptography`, `pydantic`, `multiprocessing`, `subprocess`, `socket`, `datetime`, `decimal`, etc. cannot be AOT-compiled directly into FASM in standalone `compile` mode.
 
 ---
 

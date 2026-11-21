@@ -1,3 +1,14 @@
+python3-pyfasm64 (1.0.0-1) stable; urgency=medium
+
+  * Release PyFASM64 1.0.0 (Production Stable Milestone).
+  * Fixed recursive and mutually-recursive nested def functions (ClosureLifter self/sibling reference lifting) and local function-alias return-type propagation under --strict mode.
+  * Added reflected binary operator dunders (__radd__, __rsub__, __rmul__, __rtruediv__, __rfloordiv__, __rmod__), __abs__ in abs(x), f-string !r conversion, and f-string format specifiers (:.Nf, :N.Mf, :x, :X, :b, :o, :0Nd, :Nd).
+  * Added full native Win64 framework compilation for tkinter, customtkinter, PyQt5, PyQt6, PySide6, and flet (closure WM_COMMAND dispatch, signal .clicked.connect, StringVar, colored Canvas primitives, and Flet page/control reactivity).
+  * Added native Win32 GDI double-buffered 2D game engine runtime for pygame (set_mode, event queue, GetAsyncKeyState, Rect collision/geometry, Clock.tick, SysFont/render/blit).
+  * Added native Win64 Winsock2 HTTP/1.1 + RFC-8259 JSON server runtime for FastAPI & uvicorn (route harvesting, APIRouter/include_router, await-free async def route lowering, path/query/body params with UTF-8 percent-decoding, HTMLResponse/PlainTextResponse/JSONResponse, and /openapi.json).
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 11:45:00 -0500
+
 python3-pyfasm64 (0.4.0-1) stable; urgency=medium
 
   * Release PyFASM64 0.4.0.

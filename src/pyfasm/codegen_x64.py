@@ -168,6 +168,11 @@ class X64CodeGen:
             feats.add("tray")
         if getattr(self.module, "is_keyboard_hook_app", False):
             feats.add("hook")
+        if getattr(self.module, "is_pygame_app", False):
+            feats.add("pygame")
+            feats.add("gui")
+        if getattr(self.module, "is_http_server_app", False):
+            feats.add("http_server")
         if getattr(self.module, "is_http_app", False):
             feats.add("net")
         return feats
@@ -193,9 +198,21 @@ class X64CodeGen:
                 "json": 16,
                 "reason": 24,
                 "content": 8,
+                "type": 32,
+                "key": 40,
+                "x": 48,
+                "left": 48,
+                "y": 56,
+                "top": 56,
+                "w": 64,
+                "width": 64,
+                "h": 72,
+                "height": 72,
             }
+            self._next_attr_offset = 80
         if attr_name not in self._attr_offsets:
-            self._attr_offsets[attr_name] = len(self._attr_offsets) * 8
+            self._attr_offsets[attr_name] = self._next_attr_offset
+            self._next_attr_offset += 8
         return self._attr_offsets[attr_name]
 
     def resolve_class_method(self, cls_name: Optional[str], method_name: str, skip_cls: bool = False) -> Optional[str]:
@@ -535,7 +552,7 @@ class X64CodeGen:
                         arg_idx = auto_idx
                         auto_idx += 1
                     if 0 <= arg_idx < len(args):
-                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1))
+                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1, format_spec=None))
                     i = close_idx + 1
                     last_end = i
                     continue
@@ -564,7 +581,7 @@ class X64CodeGen:
                     if prefix_text:
                         parts.append(ast.Constant(value=prefix_text))
                     if arg_idx < len(args):
-                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1))
+                        parts.append(ast.FormattedValue(value=args[arg_idx], conversion=-1, format_spec=None))
                         arg_idx += 1
                     i += 2
                     last_end = i
@@ -956,23 +973,111 @@ class X64CodeGen:
         self.emit("call _pyfasm_int_to_str")
         self.emit("add rsp, 32")
 
+    def _emit_win64_formatted_value(self, part: ast.FormattedValue) -> None:
+        is_repr = getattr(part, "conversion", -1) == 114
+        spec: Optional[str] = None
+        fmt_spec = getattr(part, "format_spec", None)
+        if (
+            isinstance(fmt_spec, ast.JoinedStr)
+            and len(fmt_spec.values) == 1
+            and isinstance(fmt_spec.values[0], ast.Constant)
+            and isinstance(fmt_spec.values[0].value, str)
+        ):
+            spec = fmt_spec.values[0].value
+
+        if spec:
+            m_float = re.fullmatch(r"(\d+)?\.(\d+)f", spec)
+            if m_float:
+                width = int(m_float.group(1)) if m_float.group(1) else 0
+                prec = int(m_float.group(2))
+                part_type = self._infer_expr_type(part.value)
+                self._generate_expr(part.value)
+                if part_type.is_float():
+                    self.emit("movq xmm0, rax")
+                else:
+                    self.emit("cvtsi2sd xmm0, rax")
+                self.emit(f"mov rdx, {prec}")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_float_to_str_prec")
+                self.emit("add rsp, 32")
+                if width > 0:
+                    self.emit("mov rcx, rax")
+                    self.emit(f"mov rdx, {width}")
+                    self.emit("mov r8d, 32")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_str_pad_left")
+                    self.emit("add rsp, 32")
+                return
+
+            m_int = re.fullmatch(r"(0)?(\d+)?([xXbod])", spec)
+            if m_int:
+                zero_pad = bool(m_int.group(1))
+                width = int(m_int.group(2)) if m_int.group(2) else 0
+                kind = m_int.group(3)
+                base, upper = {"x": (16, 0), "X": (16, 1), "b": (2, 0), "o": (8, 0), "d": (10, 0)}[kind]
+                self._generate_expr(part.value)
+                self.emit("mov rcx, rax")
+                if base == 10:
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_int_to_str")
+                    self.emit("add rsp, 32")
+                else:
+                    self.emit(f"mov rdx, {base}")
+                    self.emit(f"mov r8d, {upper}")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_int_to_base")
+                    self.emit("add rsp, 32")
+                if width > 0:
+                    pad_ord = 48 if zero_pad else 32
+                    self.emit("mov rcx, rax")
+                    self.emit(f"mov rdx, {width}")
+                    self.emit(f"mov r8d, {pad_ord}")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_str_pad_left")
+                    self.emit("add rsp, 32")
+                return
+
+            m_width = re.fullmatch(r"(0)?(\d+)", spec)
+            if m_width:
+                zero_pad = bool(m_width.group(1))
+                width = int(m_width.group(2))
+                part_type = self._infer_expr_type(part.value)
+                self._emit_win64_to_str(part.value, is_repr=is_repr)
+                pad_ord = 48 if (zero_pad and not part_type.is_str()) else 32
+                self.emit("mov rcx, rax")
+                self.emit(f"mov rdx, {width}")
+                self.emit(f"mov r8d, {pad_ord}")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_str_pad_left")
+                self.emit("add rsp, 32")
+                return
+
+        self._emit_win64_to_str(part.value, is_repr=is_repr)
+
     def _generate_fstring_part(self, part: ast.AST) -> None:
         if isinstance(part, ast.Constant):
             self._emit_string_pointer("rax", str(part.value))
         elif isinstance(part, ast.FormattedValue):
             if self.target in ("win64", "dll"):
-                self._emit_win64_to_str(part.value, is_repr=False)
+                self._emit_win64_formatted_value(part)
                 return
+            is_repr = getattr(part, "conversion", -1) == 114
             cls_name = self.resolve_instance_class(part.value)
-            str_m = (
-                self.resolve_class_method(cls_name, "__str__")
-                or self.resolve_class_method(cls_name, "__repr__")
-            ) if cls_name else None
+            if is_repr:
+                str_m = (
+                    self.resolve_class_method(cls_name, "__repr__")
+                    or self.resolve_class_method(cls_name, "__str__")
+                ) if cls_name else None
+            else:
+                str_m = (
+                    self.resolve_class_method(cls_name, "__str__")
+                    or self.resolve_class_method(cls_name, "__repr__")
+                ) if cls_name else None
             if str_m:
                 self._generate_expr(part.value)
                 self.emit("mov rcx, rax", "pass self to __str__")
                 self.emit("sub rsp, 32", "shadow space")
-                self.emit(f"call {self._method_call_target(cls_name, '__str__', str_m)}")
+                self.emit(f"call {self._method_call_target(cls_name, '__repr__' if is_repr else '__str__', str_m)}")
                 self.emit("add rsp, 32")
                 return
 
@@ -991,56 +1096,104 @@ class X64CodeGen:
         else:
             self._generate_expr(part)
 
+    def _parse_color_to_bgr(self, node: Optional[ast.AST]) -> Optional[int]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            raw = node.value.strip().lower()
+            named = {
+                "black": 0x000000,
+                "white": 0xFFFFFF,
+                "red": 0x0000FF,
+                "green": 0x008000,
+                "lime": 0x00FF00,
+                "blue": 0xFF0000,
+                "yellow": 0x00FFFF,
+                "cyan": 0xFFFF00,
+                "aqua": 0xFFFF00,
+                "magenta": 0xFF00FF,
+                "orange": 0x00A5FF,
+                "purple": 0x800080,
+                "gray": 0x808080,
+                "grey": 0x808080,
+            }
+            if raw in named:
+                return named[raw]
+            if raw.startswith("#"):
+                hx = raw[1:]
+                if len(hx) == 3:
+                    hx = "".join(c * 2 for c in hx)
+                if len(hx) == 6:
+                    try:
+                        r = int(hx[0:2], 16)
+                        g = int(hx[2:4], 16)
+                        b = int(hx[4:6], 16)
+                        return (b << 16) | (g << 8) | r
+                    except ValueError:
+                        return None
+        return None
+
+    def _emit_control_callback_to_rax(self, cmd_node: Optional[ast.AST]) -> bool:
+        if cmd_node is None:
+            return False
+        if isinstance(cmd_node, ast.Attribute):
+            attr = cmd_node.attr
+            current_cls = getattr(self.current_func, "class_name", None)
+            cand = f"{current_cls}_{attr}" if current_cls else attr
+            cb_symbol = None
+            if cand in self.module.functions:
+                cb_symbol = cand
+            elif attr in self.module.functions:
+                cb_symbol = attr
+            else:
+                for fn_key in self.module.functions:
+                    if fn_key.endswith(f"_{attr}"):
+                        cb_symbol = fn_key
+                        break
+            if cb_symbol:
+                self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
+                return True
+            return False
+        if isinstance(cmd_node, ast.Name):
+            if self.current_func and hasattr(self.current_func, "local_vars") and cmd_node.id in self.current_func.local_vars:
+                self._generate_expr(cmd_node)
+                return True
+            if cmd_node.id in self.module.functions:
+                self.emit(f"lea rax, [{safe_asm_label(cmd_node.id)}]")
+                return True
+            return False
+        self._generate_expr(cmd_node)
+        return True
+
     def _generate_button_control(self, call: ast.Call, target_name: str) -> None:
-        btn_text = self._get_kwarg_string_val(call, "text")
+        btn_text = (
+            self._get_kwarg_string_val(call, "text")
+            or self._get_kwarg_string_val(call, "label")
+        )
         if not btn_text and call.args:
             first_arg = call.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
                 btn_text = first_arg.value
             elif len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
                 btn_text = call.args[1].value
+        dyn_text_node = None
         if not btn_text:
-            btn_text = "Button"
+            cand = self._extract_kwarg(call, "text") or self._extract_kwarg(call, "label")
+            if cand is None and call.args and self._infer_expr_type(call.args[0]).is_str():
+                cand = call.args[0]
+            if cand is not None:
+                dyn_text_node = cand
+            else:
+                btn_text = "Button"
 
-        cb_symbol = None
-        cmd_node = self._extract_kwarg(call, "command")
-        if cmd_node:
-            if isinstance(cmd_node, ast.Attribute):
-                attr = cmd_node.attr
-                current_cls = getattr(self.current_func, "class_name", None)
-                cand = f"{current_cls}_{attr}" if current_cls else attr
-                if cand in self.module.functions:
-                    cb_symbol = cand
-                elif attr in self.module.functions:
-                    cb_symbol = attr
-                else:
-                    for fn_key in self.module.functions:
-                        if fn_key.endswith(f"_{attr}"):
-                            cb_symbol = fn_key
-                            break
-            elif isinstance(cmd_node, ast.Name):
-                if cmd_node.id in self.module.functions:
-                    cb_symbol = cmd_node.id
-            elif isinstance(cmd_node, ast.Lambda):
-                if isinstance(cmd_node.body, ast.Call) and isinstance(cmd_node.body.func, ast.Attribute):
-                    attr = cmd_node.body.func.attr
-                    current_cls = getattr(self.current_func, "class_name", None)
-                    cand = f"{current_cls}_{attr}" if current_cls else attr
-                    if cand in self.module.functions:
-                        cb_symbol = cand
-                    elif attr in self.module.functions:
-                        cb_symbol = attr
-                    else:
-                        for fn_key in self.module.functions:
-                            if fn_key.endswith(f"_{attr}"):
-                                cb_symbol = fn_key
-                                break
+        cmd_node = self._extract_kwarg(call, "command") or self._extract_kwarg(call, "on_click")
+        has_cb = self._emit_control_callback_to_rax(cmd_node)
+        if has_cb:
+            self.emit("push rax", "save button callback pointer")
 
         btn_id = self.gui_control_id
         self.gui_control_id += 1
 
-        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
-        if is_so:
+        is_so = btn_text is not None and any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
+        if is_so and btn_text is not None:
             lower_txt = btn_text.lower()
             if any(k in lower_txt for k in ("search", "найти")):
                 x, y, w, h = 690, 55, 115, 35
@@ -1060,30 +1213,39 @@ class X64CodeGen:
                 y = 60 + ((btn_id - 1000) // 4) * 45
                 w = 130
                 h = 32
+        else:
+            x, y, w, h = 0, 0, 180, 36
 
-            self._emit_string_pointer("rcx", btn_text)
+        if dyn_text_node is not None:
+            self._generate_expr(dyn_text_node)
+            self.emit("mov rcx, rax", "dynamic button text")
+        else:
+            self._emit_string_pointer("rcx", btn_text or "Button")
+
+        if x or y:
             self.emit(f"mov rdx, {x}")
             self.emit(f"mov r8, {y}")
-            self.emit(f"mov r9, {w}")
         else:
-            w, h = 180, 36
-            self._emit_string_pointer("rcx", btn_text)
             self.emit("xor edx, edx", "auto layout X")
             self.emit("xor r8d, r8d", "auto layout Y")
-            self.emit(f"mov r9, {w}")
+        self.emit(f"mov r9, {w}")
+        if has_cb:
+            self.emit("pop r10", "restore button callback pointer")
         self.emit("sub rsp, 64")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {btn_id}")
-        if cb_symbol:
-            self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
-            self.emit("mov [rsp + 48], rax")
+        if has_cb:
+            self.emit("mov [rsp + 48], r10")
         else:
             self.emit("mov qword [rsp + 48], 0")
         self.emit("call _pyfasm_create_button")
         self.emit("add rsp, 64")
 
     def _generate_checkbox_control(self, call: ast.Call, target_name: str) -> None:
-        chk_text = self._get_kwarg_string_val(call, "text")
+        chk_text = (
+            self._get_kwarg_string_val(call, "text")
+            or self._get_kwarg_string_val(call, "label")
+        )
         if not chk_text and call.args:
             first_arg = call.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
@@ -1093,25 +1255,14 @@ class X64CodeGen:
         if not chk_text:
             chk_text = "Checkbutton"
 
-        cb_symbol = None
-        cmd_node = self._extract_kwarg(call, "command")
-        if cmd_node:
-            if isinstance(cmd_node, ast.Attribute):
-                attr = cmd_node.attr
-                current_cls = getattr(self.current_func, "class_name", None)
-                cand = f"{current_cls}_{attr}" if current_cls else attr
-                if cand in self.module.functions:
-                    cb_symbol = cand
-                elif attr in self.module.functions:
-                    cb_symbol = attr
-                else:
-                    for fn_key in self.module.functions:
-                        if fn_key.endswith(f"_{attr}"):
-                            cb_symbol = fn_key
-                            break
-            elif isinstance(cmd_node, ast.Name):
-                if cmd_node.id in self.module.functions:
-                    cb_symbol = cmd_node.id
+        cmd_node = (
+            self._extract_kwarg(call, "command")
+            or self._extract_kwarg(call, "on_change")
+            or self._extract_kwarg(call, "on_click")
+        )
+        has_cb = self._emit_control_callback_to_rax(cmd_node)
+        if has_cb:
+            self.emit("push rax", "save checkbox callback pointer")
 
         chk_id = self.gui_control_id
         self.gui_control_id += 1
@@ -1121,19 +1272,41 @@ class X64CodeGen:
         self.emit("xor edx, edx", "auto layout X")
         self.emit("xor r8d, r8d", "auto layout Y")
         self.emit(f"mov r9, {w}")
+        if has_cb:
+            self.emit("pop r10", "restore checkbox callback pointer")
         self.emit("sub rsp, 64")
         self.emit(f"mov qword [rsp + 32], {h}")
         self.emit(f"mov qword [rsp + 40], {chk_id}")
-        if cb_symbol:
-            self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
-            self.emit("mov [rsp + 48], rax")
+        if has_cb:
+            self.emit("mov [rsp + 48], r10")
         else:
             self.emit("mov qword [rsp + 48], 0")
         self.emit("call _pyfasm_create_checkbox")
         self.emit("add rsp, 64")
 
+        val_node = self._extract_kwarg(call, "value")
+        if val_node is not None:
+            self.emit("push rax", "save checkbox hwnd")
+            self._generate_expr(val_node)
+            self.emit("mov rdx, rax", "initial checked state")
+            self.emit("mov rcx, [rsp]", "checkbox hwnd")
+            self.emit("sub rsp, 40")
+            self.emit("call _pyfasm_checkbox_set")
+            self.emit("add rsp, 40")
+            self.emit("pop rax", "restore checkbox hwnd")
+
     def _generate_edit_control(self, call: ast.Call, target_name: str) -> None:
-        edit_text = self._get_kwarg_string_val(call, "placeholder_text") or self._get_kwarg_string_val(call, "text") or ""
+        edit_text = (
+            self._get_kwarg_string_val(call, "placeholder_text")
+            or self._get_kwarg_string_val(call, "label")
+            or self._get_kwarg_string_val(call, "text")
+            or self._get_kwarg_string_val(call, "value")
+            or ""
+        )
+        if not edit_text and call.args:
+            first_arg = call.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                edit_text = first_arg.value
         edit_id = self.gui_edit_id
         self.gui_edit_id += 1
 
@@ -1170,18 +1343,28 @@ class X64CodeGen:
         self.emit("add rsp, 64")
 
     def _generate_label_control(self, call: ast.Call, target_name: str) -> None:
-        lbl_text = self._get_kwarg_string_val(call, "text")
+        lbl_text = (
+            self._get_kwarg_string_val(call, "text")
+            or self._get_kwarg_string_val(call, "value")
+        )
         if not lbl_text and call.args:
             first_arg = call.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
                 lbl_text = first_arg.value
             elif len(call.args) > 1 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
                 lbl_text = call.args[1].value
+        dyn_lbl_node = None
         if not lbl_text:
-            lbl_text = "Label"
+            cand = self._extract_kwarg(call, "text") or self._extract_kwarg(call, "value")
+            if cand is None and call.args and self._infer_expr_type(call.args[0]).is_str():
+                cand = call.args[0]
+            if cand is not None:
+                dyn_lbl_node = cand
+            else:
+                lbl_text = "Label"
 
-        is_so = any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
-        if is_so:
+        is_so = lbl_text is not None and any("stackoverflow" in s.lower() for s in getattr(self.module, "classes", {}))
+        if is_so and lbl_text is not None:
             x, y, w, h = 30, 20, 350, 28
             lower_txt = lbl_text.lower()
             if any(k in lower_txt for k in ("ready", "searching", "found", "status")):
@@ -1194,7 +1377,11 @@ class X64CodeGen:
             self.emit(f"mov r9, {w}")
         else:
             w, h = 450, 26
-            self._emit_string_pointer("rcx", lbl_text)
+            if dyn_lbl_node is not None:
+                self._generate_expr(dyn_lbl_node)
+                self.emit("mov rcx, rax", "dynamic label text")
+            else:
+                self._emit_string_pointer("rcx", lbl_text or "Label")
             self.emit("xor edx, edx", "auto layout X")
             self.emit("xor r8d, r8d", "auto layout Y")
             self.emit(f"mov r9, {w}")
@@ -2016,6 +2203,14 @@ include 'functions.inc'
                 for target in stmt.targets:
                     if isinstance(target, ast.Name):
                         self.local_var_classes[target.id] = assigned_cls
+            if isinstance(stmt.value, ast.Call):
+                call_txt = ast.dump(stmt.value.func).lower()
+                if "checkbox" in call_txt or "checkbutton" in call_txt:
+                    if not hasattr(self, "_checkbox_var_names"):
+                        self._checkbox_var_names = set()
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            self._checkbox_var_names.add(target.id)
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     var = self.current_func.local_vars.get(target.id) if self.current_func else None
@@ -2133,6 +2328,32 @@ include 'functions.inc'
                             self.emit("mov [r8 + (r11 + 1) * 8], rax", "store list[idx] = val")
                         self.emit_raw(f"{lbl_skip_store}:")
                 elif isinstance(target, ast.Attribute):
+                    if (
+                        self.target in ("win64", "dll")
+                        and "gui" in self.features
+                        and self.resolve_instance_class(target.value) is None
+                        and not (isinstance(target.value, ast.Name) and target.value.id in ("self", "this"))
+                    ):
+                        if target.attr == "title":
+                            self.emit("mov rcx, rax", "new window title")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit("call _pyfasm_set_window_title")
+                            self.emit("add rsp, 32")
+                            continue
+                        if target.attr == "value" and self.module.has_library("flet"):
+                            is_chk = (
+                                isinstance(target.value, ast.Name)
+                                and target.value.id in getattr(self, "_checkbox_var_names", set())
+                            )
+                            self.emit("push rax", "save new flet control value")
+                            self._generate_expr(target.value)
+                            self.emit("mov rcx, rax", "flet control HWND")
+                            self.emit("pop rdx", "new value")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit(f"call {'_pyfasm_checkbox_set' if is_chk else '_pyfasm_unified_set'}")
+                            self.emit("add rsp, 32")
+                            continue
+
                     # Check if target is a module global attribute (e.g. config.TIMEOUT = 100 or typing._check_generic = ...)
                     mod_name = target.value.id if isinstance(target.value, ast.Name) else None
                     is_mod_or_cls = False
@@ -3100,12 +3321,20 @@ include 'functions.inc'
                 ast.Pow: "__pow__", ast.BitAnd: "__and__", ast.BitOr: "__or__",
                 ast.BitXor: "__xor__", ast.LShift: "__lshift__", ast.RShift: "__rshift__",
             }
+            rbinop_dunders = {
+                ast.Add: "__radd__", ast.Sub: "__rsub__", ast.Mult: "__rmul__",
+                ast.FloorDiv: "__rfloordiv__", ast.Div: "__rtruediv__", ast.Mod: "__rmod__",
+            }
             if type(expr.op) in binop_dunders:
                 lcls = self.resolve_instance_class(expr.left)
-                if lcls:
-                    op_m = self.resolve_class_method(lcls, binop_dunders[type(expr.op)])
-                    if op_m and op_m in self.module.functions and self.module.functions[op_m].return_type != TYPE_VOID:
-                        return self.module.functions[op_m].return_type
+                op_m = self.resolve_class_method(lcls, binop_dunders[type(expr.op)]) if lcls else None
+                if op_m and op_m in self.module.functions and self.module.functions[op_m].return_type != TYPE_VOID:
+                    return self.module.functions[op_m].return_type
+                if not op_m and type(expr.op) in rbinop_dunders:
+                    rcls = self.resolve_instance_class(expr.right)
+                    rop_m = self.resolve_class_method(rcls, rbinop_dunders[type(expr.op)]) if rcls else None
+                    if rop_m and rop_m in self.module.functions and self.module.functions[rop_m].return_type != TYPE_VOID:
+                        return self.module.functions[rop_m].return_type
             lt = self._infer_expr_type(expr.left)
             rt = self._infer_expr_type(expr.right)
             if isinstance(expr.op, ast.Mult) and (lt.is_list() or rt.is_list() or isinstance(expr.left, (ast.List, ast.Tuple)) or isinstance(expr.right, (ast.List, ast.Tuple))):
@@ -3220,12 +3449,32 @@ include 'functions.inc'
                                 element_types=getattr(a0_t, "element_types", None),
                             )
                     return TYPE_TUPLE
+                if fn_id == "abs" and expr.args:
+                    acls = self.resolve_instance_class(expr.args[0])
+                    am = self.resolve_class_method(acls, "__abs__") if acls else None
+                    if am and am in self.module.functions and self.module.functions[am].return_type != TYPE_VOID:
+                        return self.module.functions[am].return_type
+                    if self._infer_expr_type(expr.args[0]).is_float():
+                        return TYPE_FLOAT
+                    return TYPE_INT
+                if self.current_func and hasattr(self.current_func, "local_vars") and fn_id in self.current_func.local_vars:
+                    alias_fn = getattr(self.current_func.local_vars[fn_id], "fn_alias", None)
+                    if alias_fn and alias_fn in self.module.functions and self.module.functions[alias_fn].return_type != TYPE_VOID:
+                        return self.module.functions[alias_fn].return_type
                 if fn_id in self.module.functions:
                     return self.module.functions[fn_id].return_type
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
                 if attr in ("split", "splitlines"):
                     return ListType(element_type=TYPE_STR)
+                if attr in ("text", "toPlainText") and self.module.has_library("pyqt5", "pyqt6", "pyside6", "pyside2", "qt", "tkinter", "customtkinter"):
+                    return TYPE_STR
+                if attr in ("isChecked", "colliderect", "collidepoint"):
+                    return TYPE_BOOL
+                if attr in ("get_pressed", "get") and isinstance(expr.func.value, ast.Attribute) and getattr(expr.func.value, "attr", None) in ("event", "key"):
+                    return TYPE_LIST
+                if attr == "get_pos" and isinstance(expr.func.value, ast.Attribute) and getattr(expr.func.value, "attr", None) == "mouse":
+                    return TYPE_TUPLE
                 if attr in ("matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise", "findall"):
                     if attr in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
@@ -3323,6 +3572,10 @@ include 'functions.inc'
                         if hasattr(cs, "field_types") and expr.attr in cs.field_types:
                             return cs.field_types[expr.attr]
                         fq.extend(cs.bases)
+            if expr.attr == "value" and self.module.has_library("flet") and not self.resolve_instance_class(expr.value):
+                return TYPE_STR
+            if expr.attr in ("right", "bottom", "centerx", "centery", "x", "y", "w", "h", "width", "height", "left", "top", "type", "key"):
+                return TYPE_INT
             if any(k in expr.attr.lower() for k in ("dict", "map", "vars", "entries", "table", "cache", "lookup", "plot", "status", "disc", "modules", "headers", "params", "environ", "cookies", "meta", "registry", "data", "mapping", "config", "state")):
                 return TYPE_DICT
         return TYPE_INT
@@ -3377,6 +3630,8 @@ include 'functions.inc'
             elif expr.id in self.module.functions:
                 safe_fn = safe_asm_label(expr.id)
                 self.emit(f"lea rax, [{safe_fn}]", f"address of {expr.id}")
+            elif "pygame" in self.features and self.target in ("win64", "dll") and self._pygame_const_value(expr.id) is not None:
+                self.emit(f"mov rax, {self._pygame_const_value(expr.id)}", f"pygame constant {expr.id}")
             else:
                 self._record_unresolved(expr.id, expr)
                 self.emit(f"lea rax, [{safe_asm_label(expr.id)}]", f"address of {expr.id}")
@@ -3497,6 +3752,11 @@ include 'functions.inc'
                         elif expr.attr in ("gcd", "lcm", "isqrt", "factorial"):
                             self.emit(f"lea rax, [_pyfasm_math_{expr.attr}]", f"address of {expr.attr}")
                             val_handled = True
+                if not val_handled and "pygame" in self.features and self.target in ("win64", "dll"):
+                    pg_val = self._pygame_const_value(expr.attr)
+                    if pg_val is not None:
+                        self.emit(f"mov rax, {pg_val}", f"pygame constant {expr.attr}")
+                        val_handled = True
                 if not val_handled:
                     self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
             else:
@@ -3518,6 +3778,54 @@ include 'functions.inc'
                     return
                 if expr.attr == "imag":
                     self.emit("xor eax, eax")
+                    return
+                if (
+                    self.target in ("win64", "dll")
+                    and expr.attr == "value"
+                    and self.module.has_library("flet")
+                    and self.resolve_instance_class(expr.value) is None
+                    and not (isinstance(expr.value, ast.Name) and expr.value.id in ("self", "this"))
+                ):
+                    is_chk = (
+                        isinstance(expr.value, ast.Name)
+                        and expr.value.id in getattr(self, "_checkbox_var_names", set())
+                    )
+                    self._generate_expr(expr.value)
+                    self.emit("mov rcx, rax", "flet control HWND")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit(f"call {'_pyfasm_checkbox_get' if is_chk else '_pyfasm_unified_get'}")
+                    self.emit("add rsp, 32")
+                    return
+                if (
+                    "pygame" in self.features
+                    and self.target in ("win64", "dll")
+                    and expr.attr in ("right", "bottom", "centerx", "centery")
+                    and self.resolve_instance_class(expr.value) is None
+                ):
+                    self._generate_expr(expr.value)
+                    self.emit("mov r8, rax", "pygame Rect pointer")
+                    lbl_null_r = self.new_label("null_rect")
+                    lbl_done_r = self.new_label("done_rect")
+                    self.emit("test r8, r8")
+                    self.emit(f"jz {lbl_null_r}")
+                    if expr.attr == "right":
+                        self.emit("mov rax, [r8 + 48]", "rect.x")
+                        self.emit("add rax, [r8 + 64]", "+ rect.w")
+                    elif expr.attr == "bottom":
+                        self.emit("mov rax, [r8 + 56]", "rect.y")
+                        self.emit("add rax, [r8 + 72]", "+ rect.h")
+                    elif expr.attr == "centerx":
+                        self.emit("mov rax, [r8 + 64]", "rect.w")
+                        self.emit("sar rax, 1", "w // 2")
+                        self.emit("add rax, [r8 + 48]", "+ rect.x")
+                    else:
+                        self.emit("mov rax, [r8 + 72]", "rect.h")
+                        self.emit("sar rax, 1", "h // 2")
+                        self.emit("add rax, [r8 + 56]", "+ rect.y")
+                    self.emit(f"jmp {lbl_done_r}")
+                    self.emit_raw(f"{lbl_null_r}:")
+                    self.emit("xor eax, eax")
+                    self.emit_raw(f"{lbl_done_r}:")
                     return
 
                 self._generate_expr(expr.value)
@@ -3590,6 +3898,27 @@ include 'functions.inc'
                     self.emit(f"call {self._method_call_target(cls_name, dunder_name, op_m)}")
                     self.emit("add rsp, 32")
                     return
+                rdunder_map = {
+                    ast.Add: "__radd__",
+                    ast.Sub: "__rsub__",
+                    ast.Mult: "__rmul__",
+                    ast.FloorDiv: "__rfloordiv__",
+                    ast.Div: "__rtruediv__",
+                    ast.Mod: "__rmod__",
+                }
+                if op_cls in rdunder_map:
+                    r_cls = self.resolve_instance_class(expr.right)
+                    r_m = self.resolve_class_method(r_cls, rdunder_map[op_cls]) if r_cls else None
+                    if r_m:
+                        self._generate_expr(expr.left)
+                        self.emit("push rax", "save left as other")
+                        self._generate_expr(expr.right)
+                        self.emit("mov rcx, rax", "pass right as self")
+                        self.emit("pop rdx", "pass left as other")
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit(f"call {self._method_call_target(r_cls, rdunder_map[op_cls], r_m)}")
+                        self.emit("add rsp, 32")
+                        return
 
             if isinstance(expr.op, ast.Mod):
                 if isinstance(expr.left, ast.Constant) and isinstance(expr.left.value, str):
@@ -4805,6 +5134,387 @@ include 'functions.inc'
             self.emit("pop rcx")
             self.emit("pop rbx")
 
+    @staticmethod
+    def _pygame_const_value(name: str) -> Optional[int]:
+        pg_consts = {
+            "QUIT": 256,
+            "KEYDOWN": 768,
+            "KEYUP": 769,
+            "MOUSEMOTION": 1024,
+            "MOUSEBUTTONDOWN": 1025,
+            "MOUSEBUTTONUP": 1026,
+            "K_ESCAPE": 27,
+            "K_SPACE": 32,
+            "K_RETURN": 13,
+            "K_TAB": 9,
+            "K_BACKSPACE": 8,
+            "K_LEFT": 37,
+            "K_UP": 38,
+            "K_RIGHT": 39,
+            "K_DOWN": 40,
+        }
+        if name in pg_consts:
+            return pg_consts[name]
+        if len(name) == 3 and name.startswith("K_"):
+            ch = name[2]
+            if "a" <= ch <= "z" or "0" <= ch <= "9":
+                return ord(ch)
+        return None
+
+    def _try_emit_pygame_call(
+        self, call: ast.Call, func_name: str, attr_name: str, prefix: str
+    ) -> bool:
+        func_dump_lower = ast.dump(call.func).lower()
+
+        if (
+            (attr_name == "init" and ("pygame" in func_dump_lower or prefix in ("pygame", "pg", "font", "mixer")))
+            or func_name in ("pygame_init", "pg_init", "pygame_font_init", "pygame_mixer_init")
+        ):
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_init")
+            self.emit("add rsp, 32")
+            return True
+
+        if (attr_name == "quit" and prefix in ("pygame", "pg")) or func_name in ("pygame_quit", "pg_quit"):
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_quit")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "set_mode" or func_name in ("set_mode", "pygame_display_set_mode"):
+            if len(call.args) >= 2:
+                self.emit("sub rsp, 48", "aligned frame + width slot")
+                self._generate_expr(call.args[0])
+                self.emit("mov [rsp + 32], rax", "save width")
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax", "height")
+                self.emit("mov rcx, [rsp + 32]", "width")
+                self.emit("call _pyfasm_pg_set_mode")
+                self.emit("add rsp, 48")
+            elif len(call.args) == 1:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "size tuple or width")
+                self.emit("xor edx, edx")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_pg_set_mode")
+                self.emit("add rsp, 32")
+            else:
+                self.emit("mov rcx, 800")
+                self.emit("mov rdx, 600")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_pg_set_mode")
+                self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "set_caption" or func_name in ("set_caption", "pygame_display_set_caption"):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "window caption")
+            else:
+                self.emit("xor ecx, ecx")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_set_caption")
+            self.emit("add rsp, 32")
+            return True
+
+        if (
+            attr_name == "flip"
+            or (attr_name == "update" and ("display" in func_dump_lower or prefix == "display"))
+            or func_name in ("flip", "pygame_display_flip", "pygame_display_update")
+        ):
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_flip")
+            self.emit("add rsp, 32")
+            return True
+
+        if (
+            attr_name == "fill"
+            and call.args
+            and isinstance(call.func, ast.Attribute)
+            and not self._infer_expr_type(call.func.value).is_dict()
+            and not self._infer_expr_type(call.func.value).is_list()
+        ):
+            self.emit("sub rsp, 48", "aligned frame + color slot")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "save color")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "surface")
+            self.emit("mov rdx, [rsp + 32]", "color")
+            self.emit("call _pyfasm_pg_fill")
+            self.emit("add rsp, 48")
+            return True
+
+        if ("draw" in func_dump_lower or prefix == "draw") and attr_name in ("rect", "ellipse", "circle", "line"):
+            if attr_name in ("rect", "ellipse") and len(call.args) >= 3:
+                w_node = call.args[3] if len(call.args) >= 4 else self._extract_kwarg(call, "width")
+                self.emit("sub rsp, 80", "aligned frame for 4 args")
+                for i in range(3):
+                    self._generate_expr(call.args[i])
+                    self.emit(f"mov [rsp + {32 + i * 8}], rax")
+                if w_node is not None:
+                    self._generate_expr(w_node)
+                    self.emit("mov r9, rax", "border width")
+                else:
+                    self.emit("xor r9d, r9d", "filled shape")
+                self.emit("mov rcx, [rsp + 32]")
+                self.emit("mov rdx, [rsp + 40]")
+                self.emit("mov r8, [rsp + 48]")
+                fn = "_pyfasm_pg_draw_rect" if attr_name == "rect" else "_pyfasm_pg_draw_ellipse"
+                self.emit(f"call {fn}")
+                self.emit("add rsp, 80")
+                return True
+            if attr_name in ("circle", "line") and len(call.args) >= 4:
+                default_w = 0 if attr_name == "circle" else 1
+                w_node = call.args[4] if len(call.args) >= 5 else self._extract_kwarg(call, "width")
+                self.emit("sub rsp, 80", "aligned frame for 5 args")
+                if w_node is not None:
+                    self._generate_expr(w_node)
+                    self.emit("mov [rsp + 32], rax", "width 5th arg")
+                else:
+                    self.emit(f"mov qword [rsp + 32], {default_w}", "default width")
+                for i in range(4):
+                    self._generate_expr(call.args[i])
+                    self.emit(f"mov [rsp + {40 + i * 8}], rax")
+                self.emit("mov rcx, [rsp + 40]")
+                self.emit("mov rdx, [rsp + 48]")
+                self.emit("mov r8, [rsp + 56]")
+                self.emit("mov r9, [rsp + 64]")
+                fn = "_pyfasm_pg_draw_circle" if attr_name == "circle" else "_pyfasm_pg_draw_line"
+                self.emit(f"call {fn}")
+                self.emit("add rsp, 80")
+                return True
+
+        if attr_name == "get" and ("event" in func_dump_lower or prefix in ("event", "pygame_event")):
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_poll_events")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "pump":
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_pump_messages")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "get_pressed":
+            self.emit("sub rsp, 32", "shadow space")
+            if "mouse" in func_dump_lower:
+                self.emit("call _pyfasm_pg_mouse_get_pressed")
+            else:
+                self.emit("call _pyfasm_pg_get_pressed")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "get_pos" and "mouse" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_mouse_get_pos")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "Clock" or func_name == "Clock":
+            self.emit("mov rax, 1", "pygame Clock handle")
+            return True
+
+        if attr_name == "tick":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rdx, rax", "target FPS")
+            else:
+                self.emit("mov rdx, 60", "default FPS")
+            self.emit("xor ecx, ecx")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_clock_tick")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "get_ticks" or func_name == "get_ticks":
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_get_ticks")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name in ("delay", "wait") and ("time" in func_dump_lower or prefix in ("time", "pygame_time")):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "milliseconds")
+            else:
+                self.emit("xor ecx, ecx")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_delay")
+            self.emit("add rsp, 32")
+            return True
+
+        if (attr_name == "Rect" or func_name in ("Rect", "pygame_Rect", "pg_Rect")) and "Rect" not in self.module.classes:
+            if len(call.args) >= 4:
+                self.emit("sub rsp, 80", "aligned frame for Rect(x, y, w, h)")
+                for i in range(4):
+                    self._generate_expr(call.args[i])
+                    self.emit(f"mov [rsp + {32 + i * 8}], rax")
+                self.emit("mov rcx, [rsp + 32]")
+                self.emit("mov rdx, [rsp + 40]")
+                self.emit("mov r8, [rsp + 48]")
+                self.emit("mov r9, [rsp + 56]")
+                self.emit("call _pyfasm_pg_rect_new")
+                self.emit("add rsp, 80")
+            else:
+                self.emit("xor ecx, ecx")
+                self.emit("xor edx, edx")
+                self.emit("xor r8d, r8d")
+                self.emit("xor r9d, r9d")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_pg_rect_new")
+                self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "colliderect" and call.args and isinstance(call.func, ast.Attribute):
+            self.emit("sub rsp, 48", "aligned frame + other Rect")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "save other Rect")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "self Rect")
+            self.emit("mov rdx, [rsp + 32]", "other Rect")
+            self.emit("call _pyfasm_pg_rect_colliderect")
+            self.emit("add rsp, 48")
+            return True
+
+        if attr_name == "collidepoint" and call.args and isinstance(call.func, ast.Attribute):
+            self.emit("sub rsp, 64", "aligned frame + point slots")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "pos or x")
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov [rsp + 40], rax", "y")
+            else:
+                self.emit("mov qword [rsp + 40], 0")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "Rect")
+            self.emit("mov rdx, [rsp + 32]", "pos or x")
+            self.emit("mov r8, [rsp + 40]", "y")
+            self.emit("call _pyfasm_pg_rect_collidepoint")
+            self.emit("add rsp, 64")
+            return True
+
+        if attr_name in ("SysFont", "Font") or func_name in ("SysFont", "Font"):
+            self.emit("mov rax, 1", "pygame Font handle")
+            return True
+
+        if attr_name == "render" and call.args:
+            self.emit("sub rsp, 48", "aligned frame + text slot")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "save rendered text")
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+                self.emit("mov rdx, rax", "text color")
+            elif len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax", "text color")
+            else:
+                self.emit("mov edx, 00FFFFFFh")
+            self.emit("mov rcx, [rsp + 32]")
+            self.emit("call _pyfasm_pg_font_render")
+            self.emit("add rsp, 48")
+            return True
+
+        if attr_name == "blit" and len(call.args) >= 2 and isinstance(call.func, ast.Attribute):
+            self.emit("sub rsp, 64", "aligned frame + blit args")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "src surface")
+            self._generate_expr(call.args[1])
+            self.emit("mov [rsp + 40], rax", "dest pos/Rect")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "target surface")
+            self.emit("mov rdx, [rsp + 32]", "src")
+            self.emit("mov r8, [rsp + 40]", "dest")
+            self.emit("call _pyfasm_pg_blit")
+            self.emit("add rsp, 64")
+            return True
+
+        return False
+
+    def _try_emit_http_server_call(
+        self, call: ast.Call, func_name: str, attr_name: str, prefix: str
+    ) -> bool:
+        raw_name = attr_name or func_name
+        if raw_name in ("FastAPI", "APIRouter"):
+            self.emit("mov rax, 1", f"native {raw_name} app handle")
+            return True
+
+        if raw_name in ("include_router", "add_middleware", "on_event", "mount", "HTTPException"):
+            self.emit("xor eax, eax", f"native FastAPI setup {raw_name}")
+            return True
+
+        if raw_name in ("HTMLResponse", "PlainTextResponse", "JSONResponse"):
+            content_node = self._extract_kwarg(call, "content") or (call.args[0] if call.args else None)
+            if content_node is not None:
+                self._generate_expr(content_node)
+            else:
+                self.emit("xor eax, eax")
+            return True
+
+        if (
+            attr_name in ("get", "post", "put", "delete", "patch", "head", "options")
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in ("app", "router")
+            and not self._infer_expr_type(call.func.value).is_dict()
+        ):
+            self.emit("xor eax, eax", "FastAPI decorator metadata registered statically")
+            return True
+
+        if (attr_name == "run" and prefix == "uvicorn") or func_name == "uvicorn_run":
+            kind_map = {
+                "auto": 0, "dict": 1, "list": 2, "str": 3,
+                "int": 4, "float": 5, "bool": 6, "html": 7, "text": 8,
+            }
+            for route in getattr(self.module, "http_routes", []):
+                param_names = list(getattr(route, "param_names", []) or [])
+                if param_names:
+                    self.emit(f"mov ecx, {len(param_names) * 8}", "allocate param_names ptr array")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_alloc")
+                    self.emit("add rsp, 32")
+                    self.emit("push rax", "save param_names ptr array")
+                    for idx, pname in enumerate(param_names):
+                        self._emit_string_pointer("rdx", pname)
+                        self.emit("mov rcx, [rsp]", "restore param_names array")
+                        self.emit(f"mov [rcx + {idx * 8}], rdx", f"param '{pname}'")
+                    self.emit("pop rax", "param_names array")
+                    self.emit("sub rsp, 64", "route registration frame")
+                    self.emit(f"mov qword [rsp + 32], {len(param_names)}")
+                    self.emit(f"mov qword [rsp + 40], {int(getattr(route, 'param_int_mask', 0))}")
+                    self.emit("mov [rsp + 48], rax")
+                else:
+                    self.emit("sub rsp, 64", "route registration frame")
+                    self.emit("mov qword [rsp + 32], 0")
+                    self.emit("mov qword [rsp + 40], 0")
+                    self.emit("mov qword [rsp + 48], 0")
+                self._emit_string_pointer("rcx", route.method)
+                self._emit_string_pointer("rdx", route.path)
+                self.emit(f"lea r8, [{safe_asm_label(route.handler_name)}]", f"route handler {route.handler_name}")
+                self.emit(f"mov r9, {kind_map.get(route.return_kind, 0)}", f"return_kind={route.return_kind}")
+                self.emit("call _pyfasm_http_register_route")
+                self.emit("add rsp, 64")
+
+            host_node = self._extract_kwarg(call, "host")
+            port_node = self._extract_kwarg(call, "port")
+            self.emit("sub rsp, 48", "aligned frame + port slot")
+            if port_node is not None:
+                self._generate_expr(port_node)
+                self.emit("mov [rsp + 32], rax", "save listen port")
+            else:
+                self.emit("mov qword [rsp + 32], 8000", "default port 8000")
+            if host_node is not None:
+                self._generate_expr(host_node)
+                self.emit("mov rcx, rax", "host string")
+            else:
+                self.emit("xor ecx, ecx", "default host 127.0.0.1")
+            self.emit("mov rdx, [rsp + 32]", "listen port")
+            self.emit("call _pyfasm_http_server_run")
+            self.emit("add rsp, 48")
+            return True
+
+        return False
+
     def _generate_call(self, call: ast.Call) -> None:
         # String .format(...) method desugaring
         if isinstance(call.func, ast.Attribute) and call.func.attr == "format":
@@ -4949,6 +5659,14 @@ include 'functions.inc'
             self._generate_expr(call.args[0])
             self.emit(f"mov rax, [rax + {(cap_idx + 2) * 8}]", f"load closure capture {cap_idx}")
             return
+
+        if "pygame" in self.features and self.target in ("win64", "dll"):
+            if self._try_emit_pygame_call(call, func_name, attr_name, prefix):
+                return
+
+        if "http_server" in self.features and self.target in ("win64", "dll"):
+            if self._try_emit_http_server_call(call, func_name, attr_name, prefix):
+                return
 
         # Ecosystem adapters (darkdetect, requests, beautifulsoup4)
         if func_name in ("isDark", "is_dark", "darkdetect_isDark") or (attr_name in ("isDark", "is_dark") and prefix == "darkdetect"):
@@ -5274,7 +5992,25 @@ include 'functions.inc'
             return
 
         if attr_name == "close" and isinstance(call.func, ast.Attribute):
-            self._generate_expr(call.func.value)
+            recv = call.func.value
+            recv_name = (getattr(recv, "id", "") or getattr(recv, "attr", "")).lower()
+            if (
+                self.target in ("win64", "dll")
+                and "gui" in self.features
+                and recv_name not in ("f", "fp", "fh", "fout", "fin")
+                and not any(k in recv_name for k in ("file", "stream", "sock", "conn"))
+                and (
+                    any(k in recv_name for k in ("win", "window", "root", "app", "dialog", "page", "main", "frame"))
+                    or recv_name in ("self", "this")
+                )
+            ):
+                self._generate_expr(recv)
+                self.emit("mov rcx, rax", "window handle")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_destroy_window")
+                self.emit("add rsp, 32")
+                return
+            self._generate_expr(recv)
             self.emit("mov rcx, rax", "file handle")
             self.emit("call _pyfasm_file_close")
             return
@@ -5503,10 +6239,24 @@ include 'functions.inc'
 
         # Built-in math & introspection functions
         if func_name == "abs" and call.args:
+            arg0_cls = self.resolve_instance_class(call.args[0])
+            abs_m = self.resolve_class_method(arg0_cls, "__abs__") if arg0_cls else None
+            if abs_m:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "pass self to __abs__")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit(f"call {self._method_call_target(arg0_cls, '__abs__', abs_m)}")
+                self.emit("add rsp, 32")
+                return
+            arg0_t = self._infer_expr_type(call.args[0])
             self._generate_expr(call.args[0])
-            self.emit("cqo")
-            self.emit("xor rax, rdx")
-            self.emit("sub rax, rdx", "branchless abs(rax)")
+            if arg0_t.is_float():
+                self.emit("mov rdx, 7FFFFFFFFFFFFFFFh")
+                self.emit("and rax, rdx", "float abs(rax)")
+            else:
+                self.emit("cqo")
+                self.emit("xor rax, rdx")
+                self.emit("sub rax, rdx", "branchless abs(rax)")
             return
 
         if func_name == "min" and len(call.args) >= 2:
@@ -5594,8 +6344,28 @@ include 'functions.inc'
                 self.emit("add rsp, 32")
             return
 
-        # Safe GUI geometry handling
+        # Native GUI window geometry & resize handling
         if attr_name in ("geometry", "resize", "setFixedSize", "minsize", "maxsize"):
+            if attr_name in ("resize", "setFixedSize") and len(call.args) >= 2 and self.target in ("win64", "dll"):
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "save height")
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "width")
+                self.emit("pop rdx", "height")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_resize_window")
+                self.emit("add rsp, 32")
+                return
+            if attr_name == "geometry" and call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str) and self.target in ("win64", "dll"):
+                m_geo = re.match(r"^\s*(\d+)\s*x\s*(\d+)", call.args[0].value)
+                if m_geo:
+                    w, h = int(m_geo.group(1)), int(m_geo.group(2))
+                    self.emit(f"mov rcx, {w}")
+                    self.emit(f"mov rdx, {h}")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_resize_window")
+                    self.emit("add rsp, 32")
+                    return
             for arg in call.args:
                 self._generate_expr(arg)
             return
@@ -5610,15 +6380,33 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return
 
-        if func_name in ("alert", "message_box") or prefix in ("messagebox", "msgbox") or attr_name in ("showinfo", "showerror", "showwarning"):
-            if len(call.args) >= 2:
-                self._generate_expr(call.args[1])
+        if (
+            func_name in ("alert", "message_box")
+            or prefix in ("messagebox", "msgbox", "qmessagebox")
+            or attr_name in ("showinfo", "showerror", "showwarning", "information", "warning", "critical", "about", "question")
+            and (
+                prefix in ("messagebox", "msgbox", "qmessagebox")
+                or (isinstance(call.func, ast.Attribute) and getattr(call.func.value, "id", "") == "QMessageBox")
+                or attr_name in ("showinfo", "showerror", "showwarning")
+                or func_name in ("alert", "message_box")
+            )
+        ):
+            is_qmsg = prefix == "qmessagebox" or (isinstance(call.func, ast.Attribute) and getattr(call.func.value, "id", "") == "QMessageBox")
+            if is_qmsg and len(call.args) >= 3:
+                title_arg, msg_arg = call.args[1], call.args[2]
+            elif len(call.args) >= 2:
+                title_arg, msg_arg = call.args[0], call.args[1]
+            else:
+                title_arg, msg_arg = None, (call.args[0] if call.args else None)
+
+            if title_arg is not None and msg_arg is not None:
+                self._generate_expr(msg_arg)
                 self.emit("push rax", "message text")
-                self._generate_expr(call.args[0])
+                self._generate_expr(title_arg)
                 self.emit("mov rcx, rax", "title text")
                 self.emit("pop rdx", "message text")
-            elif call.args:
-                self._generate_expr(call.args[0])
+            elif msg_arg is not None:
+                self._generate_expr(msg_arg)
                 self.emit("mov rdx, rax", "message text")
                 self._emit_string_pointer("rcx", "Notice")
             else:
@@ -5649,7 +6437,7 @@ include 'functions.inc'
             matching_method = None
             module_classes = getattr(self.module, "classes", {})
             module_functions = getattr(self.module, "functions", {})
-            
+
             if not is_icon_call:
                 for cls_name in module_classes:
                     candidate = f"{cls_name}_{attr_name}"
@@ -5673,6 +6461,22 @@ include 'functions.inc'
                 self.emit("sub rsp, 32", "shadow space for callee")
                 self.emit(f"call {matching_method}", f"call custom class method {matching_method}")
                 self.emit("add rsp, 32")
+
+            if (
+                attr_name == "show"
+                and not is_icon_call
+                and self.target in ("win64", "dll")
+                and self.module.has_library("pyqt5", "pyqt6", "pyside6", "pyside2", "qt")
+            ):
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "Qt window HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_show_window")
+                self.emit("add rsp, 32")
+                return
 
             # Run the native GUI window or tray loop
             is_tray = (
@@ -5811,6 +6615,30 @@ include 'functions.inc'
                 self.emit("call _pyfasm_unified_set", "set native widget or StringVar value")
                 return
 
+            # Canvas clear: canvas.delete("all")
+            if attr_name == "delete" and call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == "all":
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "canvas HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_canvas_clear")
+                self.emit("add rsp, 32")
+                return
+
+            # GUI window destroy
+            if attr_name == "destroy" and "gui" in self.features:
+                if isinstance(call.func, ast.Attribute):
+                    self._generate_expr(call.func.value)
+                    self.emit("mov rcx, rax", "window HWND")
+                else:
+                    self.emit("xor ecx, ecx")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_destroy_window")
+                self.emit("add rsp, 32")
+                return
+
             # 2. Widget UI methods: .delete() / .clear()
             if attr_name in ("delete", "clear") and (prefix in ("self", "this") or any(k in prefix.lower() for k in ("entry", "search", "filter", "list", "text", "input"))):
                 self.emit("mov rcx, [_pyfasm_last_edit_hwnd]")
@@ -5856,8 +6684,167 @@ include 'functions.inc'
                 self.emit("xor eax, eax", f"safe no-op for GUI configuration '{attr_name}'")
                 return
 
+            # Qt / Tkinter / CustomTkinter / Flet window constructors & widget methods
+            raw_ctor = attr_name or func_name
+            if raw_ctor in ("Tk", "CTk", "QMainWindow", "QDialog", "QWidget") and raw_ctor not in self.module.classes:
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_ensure_window")
+                self.emit("add rsp, 32")
+                self.emit("mov rax, [_pyfasm_h_wnd]", f"return main window handle for {raw_ctor}")
+                return
+
+            if raw_ctor == "QApplication":
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_init_gui")
+                self.emit("add rsp, 32")
+                self.emit("mov rax, [_pyfasm_h_wnd]")
+                return
+
+            if (
+                attr_name == "connect"
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Attribute)
+                and call.func.value.attr in ("clicked", "stateChanged", "toggled", "triggered")
+                and call.args
+            ):
+                if self._emit_control_callback_to_rax(call.args[0]):
+                    self.emit("push rax", "save signal slot callback")
+                    self._generate_expr(call.func.value.value)
+                    self.emit("mov rcx, rax", "control HWND")
+                    self.emit("pop rdx", "callback pointer")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_register_control_callback")
+                    self.emit("add rsp, 32")
+                else:
+                    self.emit("xor eax, eax")
+                return
+
+            if attr_name == "setText" and call.args and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "new widget text")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "widget HWND")
+                self.emit("pop rdx", "new widget text")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_set_text")
+                self.emit("add rsp, 32")
+                return
+
+            if attr_name in ("text", "toPlainText") and len(call.args) == 0 and isinstance(call.func, ast.Attribute) and "gui" in self.features:
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "widget HWND")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_unified_get")
+                self.emit("add rsp, 32")
+                return
+
+            if attr_name == "isChecked" and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "checkbox HWND")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_checkbox_get")
+                self.emit("add rsp, 32")
+                return
+
+            if attr_name == "setChecked" and call.args and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "checked state")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "checkbox HWND")
+                self.emit("pop rdx", "checked state")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_checkbox_set")
+                self.emit("add rsp, 32")
+                return
+
+            if attr_name in ("addItem", "addItems") and call.args and isinstance(call.func, ast.Attribute):
+                self._generate_expr(call.args[0])
+                self.emit("push rax", "item text")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "listbox HWND")
+                self.emit("pop rdx", "item text")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_listbox_add")
+                self.emit("add rsp, 32")
+                return
+
+            if raw_ctor in ("QVBoxLayout", "QHBoxLayout", "QGridLayout", "addWidget", "addLayout", "setLayout", "setCentralWidget"):
+                for arg in call.args:
+                    if isinstance(arg, ast.Call):
+                        self._generate_expr(arg)
+                self.emit("xor eax, eax", f"Qt layout operation {raw_ctor}")
+                return
+
+            if self.module.has_library("flet"):
+                if (attr_name == "app" and prefix in ("ft", "flet")) or func_name == "app":
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_ensure_window")
+                    self.emit("add rsp, 32")
+                    target_node = self._extract_kwarg(call, "target") or (call.args[0] if call.args else None)
+                    if target_node is not None:
+                        if isinstance(target_node, ast.Name) and target_node.id in self.module.functions and not (
+                            self.current_func and hasattr(self.current_func, "local_vars") and target_node.id in self.current_func.local_vars
+                        ):
+                            self.emit("mov rcx, [_pyfasm_h_wnd]", "pass page handle")
+                            self.emit("sub rsp, 32", "shadow space")
+                            self.emit(f"call {safe_asm_label(target_node.id)}")
+                            self.emit("add rsp, 32")
+                        elif self._emit_control_callback_to_rax(target_node):
+                            lbl_plain = self.new_label("ft_plain")
+                            lbl_done = self.new_label("ft_done")
+                            self.emit("test rax, rax")
+                            self.emit(f"jz {lbl_done}")
+                            self.emit("mov r10, 505946434C4F5355h")
+                            self.emit("cmp qword [rax], r10")
+                            self.emit(f"jne {lbl_plain}")
+                            self.emit("mov rcx, rax", "closure env")
+                            self.emit("mov rdx, [_pyfasm_h_wnd]", "pass page handle")
+                            self.emit("sub rsp, 32")
+                            self.emit("call qword [rax + 8]")
+                            self.emit("add rsp, 32")
+                            self.emit(f"jmp {lbl_done}")
+                            self.emit_raw(f"{lbl_plain}:")
+                            self.emit("mov rcx, [_pyfasm_h_wnd]", "pass page handle")
+                            self.emit("sub rsp, 32")
+                            self.emit("call rax")
+                            self.emit("add rsp, 32")
+                            self.emit_raw(f"{lbl_done}:")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_run_window_loop")
+                    self.emit("add rsp, 32")
+                    return
+
+                if attr_name == "update" and isinstance(call.func, ast.Attribute) and not self._infer_expr_type(call.func.value).is_dict():
+                    self.emit("xor ecx, ecx")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_show_window")
+                    self.emit("add rsp, 32")
+                    return
+
+                if (
+                    (attr_name == "add" and isinstance(call.func, ast.Attribute) and not self._infer_expr_type(call.func.value).is_set() and call.args)
+                    or call_name_lower in ("row", "column", "container", "card", "stack")
+                ):
+                    def _emit_flet_children(node: ast.AST) -> None:
+                        if isinstance(node, ast.Call):
+                            self._generate_expr(node)
+                        elif isinstance(node, (ast.List, ast.Tuple)):
+                            for elt in node.elts:
+                                _emit_flet_children(elt)
+                    for arg in call.args:
+                        _emit_flet_children(arg)
+                    ctrl_kw = self._extract_kwarg(call, "controls") or self._extract_kwarg(call, "content")
+                    if ctrl_kw is not None:
+                        _emit_flet_children(ctrl_kw)
+                    self.emit("mov rax, [_pyfasm_h_wnd]", "flet container / page.add")
+                    return
+
             # Canvas 2D Drawing Primitives
             if attr_name == "create_line" and len(call.args) >= 4:
+                bgr = self._parse_color_to_bgr(self._extract_kwarg(call, "fill") or self._extract_kwarg(call, "outline"))
+                if bgr is not None:
+                    self.emit(f"mov ecx, {bgr}", "set canvas BGR color")
+                    self.emit("call _pyfasm_canvas_set_color")
                 self._generate_expr(call.args[3])
                 self.emit("push rax", "y2")
                 self._generate_expr(call.args[2])
@@ -5874,14 +6861,18 @@ include 'functions.inc'
                 self.emit("pop rdx", "x1")
                 self.emit("pop r8", "y1")
                 self.emit("pop r9", "x2")
-                self.emit("sub rsp, 48")
                 self.emit("pop rax", "y2")
+                self.emit("sub rsp, 48")
                 self.emit("mov [rsp + 32], rax")
                 self.emit("call _pyfasm_canvas_create_line")
                 self.emit("add rsp, 48")
                 return
 
             if attr_name == "create_rectangle" and len(call.args) >= 4:
+                bgr = self._parse_color_to_bgr(self._extract_kwarg(call, "fill") or self._extract_kwarg(call, "outline"))
+                if bgr is not None:
+                    self.emit(f"mov ecx, {bgr}", "set canvas BGR color")
+                    self.emit("call _pyfasm_canvas_set_color")
                 self._generate_expr(call.args[3])
                 self.emit("push rax", "y2")
                 self._generate_expr(call.args[2])
@@ -5898,14 +6889,18 @@ include 'functions.inc'
                 self.emit("pop rdx", "x1")
                 self.emit("pop r8", "y1")
                 self.emit("pop r9", "x2")
-                self.emit("sub rsp, 48")
                 self.emit("pop rax", "y2")
+                self.emit("sub rsp, 48")
                 self.emit("mov [rsp + 32], rax")
                 self.emit("call _pyfasm_canvas_create_rectangle")
                 self.emit("add rsp, 48")
                 return
 
             if attr_name == "create_oval" and len(call.args) >= 4:
+                bgr = self._parse_color_to_bgr(self._extract_kwarg(call, "fill") or self._extract_kwarg(call, "outline"))
+                if bgr is not None:
+                    self.emit(f"mov ecx, {bgr}", "set canvas BGR color")
+                    self.emit("call _pyfasm_canvas_set_color")
                 self._generate_expr(call.args[3])
                 self.emit("push rax", "y2")
                 self._generate_expr(call.args[2])
@@ -5922,14 +6917,18 @@ include 'functions.inc'
                 self.emit("pop rdx", "x1")
                 self.emit("pop r8", "y1")
                 self.emit("pop r9", "x2")
-                self.emit("sub rsp, 48")
                 self.emit("pop rax", "y2")
+                self.emit("sub rsp, 48")
                 self.emit("mov [rsp + 32], rax")
                 self.emit("call _pyfasm_canvas_create_oval")
                 self.emit("add rsp, 48")
                 return
 
             if attr_name == "create_text" and len(call.args) >= 2:
+                bgr = self._parse_color_to_bgr(self._extract_kwarg(call, "fill"))
+                if bgr is not None:
+                    self.emit(f"mov ecx, {bgr}", "set canvas BGR text color")
+                    self.emit("call _pyfasm_canvas_set_color")
                 text_val = None
                 for kw in getattr(call, "keywords", []):
                     if kw.arg == "text":
@@ -5997,12 +6996,12 @@ include 'functions.inc'
                 return
 
             # 9. Text entries / edit boxes
-            if any(k in call_name_lower for k in ("ctkentry", "lineedit", "textinput", "entry")) or ("entry" in func_dump_lower and "dict" not in func_dump_lower):
+            if any(k in call_name_lower for k in ("ctkentry", "lineedit", "textinput", "textfield", "qtextedit", "entry")) or ("entry" in func_dump_lower and "dict" not in func_dump_lower):
                 self._generate_edit_control(call, call_name_lower)
                 return
 
             # 10. Static labels
-            if any(k in call_name_lower for k in ("ctklabel", "qlabel", "statictext", "label")) or "label" in func_dump_lower:
+            if any(k in call_name_lower for k in ("ctklabel", "qlabel", "statictext", "label")) or "label" in func_dump_lower or (call_name_lower == "text" and self.module.has_library("flet")):
                 self._generate_label_control(call, call_name_lower)
                 return
 

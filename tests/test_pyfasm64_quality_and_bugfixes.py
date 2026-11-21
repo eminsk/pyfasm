@@ -201,6 +201,8 @@ def test_runtime_static_abi_epilogue_and_clobbers():
         ("WIN64_FULL", runtime_win64._get_win64_full_runtime_code()),
         ("WIN64_CONSOLE", runtime_win64._WIN64_CONSOLE_RUNTIME_CODE),
         ("WIN64_NET", runtime_win64._WIN64_NET_RUNTIME_CODE),
+        ("WIN64_CONSOLE_HELPERS", runtime_win64.get_win64_runtime_code(set())),
+        ("WIN64_ALL_FEATURES", runtime_win64.get_win64_runtime_code({"gui", "pygame", "http_server"})),
         ("LINUX", runtime_linux.get_linux_runtime_code()),
         ("MACOS", runtime_macos.get_macos_runtime_code()),
     ]

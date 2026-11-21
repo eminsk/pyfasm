@@ -127,6 +127,11 @@ section '.data' data readable writeable
     _pyfasm_ctrl_ids        rd 128
     align 8
     _pyfasm_ctrl_callbacks  rq 128
+    align 8
+    _pyfasm_ctrl_hwnds      rq 128
+    align 8
+    _pyfasm_canvas_color    dd 0FFFFFFFFh
+    _pyfasm_canvas_color_pad dd 0
 
     ; Static Buffers
     align 8
@@ -8445,16 +8450,16 @@ _pyfasm_create_button:
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    ; Register button callback if provided
-    mov     r9, [rsp + 120]
-    test    r9, r9
-    jz      .skip_btn_cb_reg
+    ; Register control id, hwnd, and optional button callback
     mov     rcx, [_pyfasm_ctrl_count]
     cmp     rcx, 128
     jge     .skip_btn_cb_reg
     mov     r8, [rsp + 112]
+    mov     r9, [rsp + 120]
     mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
     mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
+    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     qword [_pyfasm_ctrl_hwnds + rcx*8], rax
     inc     qword [_pyfasm_ctrl_count]
 .skip_btn_cb_reg:
 
@@ -8534,16 +8539,16 @@ _pyfasm_create_checkbox:
     mov     rcx, rax
     call    _pyfasm_apply_font
 
-    ; Register checkbox callback if provided
-    mov     r9, [rsp + 120]
-    test    r9, r9
-    jz      .skip_chk_cb_reg
+    ; Register control id, hwnd, and optional checkbox callback
     mov     rcx, [_pyfasm_ctrl_count]
     cmp     rcx, 128
     jge     .skip_chk_cb_reg
     mov     r8, [rsp + 112]
+    mov     r9, [rsp + 120]
     mov     dword [_pyfasm_ctrl_ids + rcx*4], r8d
     mov     qword [_pyfasm_ctrl_callbacks + rcx*8], r9
+    mov     rax, [_pyfasm_last_btn_hwnd]
+    mov     qword [_pyfasm_ctrl_hwnds + rcx*8], rax
     inc     qword [_pyfasm_ctrl_count]
 .skip_chk_cb_reg:
 
@@ -8683,7 +8688,7 @@ _pyfasm_canvas_create_line:
     ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 96
+    sub     rsp, 112
     and     rsp, -16
     test    rcx, rcx
     jnz     .ccl_h_ok
@@ -8699,7 +8704,24 @@ _pyfasm_canvas_create_line:
     test    rax, rax
     jz      .ccl_ret
     mov     [rsp + 56], rax     ; hdc
+    mov     qword [rsp + 40], 0 ; new pen
+    mov     qword [rsp + 48], 0 ; old pen
 
+    mov     r8d, dword [_pyfasm_canvas_color]
+    cmp     r8d, -1
+    je      .ccl_draw
+    xor     ecx, ecx
+    mov     edx, 2
+    call    [CreatePen]
+    test    rax, rax
+    jz      .ccl_draw
+    mov     [rsp + 40], rax
+    mov     rcx, [rsp + 56]
+    mov     rdx, rax
+    call    [SelectObject]
+    mov     [rsp + 48], rax
+
+.ccl_draw:
     ; MoveToEx(hdc, x1, y1, NULL)
     mov     rcx, [rsp + 56]
     mov     rdx, [rsp + 72]
@@ -8713,6 +8735,17 @@ _pyfasm_canvas_create_line:
     mov     r8, [rbp + 48]
     call    [LineTo]
 
+    mov     rdx, [rsp + 48]
+    test    rdx, rdx
+    jz      .ccl_delpen
+    mov     rcx, [rsp + 56]
+    call    [SelectObject]
+.ccl_delpen:
+    mov     rcx, [rsp + 40]
+    test    rcx, rcx
+    jz      .ccl_reldc
+    call    [DeleteObject]
+.ccl_reldc:
     ; ReleaseDC(hwnd, hdc)
     mov     rcx, [rsp + 64]
     mov     rdx, [rsp + 56]
@@ -8728,7 +8761,7 @@ _pyfasm_canvas_create_rectangle:
     ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 96
+    sub     rsp, 128
     and     rsp, -16
     test    rcx, rcx
     jnz     .ccr_h_ok
@@ -8744,7 +8777,36 @@ _pyfasm_canvas_create_rectangle:
     test    rax, rax
     jz      .ccr_ret
     mov     [rsp + 56], rax     ; hdc
+    mov     qword [rsp + 96], 0
+    mov     qword [rsp + 104], 0
+    mov     qword [rsp + 112], 0
+    mov     qword [rsp + 120], 0
 
+    mov     ecx, dword [_pyfasm_canvas_color]
+    cmp     ecx, -1
+    je      .ccr_draw
+    call    [CreateSolidBrush]
+    test    rax, rax
+    jz      .ccr_pen
+    mov     [rsp + 96], rax
+    mov     rcx, [rsp + 56]
+    mov     rdx, rax
+    call    [SelectObject]
+    mov     [rsp + 104], rax
+.ccr_pen:
+    xor     ecx, ecx
+    mov     edx, 1
+    mov     r8d, dword [_pyfasm_canvas_color]
+    call    [CreatePen]
+    test    rax, rax
+    jz      .ccr_draw
+    mov     [rsp + 112], rax
+    mov     rcx, [rsp + 56]
+    mov     rdx, rax
+    call    [SelectObject]
+    mov     [rsp + 120], rax
+
+.ccr_draw:
     ; Rectangle(hdc, left, top, right, bottom)
     mov     rcx, [rsp + 56]
     mov     rdx, [rsp + 72]
@@ -8754,6 +8816,28 @@ _pyfasm_canvas_create_rectangle:
     mov     [rsp + 32], rax
     call    [Rectangle]
 
+    mov     rdx, [rsp + 120]
+    test    rdx, rdx
+    jz      .ccr_restb
+    mov     rcx, [rsp + 56]
+    call    [SelectObject]
+.ccr_restb:
+    mov     rdx, [rsp + 104]
+    test    rdx, rdx
+    jz      .ccr_delp
+    mov     rcx, [rsp + 56]
+    call    [SelectObject]
+.ccr_delp:
+    mov     rcx, [rsp + 112]
+    test    rcx, rcx
+    jz      .ccr_delb
+    call    [DeleteObject]
+.ccr_delb:
+    mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .ccr_reldc
+    call    [DeleteObject]
+.ccr_reldc:
     ; ReleaseDC(hwnd, hdc)
     mov     rcx, [rsp + 64]
     mov     rdx, [rsp + 56]
@@ -8769,7 +8853,7 @@ _pyfasm_canvas_create_oval:
     ; RCX = hwnd, RDX = x1, R8 = y1, R9 = x2, [rbp+48] = y2
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 96
+    sub     rsp, 128
     and     rsp, -16
     test    rcx, rcx
     jnz     .cco_h_ok
@@ -8785,7 +8869,36 @@ _pyfasm_canvas_create_oval:
     test    rax, rax
     jz      .cco_ret
     mov     [rsp + 56], rax     ; hdc
+    mov     qword [rsp + 96], 0
+    mov     qword [rsp + 104], 0
+    mov     qword [rsp + 112], 0
+    mov     qword [rsp + 120], 0
 
+    mov     ecx, dword [_pyfasm_canvas_color]
+    cmp     ecx, -1
+    je      .cco_draw
+    call    [CreateSolidBrush]
+    test    rax, rax
+    jz      .cco_pen
+    mov     [rsp + 96], rax
+    mov     rcx, [rsp + 56]
+    mov     rdx, rax
+    call    [SelectObject]
+    mov     [rsp + 104], rax
+.cco_pen:
+    xor     ecx, ecx
+    mov     edx, 1
+    mov     r8d, dword [_pyfasm_canvas_color]
+    call    [CreatePen]
+    test    rax, rax
+    jz      .cco_draw
+    mov     [rsp + 112], rax
+    mov     rcx, [rsp + 56]
+    mov     rdx, rax
+    call    [SelectObject]
+    mov     [rsp + 120], rax
+
+.cco_draw:
     ; Ellipse(hdc, left, top, right, bottom)
     mov     rcx, [rsp + 56]
     mov     rdx, [rsp + 72]
@@ -8795,6 +8908,28 @@ _pyfasm_canvas_create_oval:
     mov     [rsp + 32], rax
     call    [Ellipse]
 
+    mov     rdx, [rsp + 120]
+    test    rdx, rdx
+    jz      .cco_restb
+    mov     rcx, [rsp + 56]
+    call    [SelectObject]
+.cco_restb:
+    mov     rdx, [rsp + 104]
+    test    rdx, rdx
+    jz      .cco_delp
+    mov     rcx, [rsp + 56]
+    call    [SelectObject]
+.cco_delp:
+    mov     rcx, [rsp + 112]
+    test    rcx, rcx
+    jz      .cco_delb
+    call    [DeleteObject]
+.cco_delb:
+    mov     rcx, [rsp + 96]
+    test    rcx, rcx
+    jz      .cco_reldc
+    call    [DeleteObject]
+.cco_reldc:
     ; ReleaseDC(hwnd, hdc)
     mov     rcx, [rsp + 64]
     mov     rdx, [rsp + 56]
@@ -8837,6 +8972,13 @@ _pyfasm_canvas_create_text:
     mov     rcx, [rsp + 56]
     mov     edx, 1              ; TRANSPARENT
     call    [SetBkMode]
+
+    mov     edx, dword [_pyfasm_canvas_color]
+    cmp     edx, -1
+    je      .cct_text_draw
+    mov     rcx, [rsp + 56]
+    call    [SetTextColor]
+.cct_text_draw:
 
     ; TextOutW(hdc, x, y, wide_buf, len)
     mov     rcx, [rsp + 56]
@@ -9856,6 +9998,17 @@ _pyfasm_wnd_proc:
     mov     rax, [_pyfasm_ctrl_callbacks + rcx*8]
     test    rax, rax
     jz      .check_stock_cmds
+    mov     r10, 505946434C4F5355h
+    cmp     qword [rax], r10
+    jne     .cmd_plain_cb
+    mov     rcx, rax
+    xor     edx, edx
+    sub     rsp, 32
+    call    qword [rax + 8]
+    add     rsp, 32
+    xor     eax, eax
+    jmp     .wnd_proc_ret
+.cmd_plain_cb:
     mov     rcx, [_pyfasm_last_gui_instance]
     sub     rsp, 32
     call    rax
@@ -10884,7 +11037,15 @@ section '.idata' import data readable writeable
            GetCursorPos, 'GetCursorPos', \\
            ActivateKeyboardLayout, 'ActivateKeyboardLayout', \\
            GetDC, 'GetDC', \\
-           ReleaseDC, 'ReleaseDC'
+           ReleaseDC, 'ReleaseDC', \\
+           PeekMessageW, 'PeekMessageW', \\
+           GetAsyncKeyState, 'GetAsyncKeyState', \\
+           ScreenToClient, 'ScreenToClient', \\
+           DestroyWindow, 'DestroyWindow', \\
+           AdjustWindowRectEx, 'AdjustWindowRectEx', \\
+           InvalidateRect, 'InvalidateRect', \\
+           BeginPaint, 'BeginPaint', \\
+           EndPaint, 'EndPaint'
 
     import gdi32, \\
            CreateSolidBrush, 'CreateSolidBrush', \\
@@ -10901,7 +11062,11 @@ section '.idata' import data readable writeable
            LineTo, 'LineTo', \\
            Rectangle, 'Rectangle', \\
            Ellipse, 'Ellipse', \\
-           TextOutW, 'TextOutW'
+           TextOutW, 'TextOutW', \\
+           CreateCompatibleDC, 'CreateCompatibleDC', \\
+           CreateCompatibleBitmap, 'CreateCompatibleBitmap', \\
+           BitBlt, 'BitBlt', \\
+           DeleteDC, 'DeleteDC'
 
     import shell32, \\
            Shell_NotifyIconW, 'Shell_NotifyIconW', \\
@@ -17922,34 +18087,805 @@ section '.idata' import data readable writeable
 """
 
 
+_WIN64_FORMAT_SPEC_HELPERS_ASM = """
+_pyfasm_int_to_base:
+    ; RCX = value (int64), RDX = base (2..16), R8 = uppercase (0/1) -> RAX = heap str
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 128
+    and     rsp, -16
+
+    cmp     rdx, 2
+    jl      .itb_base10
+    cmp     rdx, 16
+    jle     .itb_base_ok
+.itb_base10:
+    mov     edx, 10
+.itb_base_ok:
+    mov     rbx, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    mov     qword [rsp + 112], 0
+    test    rbx, rbx
+    jns     .itb_abs
+    mov     qword [rsp + 112], 1
+    neg     rbx
+.itb_abs:
+    lea     rdi, [rsp + 110]
+    test    rbx, rbx
+    jnz     .itb_div_loop
+    mov     byte [rdi], '0'
+    dec     rdi
+    jmp     .itb_sign
+.itb_div_loop:
+    test    rbx, rbx
+    jz      .itb_sign
+    mov     rax, rbx
+    xor     edx, edx
+    div     r12
+    mov     rbx, rax
+    cmp     dl, 10
+    jl      .itb_digit
+    sub     dl, 10
+    test    r13, r13
+    jnz     .itb_upper
+    add     dl, 'a'
+    jmp     .itb_store
+.itb_upper:
+    add     dl, 'A'
+    jmp     .itb_store
+.itb_digit:
+    add     dl, '0'
+.itb_store:
+    mov     byte [rdi], dl
+    dec     rdi
+    jmp     .itb_div_loop
+.itb_sign:
+    cmp     qword [rsp + 112], 0
+    je      .itb_alloc
+    mov     byte [rdi], '-'
+    dec     rdi
+.itb_alloc:
+    inc     rdi
+    lea     rsi, [rsp + 111]
+    mov     r12, rsi
+    sub     r12, rdi
+    mov     rsi, rdi
+    lea     rcx, [r12 + 1]
+    call    _pyfasm_alloc
+    xor     ecx, ecx
+.itb_cpy:
+    cmp     rcx, r12
+    jge     .itb_nul
+    mov     dl, [rsi + rcx]
+    mov     [rax + rcx], dl
+    inc     rcx
+    jmp     .itb_cpy
+.itb_nul:
+    mov     byte [rax + rcx], 0
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_str_pad_left:
+    ; RCX = str_ptr, RDX = min_width (int64), R8 = pad_char (byte) -> RAX = heap str
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 48
+    and     rsp, -16
+
+    mov     rbx, rcx
+    mov     r12, rdx
+    mov     r13, r8
+    xor     esi, esi
+    test    rbx, rbx
+    jz      .spl_len_ok
+    mov     rcx, rbx
+    call    _pyfasm_str_len
+    mov     rsi, rax
+.spl_len_ok:
+    cmp     rsi, r12
+    jl      .spl_need_pad
+    test    rbx, rbx
+    jz      .spl_empty_alloc
+    mov     rax, rbx
+    jmp     .spl_ret
+.spl_empty_alloc:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    jmp     .spl_ret
+.spl_need_pad:
+    mov     rcx, r12
+    inc     rcx
+    call    _pyfasm_alloc
+    mov     rdi, rax
+    mov     [rsp + 32], rax
+    mov     rcx, r12
+    sub     rcx, rsi
+    mov     rdx, rbx
+    cmp     r13b, '0'
+    jne     .spl_write_pad
+    test    rsi, rsi
+    jz      .spl_write_pad
+    mov     al, [rdx]
+    cmp     al, '-'
+    je      .spl_copy_sign
+    cmp     al, '+'
+    jne     .spl_write_pad
+.spl_copy_sign:
+    mov     [rdi], al
+    inc     rdi
+    inc     rdx
+    dec     rsi
+.spl_write_pad:
+    test    rcx, rcx
+    jle     .spl_copy_rest
+    mov     [rdi], r13b
+    inc     rdi
+    dec     rcx
+    jmp     .spl_write_pad
+.spl_copy_rest:
+    test    rsi, rsi
+    jle     .spl_finish
+    mov     al, [rdx]
+    mov     [rdi], al
+    inc     rdx
+    inc     rdi
+    dec     rsi
+    jmp     .spl_copy_rest
+.spl_finish:
+    mov     byte [rdi], 0
+    mov     rax, [rsp + 32]
+.spl_ret:
+    lea     rsp, [rbp - 40]
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_float_to_str_prec:
+    ; XMM0 = double val, RDX = precision (int64) -> RAX = heap str
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 144
+    and     rsp, -16
+
+    movq    [rsp + 120], xmm0
+    mov     r12, rdx
+    test    r12, r12
+    jns     .fp_p_max
+    xor     r12d, r12d
+.fp_p_max:
+    cmp     r12, 12
+    jle     .fp_p_ok
+    mov     r12, 12
+.fp_p_ok:
+    movq    rax, xmm0
+    xor     r14d, r14d
+    bt      rax, 63
+    jnc     .fp_pos
+    mov     r14d, 1
+    btr     rax, 63
+.fp_pos:
+    mov     rcx, rax
+    shr     rcx, 52
+    cmp     rcx, 1072
+    jae     .fp_fallback
+    mov     r13, 1
+    mov     rcx, r12
+.fp_pow_loop:
+    test    rcx, rcx
+    jz      .fp_pow_done
+    imul    r13, r13, 10
+    dec     rcx
+    jmp     .fp_pow_loop
+.fp_pow_done:
+    movq    xmm0, rax
+    cvtsi2sd xmm1, r13
+    mulsd   xmm0, xmm1
+    movq    rax, xmm0
+    mov     rcx, rax
+    shr     rcx, 52
+    cmp     rcx, 1085
+    jae     .fp_fallback
+    mov     rax, 3FE0000000000000h
+    movq    xmm2, rax
+    addsd   xmm0, xmm2
+    movq    rax, xmm0
+    mov     rcx, rax
+    shr     rcx, 52
+    cmp     rcx, 1085
+    jae     .fp_fallback
+    cvttsd2si rbx, xmm0
+
+    mov     rax, rbx
+    xor     edx, edx
+    div     r13
+    mov     rbx, rax            ; int_part
+    mov     rsi, rdx            ; frac_part
+
+    lea     rdi, [rsp + 110]
+    test    r12, r12
+    jz      .fp_int_part
+    mov     rcx, r12
+    mov     r8d, 10
+.fp_frac_loop:
+    mov     rax, rsi
+    xor     edx, edx
+    div     r8
+    mov     rsi, rax
+    add     dl, '0'
+    mov     [rdi], dl
+    dec     rdi
+    dec     rcx
+    jnz     .fp_frac_loop
+    mov     byte [rdi], '.'
+    dec     rdi
+.fp_int_part:
+    test    rbx, rbx
+    jnz     .fp_int_loop
+    mov     byte [rdi], '0'
+    dec     rdi
+    jmp     .fp_sign
+.fp_int_loop:
+    test    rbx, rbx
+    jz      .fp_sign
+    mov     rax, rbx
+    xor     edx, edx
+    mov     r8d, 10
+    div     r8
+    mov     rbx, rax
+    add     dl, '0'
+    mov     [rdi], dl
+    dec     rdi
+    jmp     .fp_int_loop
+.fp_sign:
+    test    r14d, r14d
+    jz      .fp_alloc
+    mov     byte [rdi], '-'
+    dec     rdi
+.fp_alloc:
+    inc     rdi
+    lea     rcx, [rsp + 111]
+    sub     rcx, rdi
+    mov     r12, rcx
+    mov     rsi, rdi
+    inc     rcx
+    call    _pyfasm_alloc
+    xor     ecx, ecx
+.fp_cpy:
+    cmp     rcx, r12
+    jge     .fp_nul
+    mov     dl, [rsi + rcx]
+    mov     [rax + rcx], dl
+    inc     rcx
+    jmp     .fp_cpy
+.fp_nul:
+    mov     byte [rax + rcx], 0
+    jmp     .fp_ret
+.fp_fallback:
+    movq    xmm0, [rsp + 120]
+    call    _pyfasm_float_to_str
+.fp_ret:
+    lea     rsp, [rbp - 48]
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+"""
+
+_WIN64_GUI_EXTRA_HELPERS_ASM = """
+_pyfasm_register_control_callback:
+    ; RCX = hwnd, RDX = callback ptr
+    push    rbp
+    mov     rbp, rsp
+    test    rcx, rcx
+    jz      .rcc_done
+    mov     r9, [_pyfasm_ctrl_count]
+    xor     r8d, r8d
+.rcc_loop:
+    cmp     r8, r9
+    jge     .rcc_done
+    cmp     [_pyfasm_ctrl_hwnds + r8*8], rcx
+    jne     .rcc_next
+    mov     [_pyfasm_ctrl_callbacks + r8*8], rdx
+    jmp     .rcc_done
+.rcc_next:
+    inc     r8
+    jmp     .rcc_loop
+.rcc_done:
+    xor     eax, eax
+    pop     rbp
+    ret
+
+_pyfasm_checkbox_get:
+    ; RCX = hwnd -> RAX = 1 if checked else 0
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .cbg_ok
+    xor     eax, eax
+    jmp     .cbg_ret
+.cbg_ok:
+    mov     edx, 00F0h          ; BM_GETCHECK
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageW]
+    cmp     eax, 1
+    sete    al
+    movzx   eax, al
+.cbg_ret:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_checkbox_set:
+    ; RCX = hwnd, RDX = checked (bool)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .cbs_ret
+    xor     r8d, r8d
+    test    rdx, rdx
+    setne   r8b
+    mov     edx, 00F1h          ; BM_SETCHECK
+    xor     r9d, r9d
+    call    [SendMessageW]
+.cbs_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_resize_window:
+    ; RCX = width, RDX = height
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 64
+    and     rsp, -16
+    mov     r8, [_pyfasm_h_wnd]
+    test    r8, r8
+    jz      .rw_ret
+    mov     [rsp + 32], rcx
+    mov     [rsp + 40], rdx
+    mov     qword [rsp + 48], 6 ; SWP_NOMOVE | SWP_NOZORDER
+    mov     rcx, r8
+    xor     edx, edx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SetWindowPos]
+.rw_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_show_window:
+    ; RCX = hwnd (or 0 -> [_pyfasm_h_wnd])
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .sw_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.sw_ok:
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .sw_ret
+    mov     rcx, rbx
+    mov     edx, 5              ; SW_SHOW
+    call    [ShowWindow]
+    mov     rcx, rbx
+    call    [UpdateWindow]
+.sw_ret:
+    xor     eax, eax
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_destroy_window:
+    ; RCX = hwnd (or 0 -> [_pyfasm_h_wnd])
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .dw_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.dw_ok:
+    test    rcx, rcx
+    jz      .dw_ret
+    call    [DestroyWindow]
+.dw_ret:
+    xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_set_color:
+    ; RCX = COLORREF (0x00BBGGRR or -1 for default)
+    mov     dword [_pyfasm_canvas_color], ecx
+    xor     eax, eax
+    ret
+
+_pyfasm_is_stringvar:
+    ; RCX = candidate pointer -> RAX = 1 if valid heap StringVar ('PYFSVAR!'), else 0
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 96
+    and     rsp, -16
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .isv_no
+    cmp     rsi, 65536
+    jb      .isv_no
+    mov     rax, 00007FFFFFFF0000h
+    cmp     rsi, rax
+    jae     .isv_no
+    mov     rcx, rsi
+    lea     rdx, [rsp + 32]
+    mov     r8d, 48
+    call    [VirtualQuery]
+    test    rax, rax
+    jz      .isv_no
+    cmp     dword [rsp + 64], 1000h     ; MEM_COMMIT
+    jne     .isv_no
+    mov     eax, dword [rsp + 68]
+    test    eax, 100h
+    jnz     .isv_no
+    test    eax, 0EEh
+    jz      .isv_no
+    mov     rax, [rsp + 32]
+    add     rax, [rsp + 56]
+    sub     rax, rsi
+    cmp     rax, 16
+    jb      .isv_no
+    mov     rax, 5059465356415221h      ; 'PYFSVAR!'
+    cmp     qword [rsi], rax
+    jne     .isv_no
+    mov     eax, 1
+    jmp     .isv_ret
+.isv_no:
+    xor     eax, eax
+.isv_ret:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_wide_to_utf8:
+    ; RCX = wide_src -> RAX = heap null-terminated UTF-8 string
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 96
+    and     rsp, -16
+    mov     rsi, rcx
+    test    rsi, rsi
+    jz      .w2u_empty
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     ecx, 65001                  ; CP_UTF8
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, -1
+    call    [WideCharToMultiByte]
+    mov     rbx, rax
+    test    rbx, rbx
+    jle     .w2u_empty
+    lea     rcx, [rbx + 1]
+    call    _pyfasm_alloc
+    mov     [rsp + 64], rax
+    mov     [rsp + 32], rax
+    mov     [rsp + 40], rbx
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     ecx, 65001
+    xor     edx, edx
+    mov     r8, rsi
+    mov     r9d, -1
+    call    [WideCharToMultiByte]
+    mov     rax, [rsp + 64]
+    jmp     .w2u_ret
+.w2u_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+.w2u_ret:
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_stringvar_create:
+    ; RCX = initial value ptr (or 0) -> RAX = StringVar ptr
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jnz     .svc_has
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     rbx, rax
+.svc_has:
+    mov     ecx, 16
+    call    _pyfasm_alloc
+    mov     rdx, 5059465356415221h
+    mov     [rax], rdx
+    mov     [rax + 8], rbx
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_unified_get:
+    ; RCX = StringVar or HWND -> RAX = UTF-8 string value
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    test    rbx, rbx
+    jnz     .ug_chk
+    mov     rbx, [_pyfasm_last_edit_hwnd]
+.ug_chk:
+    mov     rcx, rbx
+    call    _pyfasm_is_stringvar
+    test    eax, eax
+    jz      .ug_hwnd
+    mov     rax, [rbx + 8]
+    jmp     .ug_ret
+.ug_hwnd:
+    test    rbx, rbx
+    jz      .ug_empty
+    mov     rcx, rbx
+    lea     rdx, [_pyfasm_wide_buf]
+    mov     r8d, 1024
+    call    [GetWindowTextW]
+    lea     rcx, [_pyfasm_wide_buf]
+    call    _pyfasm_wide_to_utf8
+    jmp     .ug_ret
+.ug_empty:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+.ug_ret:
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_unified_set:
+    ; RCX = StringVar or HWND, RDX = UTF-8 string value
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 48
+    and     rsp, -16
+    mov     rbx, rcx
+    mov     rsi, rdx
+    test    rbx, rbx
+    jnz     .us_chk
+    mov     rbx, [_pyfasm_last_label_hwnd]
+.us_chk:
+    mov     rcx, rbx
+    call    _pyfasm_is_stringvar
+    test    eax, eax
+    jz      .us_hwnd
+    test    rsi, rsi
+    jnz     .us_sv_store
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     rsi, rax
+.us_sv_store:
+    mov     [rbx + 8], rsi
+    xor     eax, eax
+    jmp     .us_ret
+.us_hwnd:
+    test    rbx, rbx
+    jz      .us_ret
+    mov     rcx, rbx
+    mov     rdx, rsi
+    call    _pyfasm_set_text
+.us_ret:
+    xor     eax, eax
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_canvas_clear:
+    ; RCX = hwnd (or 0 -> [_pyfasm_h_wnd])
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 96
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .cc_h_ok
+    mov     rcx, [_pyfasm_h_wnd]
+.cc_h_ok:
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .cc_ret
+    lea     rdx, [rsp + 64]
+    call    [GetClientRect]
+    mov     rcx, rbx
+    call    [GetDC]
+    test    rax, rax
+    jz      .cc_ret
+    mov     rsi, rax
+    mov     r8, [_pyfasm_hbr_bg]
+    test    r8, r8
+    jnz     .cc_fill
+    mov     ecx, 4              ; BLACK_BRUSH
+    call    [GetStockObject]
+    mov     r8, rax
+.cc_fill:
+    mov     rcx, rsi
+    lea     rdx, [rsp + 64]
+    call    [FillRect]
+    mov     rcx, rbx
+    mov     rdx, rsi
+    call    [ReleaseDC]
+    mov     rcx, rbx
+    xor     edx, edx
+    mov     r8d, 1
+    call    [InvalidateRect]
+.cc_ret:
+    xor     eax, eax
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+"""
+
+_WIN64_WS2_32_IMPORT_BLOCK = """
+    import ws2_32, \\
+           WSAStartup, 'WSAStartup', \\
+           WSACleanup, 'WSACleanup', \\
+           socket, 'socket', \\
+           setsockopt, 'setsockopt', \\
+           inet_addr, 'inet_addr', \\
+           htons, 'htons', \\
+           bind, 'bind', \\
+           listen, 'listen', \\
+           accept, 'accept', \\
+           recv, 'recv', \\
+           send, 'send', \\
+           closesocket, 'closesocket'
+"""
+
+
+def _append_ws2_32_imports(idata: str) -> str:
+    head, tail = idata.lstrip("\n").split("\n\n", 1)
+    head = head.rstrip() + ", \\\n            ws2_32, 'WS2_32.DLL'"
+    return "\n" + head + "\n\n" + tail.rstrip() + "\n" + _WIN64_WS2_32_IMPORT_BLOCK
+
+
 def get_win64_runtime_data(features: Optional[Set[str]] = None) -> str:
     """Returns runtime data structures (buffers, handles, constants)."""
-    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook", "pygame"))
     needs_net = features is None or "net" in features
+    needs_pygame = features is not None and "pygame" in features
+    needs_http = features is not None and "http_server" in features
+
     if not needs_gui:
+        data = _WIN64_CONSOLE_RUNTIME_DATA
         if needs_net:
-            return _WIN64_CONSOLE_RUNTIME_DATA + "\n" + _WIN64_NET_RUNTIME_DATA
-        return _WIN64_CONSOLE_RUNTIME_DATA
-    return _get_win64_full_runtime_data()
+            data += "\n" + _WIN64_NET_RUNTIME_DATA
+    else:
+        data = _get_win64_full_runtime_data()
+
+    if needs_pygame:
+        from .runtime_win64_pygame import WIN64_PYGAME_RUNTIME_DATA
+        data += "\n" + WIN64_PYGAME_RUNTIME_DATA
+    if needs_http:
+        from .runtime_win64_http import WIN64_HTTP_RUNTIME_DATA
+        data += "\n" + WIN64_HTTP_RUNTIME_DATA
+    return data
 
 
 def get_win64_runtime_code(features: Optional[Set[str]] = None) -> str:
     """Returns native assembly routines with strict 16-byte stack alignment."""
-    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook", "pygame"))
     needs_net = features is None or "net" in features
+    needs_pygame = features is not None and "pygame" in features
+    needs_http = features is not None and "http_server" in features
+
     if not needs_gui:
+        code = _WIN64_CONSOLE_RUNTIME_CODE
         if needs_net:
-            return _WIN64_CONSOLE_RUNTIME_CODE + "\n" + _WIN64_NET_RUNTIME_CODE
-        return _WIN64_CONSOLE_RUNTIME_CODE
-    return _get_win64_full_runtime_code()
+            code += "\n" + _WIN64_NET_RUNTIME_CODE
+        code += "\n" + _WIN64_FORMAT_SPEC_HELPERS_ASM
+    else:
+        code = _get_win64_full_runtime_code() + "\n" + _WIN64_FORMAT_SPEC_HELPERS_ASM + "\n" + _WIN64_GUI_EXTRA_HELPERS_ASM
+
+    if needs_pygame:
+        from .runtime_win64_pygame import WIN64_PYGAME_RUNTIME_CODE
+        code += "\n" + WIN64_PYGAME_RUNTIME_CODE
+    if needs_http:
+        from .runtime_win64_http import WIN64_HTTP_RUNTIME_CODE
+        code += "\n" + WIN64_HTTP_RUNTIME_CODE
+    return code
 
 
 def get_win64_runtime_imports(features: Optional[Set[str]] = None) -> str:
     """Returns the IData section with Win32 API imports."""
-    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook"))
+    needs_gui = features is None or any(f in features for f in ("gui", "tray", "hook", "pygame"))
     needs_net = features is None or "net" in features
+    needs_http = features is not None and "http_server" in features
+
     if not needs_gui:
-        if needs_net:
-            return _WIN64_NET_RUNTIME_IMPORTS
-        return _WIN64_CONSOLE_RUNTIME_IMPORTS
-    return _get_win64_full_runtime_imports()
+        idata = _WIN64_NET_RUNTIME_IMPORTS if needs_net else _WIN64_CONSOLE_RUNTIME_IMPORTS
+    else:
+        idata = _get_win64_full_runtime_imports()
+
+    if needs_http:
+        idata = _append_ws2_32_imports(idata)
+    return idata

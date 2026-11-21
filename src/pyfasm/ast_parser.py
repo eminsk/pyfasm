@@ -38,6 +38,7 @@ class VariableSymbol:
     arg_index: int = 0
     is_generator: bool = False
     is_dynamic: bool = False
+    fn_alias: Optional[str] = None
 
 
 @dataclass
@@ -94,6 +95,16 @@ class FloatLiteral:
 
 
 @dataclass
+class HttpRouteSpec:
+    method: str
+    path: str
+    handler_name: str
+    return_kind: str = "auto"
+    param_names: List[str] = field(default_factory=list)
+    param_int_mask: int = 0
+
+
+@dataclass
 class ParsedModule:
     functions: Dict[str, FunctionSymbol] = field(default_factory=dict)
     classes: Dict[str, ClassSymbol] = field(default_factory=dict)
@@ -109,6 +120,7 @@ class ParsedModule:
     module_inits: List[str] = field(default_factory=list)
     diagnostics: List[CompilerDiagnostic] = field(default_factory=list)
     source_files: Dict[str, str] = field(default_factory=dict)
+    http_routes: List[HttpRouteSpec] = field(default_factory=list)
 
     def has_library(self, *names: str) -> bool:
         """Check if any of the specified library names is installed in project or imported."""
@@ -133,7 +145,18 @@ class ParsedModule:
 
     @property
     def is_modern_gui(self) -> bool:
-        return self.has_library("customtkinter", "tkinter", "ctk", "flet", "textual", "qt", "pyqt5", "pyqt6", "pyside6") or any("app" in s.lower() or "gui" in s.lower() or "window" in s.lower() for s in self.classes)
+        return self.has_library(
+            "customtkinter", "tkinter", "ttkbootstrap", "ctk", "flet", "textual",
+            "qt", "pyqt5", "pyqt6", "pyside6", "pyside2",
+        ) or any("app" in s.lower() or "gui" in s.lower() or "window" in s.lower() for s in self.classes)
+
+    @property
+    def is_pygame_app(self) -> bool:
+        return self.has_library("pygame")
+
+    @property
+    def is_http_server_app(self) -> bool:
+        return self.has_library("fastapi", "uvicorn", "starlette") or bool(self.http_routes)
 
     @property
     def is_http_app(self) -> bool:
@@ -371,6 +394,76 @@ class ChainedCompareTransformer(ast.NodeTransformer):
         )
 
 
+class _RewriteNestedRefs(ast.NodeTransformer):
+    """Rewrites direct calls/references inside lifted nested functions and recursive closures."""
+
+    def __init__(
+        self,
+        nested_rename: Dict[str, str],
+        closure_self_name: Optional[str] = None,
+        closure_lifted_name: Optional[str] = None,
+        shadowed: Optional[Set[str]] = None,
+    ):
+        self.nested_rename = nested_rename
+        self.closure_self_name = closure_self_name
+        self.closure_lifted_name = closure_lifted_name
+        self.shadowed = set(shadowed or ())
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        return node
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        own_args: Set[str] = set()
+        for a in getattr(node.args, "posonlyargs", []):
+            own_args.add(a.arg)
+        for a in node.args.args:
+            own_args.add(a.arg)
+        for a in getattr(node.args, "kwonlyargs", []):
+            own_args.add(a.arg)
+        if node.args.vararg:
+            own_args.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            own_args.add(node.args.kwarg.arg)
+        sub = _RewriteNestedRefs(
+            self.nested_rename,
+            closure_self_name=self.closure_self_name,
+            closure_lifted_name=self.closure_lifted_name,
+            shadowed=self.shadowed | own_args,
+        )
+        node.body = sub.visit(node.body)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        node.args = [self.visit(a) for a in node.args]
+        node.keywords = [ast.keyword(arg=k.arg, value=self.visit(k.value)) for k in node.keywords]
+        if (
+            self.closure_self_name
+            and self.closure_lifted_name
+            and isinstance(node.func, ast.Name)
+            and node.func.id == self.closure_self_name
+            and node.func.id not in self.shadowed
+        ):
+            new_call = ast.Call(
+                func=ast.Name(id=self.closure_lifted_name, ctx=ast.Load()),
+                args=[ast.Name(id="_pyfasm_env", ctx=ast.Load())] + list(node.args),
+                keywords=node.keywords,
+            )
+            return ast.copy_location(new_call, node)
+        node.func = self.visit(node.func)
+        return node
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id not in self.shadowed:
+            if node.id in self.nested_rename:
+                return ast.copy_location(ast.Name(id=self.nested_rename[node.id], ctx=ast.Load()), node)
+            if self.closure_self_name and node.id == self.closure_self_name:
+                return ast.copy_location(ast.Name(id="_pyfasm_env", ctx=ast.Load()), node)
+        return node
+
+
 class ClosureLifter(ast.NodeTransformer):
     """Lifts anonymous lambdas and nested functions to top-level definitions with lexical closure capture."""
 
@@ -379,6 +472,7 @@ class ClosureLifter(ast.NodeTransformer):
         self.lambdas: List[ast.FunctionDef] = []
         self.counter: int = 0
         self.scope_stack: List[Set[str]] = []
+        self._nested_rename_stack: List[Dict[str, str]] = []
 
     @staticmethod
     def _collect_target_names(target: ast.AST, out: Set[str]) -> None:
@@ -479,6 +573,63 @@ class ClosureLifter(ast.NodeTransformer):
         self.generic_visit(node)
         return node
 
+    @staticmethod
+    def _own_arg_names(args: ast.arguments) -> Set[str]:
+        own: Set[str] = set()
+        for a in getattr(args, "posonlyargs", []):
+            own.add(a.arg)
+        for a in args.args:
+            own.add(a.arg)
+        for a in getattr(args, "kwonlyargs", []):
+            own.add(a.arg)
+        if args.vararg:
+            own.add(args.vararg.arg)
+        if args.kwarg:
+            own.add(args.kwarg.arg)
+        return own
+
+    def _active_nested_renames(self) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
+        for d in self._nested_rename_stack:
+            merged.update(d)
+        return merged
+
+    def _preassign_pure_siblings(self, fn_node: ast.FunctionDef, fn_bound: Set[str]) -> Dict[str, str]:
+        direct_defs: List[ast.FunctionDef] = []
+        for s in fn_node.body:
+            if isinstance(s, ast.FunctionDef) and not s.decorator_list:
+                is_gen = any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in walk_local_scope(s))
+                if not is_gen:
+                    direct_defs.append(s)
+        if not direct_defs:
+            return {}
+        sibling_names = {s.name for s in direct_defs}
+        enclosing_non_sib = (self._enclosing_vars() | fn_bound) - sibling_names
+        pure: Set[str] = set(sibling_names)
+        changed = True
+        while changed:
+            changed = False
+            for s in direct_defs:
+                if s.name not in pure:
+                    continue
+                sb = self._collect_fn_bound_names(s)
+                sl = self._collect_loaded_names(list(s.body))
+                sc = self._collect_comp_and_walrus_names(s)
+                free = sl - sb - sc - {s.name}
+                if free & enclosing_non_sib:
+                    pure.discard(s.name)
+                    changed = True
+                    continue
+                if any(ref in sibling_names and ref not in pure for ref in free):
+                    pure.discard(s.name)
+                    changed = True
+        pre: Dict[str, str] = {}
+        for s in direct_defs:
+            if s.name in pure:
+                self.counter += 1
+                pre[s.name] = f"_pyfasm_nested_{self.counter}"
+        return pre
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         is_nested = len(self.scope_stack) > 0
         if is_nested:
@@ -487,11 +638,20 @@ class ClosureLifter(ast.NodeTransformer):
                 return node
 
         fn_bound = self._collect_fn_bound_names(node)
+        active_top = self._active_nested_renames() if is_nested else {}
+        pre_siblings = self._preassign_pure_siblings(node, fn_bound)
+
         self.scope_stack.append(fn_bound)
+        self._nested_rename_stack.append(pre_siblings)
         try:
             self.generic_visit(node)
         finally:
+            self._nested_rename_stack.pop()
             self.scope_stack.pop()
+
+        if pre_siblings:
+            rewriter = _RewriteNestedRefs(pre_siblings, shadowed=self._own_arg_names(node.args))
+            node.body = [rewriter.visit(st) for st in node.body]
 
         if not is_nested:
             return node
@@ -499,16 +659,23 @@ class ClosureLifter(ast.NodeTransformer):
         enclosing = self._enclosing_vars()
         loaded = self._collect_loaded_names(list(node.body))
         comp_bound = self._collect_comp_and_walrus_names(node)
-        free = loaded - fn_bound - comp_bound - {node.name}
+        free = loaded - fn_bound - comp_bound - {node.name} - set(active_top.keys())
         captured = sorted(n for n in free if n in enclosing)
 
-        self.counter += 1
         if not captured:
-            lifted_name = f"_pyfasm_nested_{self.counter}"
+            if node.name in active_top:
+                lifted_name = active_top[node.name]
+            else:
+                self.counter += 1
+                lifted_name = f"_pyfasm_nested_{self.counter}"
+            self_rename = dict(active_top)
+            self_rename[node.name] = lifted_name
+            rewriter = _RewriteNestedRefs(self_rename, shadowed=self._own_arg_names(node.args))
+            rewritten_body = [rewriter.visit(st) for st in node.body]
             lifted_fn = ast.FunctionDef(
                 name=lifted_name,
                 args=node.args,
-                body=list(node.body),
+                body=rewritten_body,
                 decorator_list=[],
                 returns=node.returns,
                 lineno=getattr(node, "lineno", 1),
@@ -521,6 +688,7 @@ class ClosureLifter(ast.NodeTransformer):
             )
             return ast.copy_location(assign, node)
 
+        self.counter += 1
         lifted_name = f"_pyfasm_closure_{self.counter}"
         preamble: List[ast.stmt] = [
             ast.Assign(
@@ -533,10 +701,17 @@ class ClosureLifter(ast.NodeTransformer):
             )
             for idx, cap_name in enumerate(captured)
         ]
+        rewriter = _RewriteNestedRefs(
+            active_top,
+            closure_self_name=node.name,
+            closure_lifted_name=lifted_name,
+            shadowed=self._own_arg_names(node.args) | set(captured),
+        )
+        rewritten_body = [rewriter.visit(st) for st in node.body]
         lifted_fn = ast.FunctionDef(
             name=lifted_name,
             args=self._make_closure_args(node.args),
-            body=preamble + list(node.body),
+            body=preamble + rewritten_body,
             decorator_list=[],
             returns=node.returns,
             lineno=getattr(node, "lineno", 1),
@@ -1133,6 +1308,7 @@ class AstAnalyzer:
             module.diagnostics.append(from_syntax_error(e, file_path="<source>", source_text=source_code))
             return module
 
+        pending_routes = self._prepare_fastapi_routes_in_tree(tree, mod_prefix="")
         self._validate_ast_tree(tree, module, "<source>", source_code, current_dir=self.project_root)
         tree = preprocess_ast(tree)
 
@@ -1160,6 +1336,7 @@ class AstAnalyzer:
         self._current_source_file = "<source>"
         try:
             self._extract_top_level_and_functions(tree, module, is_entry=True, mod_prefix="")
+            self._finalize_http_routes(pending_routes, module, mod_prefix_pre="")
             self._propagate_generator_types(module)
         finally:
             self._current_source_file = prev_file
@@ -1197,6 +1374,8 @@ class AstAnalyzer:
             "numpy", "scipy", "matplotlib", "torch", "cv2", "pandas",
             "cryptography", "win32api", "win32gui", "pythoncom", "ctypes",
             "customtkinter", "tkinter", "ttkbootstrap", "pil", "pillow",
+            "pygame", "pyqt5", "pyqt6", "pyside6", "pyside2", "flet",
+            "fastapi", "uvicorn", "starlette",
             "pyfasm", "pyfasm64", "nanogemm",
         ):
             return True
@@ -1292,6 +1471,112 @@ class AstAnalyzer:
 
         return None
 
+    @staticmethod
+    def _normalize_http_path(prefix: str, route_path: str) -> str:
+        p1 = prefix.strip() if prefix else ""
+        p2 = route_path.strip() if route_path else "/"
+        joined = f"/{p1.strip('/')}/{p2.strip('/')}".replace("//", "/")
+        if len(joined) > 1:
+            joined = joined.rstrip("/")
+        return joined or "/"
+
+    def _prepare_fastapi_routes_in_tree(
+        self, tree: ast.AST, mod_prefix: str = ""
+    ) -> List[Tuple[str, str, str, str]]:
+        """Harvests @app.get/@router.post decorators & lowers FastAPI async defs before validation."""
+        has_fastapi = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "fastapi" for a in node.names):
+                has_fastapi = True
+                break
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "fastapi":
+                has_fastapi = True
+                break
+        if not has_fastapi or not isinstance(tree, ast.Module):
+            return []
+
+        app_names: Set[str] = {"app"}
+        router_prefixes: Dict[str, str] = {}
+        raw_routes: List[Tuple[str, str, str, str]] = []  # (owner, method, path, fn_name)
+        http_methods = {"get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE", "patch": "PATCH"}
+
+        new_body: List[ast.stmt] = []
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                tgt_name = stmt.targets[0].id
+                if isinstance(stmt.value, ast.Call):
+                    call_id = stmt.value.func.id if isinstance(stmt.value.func, ast.Name) else getattr(stmt.value.func, "attr", "")
+                    if call_id == "FastAPI":
+                        app_names.add(tgt_name)
+                    elif call_id == "APIRouter":
+                        pfx = ""
+                        if stmt.value.args and isinstance(stmt.value.args[0], ast.Constant) and isinstance(stmt.value.args[0].value, str):
+                            pfx = stmt.value.args[0].value
+                        for kw in stmt.value.keywords:
+                            if kw.arg == "prefix" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                                pfx = kw.value.value
+                        router_prefixes[tgt_name] = pfx
+            elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                c = stmt.value
+                if isinstance(c.func, ast.Attribute) and c.func.attr == "include_router" and c.args:
+                    r_name = c.args[0].id if isinstance(c.args[0], ast.Name) else ""
+                    if r_name:
+                        inc_pfx = ""
+                        for kw in c.keywords:
+                            if kw.arg == "prefix" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                                inc_pfx = kw.value.value
+                        if inc_pfx:
+                            old_pfx = router_prefixes.get(r_name, "")
+                            router_prefixes[r_name] = self._normalize_http_path(inc_pfx, old_pfx)
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.decorator_list:
+                kept_decs: List[ast.expr] = []
+                matched_fastapi = False
+                for dec in stmt.decorator_list:
+                    if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
+                        m_low = dec.func.attr.lower()
+                        owner = dec.func.value.id if isinstance(dec.func.value, ast.Name) else ""
+                        if m_low in http_methods and (owner in app_names or owner in router_prefixes or owner in ("app", "router", "api")):
+                            r_path = "/"
+                            if dec.args and isinstance(dec.args[0], ast.Constant) and isinstance(dec.args[0].value, str):
+                                r_path = dec.args[0].value
+                            else:
+                                for kw in dec.keywords:
+                                    if kw.arg == "path" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                                        r_path = kw.value.value
+                            fn_key = f"{mod_prefix}_{stmt.name}" if mod_prefix else stmt.name
+                            raw_routes.append((owner, http_methods[m_low], r_path, fn_key))
+                            matched_fastapi = True
+                            continue
+                    kept_decs.append(dec)
+                if matched_fastapi:
+                    stmt.decorator_list = kept_decs
+                    if isinstance(stmt, ast.AsyncFunctionDef):
+                        has_real_await = any(isinstance(sub, (ast.Await, ast.AsyncFor, ast.AsyncWith)) for sub in walk_local_scope(stmt))
+                        if not has_real_await:
+                            sync_fn = ast.FunctionDef(
+                                name=stmt.name,
+                                args=stmt.args,
+                                body=stmt.body,
+                                decorator_list=stmt.decorator_list,
+                                returns=stmt.returns,
+                                type_comment=getattr(stmt, "type_comment", None),
+                                lineno=stmt.lineno,
+                                col_offset=stmt.col_offset,
+                                end_lineno=getattr(stmt, "end_lineno", stmt.lineno),
+                                end_col_offset=getattr(stmt, "end_col_offset", stmt.col_offset),
+                            )
+                            ast.copy_location(sync_fn, stmt)
+                            stmt = sync_fn
+            new_body.append(stmt)
+        tree.body = new_body
+
+        resolved: List[Tuple[str, str, str, str]] = []
+        for owner, method, r_path, fn_key in raw_routes:
+            pfx = router_prefixes.get(owner, "")
+            full_path = self._normalize_http_path(pfx, r_path)
+            resolved.append((owner, method, full_path, fn_key))
+        return resolved
+
     def _parse_file_recursive(self, path: Path, module: ParsedModule, is_entry: bool = False) -> None:
         real_path = path.resolve()
 
@@ -1353,6 +1638,11 @@ class AstAnalyzer:
             module.source_files[str(real_path)] = source_code
             module.diagnostics.append(from_syntax_error(e, file_path=str(real_path), source_text=source_code))
             return
+
+        mod_prefix_pre = "" if is_entry else re.sub(r'[^a-zA-Z0-9_]', '_', real_path.stem)
+        if mod_prefix_pre and mod_prefix_pre[0].isdigit():
+            mod_prefix_pre = f"_{mod_prefix_pre}"
+        pending_routes = self._prepare_fastapi_routes_in_tree(tree, mod_prefix=mod_prefix_pre)
 
         if not any(v in path_str for v in (".venv", "venv", "site-packages")):
             self._validate_ast_tree(tree, module, str(real_path), source_code, current_dir=real_path.parent)
@@ -1430,6 +1720,70 @@ class AstAnalyzer:
             self._extract_top_level_and_functions(tree, module, is_entry=is_entry, mod_prefix=mod_prefix)
         finally:
             self._current_source_file = prev_file
+
+        # 4. Finalize any harvested FastAPI routes with resolved handler return/param types
+        self._finalize_http_routes(pending_routes, module, mod_prefix_pre=mod_prefix_pre)
+
+    @staticmethod
+    def _finalize_http_routes(
+        pending_routes: List[tuple],
+        module: ParsedModule,
+        mod_prefix_pre: str = "",
+    ) -> None:
+        """Resolves return_kind and integer parameter bitmasks for harvested FastAPI routes."""
+        for _owner, method, full_path, fn_key in pending_routes:
+            fn_sym = module.functions.get(fn_key) or module.functions.get(
+                fn_key.split("_", 1)[-1]
+                if mod_prefix_pre and fn_key.startswith(f"{mod_prefix_pre}_")
+                else fn_key
+            )
+            if not fn_sym:
+                continue
+            r_kind = "auto"
+            if fn_sym.ast_node:
+                for sub_n in walk_local_scope(fn_sym.ast_node):
+                    if isinstance(sub_n, ast.Return) and isinstance(sub_n.value, ast.Call):
+                        c_name = (
+                            sub_n.value.func.id
+                            if isinstance(sub_n.value.func, ast.Name)
+                            else getattr(sub_n.value.func, "attr", "")
+                        )
+                        if c_name == "HTMLResponse":
+                            r_kind = "html"
+                            break
+                        if c_name == "PlainTextResponse":
+                            r_kind = "text"
+                            break
+            if r_kind == "auto":
+                rt = fn_sym.return_type
+                if rt.is_dict():
+                    r_kind = "dict"
+                elif rt.is_list():
+                    r_kind = "list"
+                elif rt.is_str():
+                    r_kind = "str"
+                elif rt.is_float():
+                    r_kind = "float"
+                elif rt.is_bool():
+                    r_kind = "bool"
+                elif rt.is_int() and not getattr(fn_sym, "is_dynamic_return", False):
+                    r_kind = "auto"
+            p_names: List[str] = []
+            p_int_mask = 0
+            for idx, arg in enumerate(fn_sym.args):
+                p_names.append(arg.name)
+                if not arg.is_dynamic and (arg.var_type.is_int() or arg.var_type.is_bool()):
+                    p_int_mask |= (1 << idx)
+            module.http_routes.append(
+                HttpRouteSpec(
+                    method=method,
+                    path=full_path,
+                    handler_name=fn_sym.name,
+                    return_kind=r_kind,
+                    param_names=p_names,
+                    param_int_mask=p_int_mask,
+                )
+            )
 
     def _extract_top_level_and_functions(
         self,
@@ -2218,6 +2572,32 @@ class AstAnalyzer:
                 return ListType(element_type=TYPE_LIST)
             left_t = self._infer_node_type(expr.left, local_vars)
             right_t = self._infer_node_type(expr.right, local_vars)
+            mod = getattr(self, "current_module", None)
+            if mod is not None:
+                op_map = {
+                    ast.Add: ("__add__", "__radd__"),
+                    ast.Sub: ("__sub__", "__rsub__"),
+                    ast.Mult: ("__mul__", "__rmul__"),
+                    ast.FloorDiv: ("__floordiv__", "__rfloordiv__"),
+                    ast.Div: ("__truediv__", "__rtruediv__"),
+                    ast.Mod: ("__mod__", "__rmod__"),
+                    ast.Pow: ("__pow__", "__rpow__"),
+                    ast.BitAnd: ("__and__", None),
+                    ast.BitOr: ("__or__", None),
+                    ast.BitXor: ("__xor__", None),
+                    ast.LShift: ("__lshift__", None),
+                    ast.RShift: ("__rshift__", None),
+                }
+                if type(expr.op) in op_map:
+                    fwd_d, rev_d = op_map[type(expr.op)]
+                    if isinstance(left_t, InstanceType):
+                        cs = mod.classes.get(left_t.class_name)
+                        if cs and fwd_d in cs.methods and cs.methods[fwd_d].return_type != TYPE_VOID:
+                            return cs.methods[fwd_d].return_type
+                    if rev_d and isinstance(right_t, InstanceType):
+                        cs = mod.classes.get(right_t.class_name)
+                        if cs and rev_d in cs.methods and cs.methods[rev_d].return_type != TYPE_VOID:
+                            return cs.methods[rev_d].return_type
             if left_t.is_float() or right_t.is_float():
                 return TYPE_FLOAT
             if left_t.is_str() or right_t.is_str():
@@ -2341,10 +2721,20 @@ class AstAnalyzer:
                             )
                     return TYPE_TUPLE
                 mod = getattr(self, "current_module", None)
+                if fid == "abs" and expr.args and mod is not None:
+                    a0_t = self._infer_node_type(expr.args[0], local_vars)
+                    if isinstance(a0_t, InstanceType):
+                        cs = mod.classes.get(a0_t.class_name)
+                        if cs and "__abs__" in cs.methods and cs.methods["__abs__"].return_type != TYPE_VOID:
+                            return cs.methods["__abs__"].return_type
                 if mod is not None and fid in mod.functions:
                     rt = mod.functions[fid].return_type
                     if rt != TYPE_VOID:
                         return rt
+                if mod is not None and fid in local_vars and getattr(local_vars[fid], "fn_alias", None):
+                    al = local_vars[fid].fn_alias
+                    if al in mod.functions and mod.functions[al].return_type != TYPE_VOID:
+                        return mod.functions[al].return_type
                 if fid in local_vars and isinstance(local_vars[fid].var_type, InstanceType) and mod is not None:
                     cls_t = local_vars[fid].var_type
                     seen_c: Set[str] = set()
@@ -2652,6 +3042,12 @@ class AstAnalyzer:
                             elif ct is not None and ct.is_list() and not isinstance(target.slice, ast.Slice):
                                 pass_list_obs.setdefault(cname, []).append(vt)
                     for vname, t_type, is_dyn in targets_to_proc:
+                        rhs_fn_alias: Optional[str] = None
+                        if isinstance(sub_node.value, ast.Name) and mod is not None and sub_node.value.id in mod.functions:
+                            rhs_fn_alias = sub_node.value.id
+                        elif isinstance(sub_node.value, ast.Call) and isinstance(sub_node.value.func, ast.Name):
+                            if sub_node.value.func.id == "_pyfasm_closure_new" and sub_node.value.args and isinstance(sub_node.value.args[0], ast.Name):
+                                rhs_fn_alias = sub_node.value.args[0].id
                         if vname in global_names:
                             self._record_global_var_type(mod, vname, t_type, mod_prefix)
                         else:
@@ -2662,13 +3058,17 @@ class AstAnalyzer:
                                     stack_offset=offset,
                                     is_arg=False,
                                     is_dynamic=is_dyn,
+                                    fn_alias=rhs_fn_alias,
                                 )
                                 offset += 8
-                            elif self._should_upgrade_type(local_vars[vname].var_type, t_type):
-                                local_vars[vname].var_type = t_type
-                                local_vars[vname].is_dynamic = False
-                            elif is_dyn and local_vars[vname].var_type == TYPE_INT:
-                                local_vars[vname].is_dynamic = True
+                            else:
+                                if rhs_fn_alias is not None and local_vars[vname].fn_alias is None:
+                                    local_vars[vname].fn_alias = rhs_fn_alias
+                                if self._should_upgrade_type(local_vars[vname].var_type, t_type):
+                                    local_vars[vname].var_type = t_type
+                                    local_vars[vname].is_dynamic = False
+                                elif is_dyn and local_vars[vname].var_type == TYPE_INT:
+                                    local_vars[vname].is_dynamic = True
                         if t_type.is_list() and getattr(t_type, "element_type", None) is not None:
                             pass_list_obs.setdefault(vname, []).append(t_type.element_type)
                         elif t_type.is_set() and getattr(t_type, "element_type", None) is not None:

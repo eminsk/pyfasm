@@ -40,16 +40,41 @@ It supports hosting on **CPython 3.8–3.16**, **Free-Threaded / No-GIL Python (
 
 ---
 
+## What's New in v1.0.0 (Production Release Milestone)
+
+- **Native Python GUI Ecosystem Parity**:
+  - Direct native Win64 compilation for `tkinter`, `customtkinter`, `PyQt5`, `PyQt6` / `PySide6`, and `flet`.
+  - Native Windows GDI controls (labels, buttons, entry inputs, checkboxes, sliders, canvases), dark-mode styling, dynamic geometry / layout management, window resize/show/destroy lifecycle, and event callbacks.
+  - Native `StringVar` data binding and Canvas vector drawing (`create_line`, `create_rectangle`, `create_oval`, `create_text`).
+- **Native 2D Game Engine (`pygame`)**:
+  - Full native x86-64 GDI double-buffered backbuffer rendering with zero external DLLs or heavyweight runtime engines.
+  - `pygame.display` (`set_mode`, `set_caption`, `flip`, `update`), `pygame.event` (`get`, `poll`, `QUIT`, `KEYDOWN`, `KEYUP`, `MOUSEBUTTONDOWN`, `MOUSEBUTTONUP`), and `pygame.key` (`get_pressed`, arrow keys, space, escape, WASD).
+  - High-performance `pygame.Rect` geometry and collision engine (`colliderect`, `collidepoint`, `contains`, `clamp`, `inflate`, `x`, `y`, `w`, `h`, `centerx`, `centery`, `right`, `bottom`).
+  - Native `pygame.draw` (antialiased/solid `rect`, `circle`, `line`, `polygon`), `pygame.time.Clock` (`tick` with microsecond-accurate Win32 timer pacing), and `pygame.font` raster text blitting.
+- **Native Async Web APIs (`FastAPI` & `uvicorn`)**:
+  - Direct native compilation of FastAPI applications (`FastAPI()`, `@app.get(...)`, `@app.post(...)`, `@app.put(...)`, `@app.delete(...)`, `uvicorn.run(app, host=..., port=...)`).
+  - High-throughput native Win64 Winsock2 non-blocking/threaded HTTP/1.1 server.
+  - Native RFC-8259 JSON parser & serializer for complex request bodies and responses (dictionaries, lists, floats, ints, booleans, nulls, and nested structures) with automated memory inspection and Content-Length multi-chunk streaming.
+- **Recursive Nested Closures & Function Aliases**:
+  - Support for recursive nested functions (`def _fib(n): ... _fib(n-1)`), mutually-recursive sibling functions (`is_even` / `is_odd`), and capturing closures without `W3001` / `E3001` unresolved symbol diagnostics.
+  - Function-alias type propagation across variable assignments (`fn = my_func; res = fn(...)`).
+- **Reflected Binary Magic Methods & Advanced F-String Format Specifiers**:
+  - Full support for reflected dunders (`__radd__`, `__rsub__`, `__rmul__`, `__rtruediv__`, `__rfloordiv__`, `__rmod__`) and `__abs__`.
+  - Comprehensive f-string format specifications (`:.Nf`, `:N.Mf`, `:x`, `:X`, `:b`, `:o`, `:0Nd`, `:Nd`) and `!r` `repr()` conversions.
+- **Production Milestone**: 100% test suite pass rate (152/152 tests) across CPython 3.8–3.16 and Free-Threaded No-GIL Python.
+
+---
+
 ## What's New in v0.4.0
 
 - **v0.4.0 Full UTF-8/Cyrillic Identifiers & Strings, Polymorphic OOP, Dunders & Lexical Closures**:
   - Collision-free Cyrillic/Unicode identifiers for classes, functions, and variables, plus UTF-8 codepoint `len()`, indexing `s[i]` (including negative indices), slicing `s[start:stop:step]`, and Cyrillic `.upper()`/`.lower()` (including `Ё`/`ё`).
   - Memory-address-free printing and formatting across typed/heterogeneous lists, 2D lists, tuples, dicts, sets, loops, f-strings, `str()`/`int()`/`float()` casts, and `.split()`.
   - Production OOP with runtime class tags (`PYFCLSTG`), polymorphic virtual method dispatch (`_pyfasm_vcall_*`), `@staticmethod`, `@classmethod` (with dynamic `cls(...)`), `isinstance()`/`issubclass()`, and wired dunders (`__call__`, `__bool__`, `__neg__`/`__pos__`/`__invert__`, `__iadd__`..`__ixor__`, `__enter__`/`__exit__`, `__iter__`/`__next__` + `StopIteration`).
-  - Real lexical closures (`PYFCLOSU`) for capturing `lambda` and nested `def` functions across direct calls, higher-order indirect calls, `map()`, and `filter()`.
-- **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`), `try`/`except`, `with`, `match`/`case`, `input()`, and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
+  - Real lexical closures (`PYFCLOSU`) for capturing `lambda` and nested `def` functions (including recursive/mutually-recursive nested functions and function-alias type inference) across direct calls, higher-order indirect calls, `map()`, and `filter()`.
+- **Native Language & Stdlib Parity**: Full support for `float`, `list`, `dict` (including tuple keys), `set`, `tuple`, list/dict/set comprehensions, generators (`yield`, `yield from`, generator expressions), OOP (`class`, `super()`, `@property`, reflected binary dunders `__radd__`..`__rmod__`, `__abs__`), `try`/`except`, `with`, `match`/`case`, `input()`, f-string `!r` & format specifiers (`:.Nf`, `:x`, `:X`, `:b`, `:o`, `:0Nd`), and native `math`, `itertools`, `functools`, `bisect`, `heapq`, and `json`.
 - **NanoGEMM & SIMD Engine**: Built-in AVX2/FMA native matrix multiplication (`@` / `matmul`) and NumPy-compatible helpers (`zeros`, `ones`, `asarray`, `flatnonzero`).
-- **Native Win32 Tkinter / CustomTkinter UI**: Translates Python desktop GUIs and Canvas drawing directly into DPI-aware Win32 GDI dark-mode applications.
+- **Native Win32 Desktop GUI, 2D Games & Web Frameworks**: Compiles `tkinter`, `customtkinter`, `PyQt5`, `PyQt6`/`PySide6`, `flet`, `pystray`, `pygame` (double-buffered GDI backbuffer + event/input/Rect engine), and `FastAPI`/`uvicorn` (Winsock2 HTTP/1.1 + RFC-8259 JSON server) directly to native Win64 binaries.
 - **v0.3.4 Windows UTF-8 Console & F-String Fixes**:
   - Automatic Windows console UTF-8 (`CP_UTF8` / `WriteConsoleW` / `ReadConsoleW`) with pipe-safe `WriteFile` / `ReadFile` fallback so Cyrillic and Unicode `input()` / `print()` render cleanly without mojibake.
   - Proper `TYPE_STR` inference for `input()`, full `+` string concatenation for `ast.JoinedStr` f-strings, and native `float` (`_pyfasm_float_to_str`) / `__str__` formatting inside f-strings.
@@ -338,10 +363,10 @@ uv run pyfasm64 clean --all
 
 | Feature | Syntax / API | Description |
 | :--- | :--- | :--- |
-| **Functions & Closures** | `def`, `lambda`, lexical closures, Cyrillic/UTF-8 names | Typed x86_64 functions, defaults, capturing lambdas & nested `def`, collision-free Unicode labels |
-| **Data Types** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-bit signed ints, IEEE-754 SSE doubles, UTF-8/UTF-16LE strings, raw pointers |
+| **Functions & Closures** | `def`, `lambda`, lexical closures, Cyrillic/UTF-8 names | Typed x86_64 functions, defaults, capturing lambdas & recursive/nested `def`, function aliases, collision-free Unicode labels |
+| **Data Types** | `int`, `float`, `bool`, `str`, `ptr`, `void` | 64-bit signed ints, IEEE-754 SSE doubles, UTF-8/UTF-16LE strings (`!r`, `:.Nf`, `:x`/`:b`/`:o`/`:0Nd`), raw pointers |
 | **Containers** | `list`, `dict`, `set`, `tuple`, slicing | Dynamic arrays, FNV-1a hash tables (incl. tuple keys), hash sets, comprehensions |
-| **OOP & Classes** | `class`, `__init__`, `super()`, `@property`, `@staticmethod`, `@classmethod` | Runtime class tags, polymorphic dispatch, `isinstance`/`issubclass`, and wired dunders (`__call__`, `__bool__`, `__enter__`/`__exit__`, `__iter__`/`__next__`, `__neg__`, `__iadd__`..`__ixor__`) |
+| **OOP & Classes** | `class`, `__init__`, `super()`, `@property`, `@staticmethod`, `@classmethod` | Runtime class tags, polymorphic dispatch, `isinstance`/`issubclass`, and wired dunders (`__call__`, `__bool__`, `__abs__`, `__radd__`..`__rmod__`, `__enter__`/`__exit__`, `__iter__`/`__next__`, `__neg__`, `__iadd__`..`__ixor__`) |
 | **Generators & Errors** | `yield`, `yield from`, `try`/`except`, `with` | State-machine coroutines, generator expressions, structured exception unwinding |
 | **Arithmetic** | `+`, `-`, `*`, `/`, `//`, `%`, `**`, `@`, bitwise | Direct x86_64 ALU & SSE instructions, Python floor div/mod, AVX2 NanoGEMM `@` |
 | **Control Flow** | `if`/`elif`/`else`, `while`, `for`, `match`/`case` | Loops, unpacking, `break`, `continue`, `return`, pattern matching |
@@ -352,7 +377,7 @@ uv run pyfasm64 clean --all
 | **Atomic Ops** | `atomic_add(ptr, val)`, `atomic_sub(ptr, val)` | Thread-safe atomic operations via CPU `lock` prefix |
 | **Console I/O** | `print()`, `input()`, `print_int()`, `print_float()` | Low-level buffered stdout streaming and console line input |
 | **Timers & Sleep**| `get_tick_count()`, `sleep_ms(ms)` | High-precision timing and thread sleep |
-| **Native GUI** | `tkinter`, `customtkinter`, `pystray` | Win32 GDI dark-mode controls, Canvas plotting, and tray apps |
+| **Native UI, Games & Web** | `tkinter`, `customtkinter`, `PyQt5`, `PyQt6`/`PySide6`, `flet`, `pygame`, `fastapi`/`uvicorn`, `pystray` | Win32 GDI desktop widgets/Canvas, double-buffered 2D games, Winsock2 HTTP/1.1 JSON APIs, and tray apps |
 
 ---
 
@@ -378,7 +403,7 @@ uv run pytest
 ```
 
 ```text
-============================= 143 passed ==============================
+============================= 152 passed ==============================
 ```
 
 Verified compatibility matrix:

@@ -23,7 +23,8 @@ UNSUPPORTED_DUNDERS: Set[str] = {
 SUPPORTED_DUNDERS_SUMMARY: str = (
     "__init__, __new__, __add__..__xor__, __iadd__..__ixor__, __neg__, __pos__, __invert__, "
     "__eq__..__ge__, __len__, __getitem__, __setitem__, __contains__, __str__, __repr__, "
-    "__bool__, __call__, __iter__, __next__, __enter__, __exit__"
+    "__bool__, __call__, __iter__, __next__, __enter__, __exit__, "
+    "__radd__, __rsub__, __rmul__, __rtruediv__, __rfloordiv__, __rmod__, __abs__"
 )
 
 NATIVELY_SUPPORTED_OR_ADAPTED_MODULES: Set[str] = {
@@ -59,6 +60,16 @@ NATIVELY_SUPPORTED_OR_ADAPTED_MODULES: Set[str] = {
     "darkdetect",
     "tkinter",
     "customtkinter",
+    "ttkbootstrap",
+    "pyqt5",
+    "pyqt6",
+    "pyside6",
+    "pyside2",
+    "pygame",
+    "flet",
+    "fastapi",
+    "uvicorn",
+    "starlette",
     "pystray",
     "pil",
     "pillow",
@@ -78,7 +89,6 @@ KNOWN_UNSUPPORTED_EXTERNAL_MODULES: Set[str] = {
     "cv2",
     "sqlite3",
     "sqlalchemy",
-    "fastapi",
     "flask",
     "django",
     "aiohttp",
