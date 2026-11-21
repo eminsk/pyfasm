@@ -95,7 +95,7 @@ def main() -> int:
     assert "_fib" in asm
 
     if sys.platform == "win32":
-        res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+        res = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8", timeout=10)
         assert res.returncode == 0, res.stderr
         lines = [line.strip() for line in res.stdout.strip().splitlines()]
         assert lines == [
@@ -150,7 +150,7 @@ def main() -> int:
 """
     _asm, exe, _ = _compile_strict_win64(tmp_path, code, "dunders_fstrings")
     if sys.platform == "win32":
-        res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+        res = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8", timeout=10)
         assert res.returncode == 0, res.stderr
         lines = res.stdout.splitlines()
         assert lines[0] == "12"
@@ -354,7 +354,7 @@ def main() -> int:
     return 0
 """
     _asm, exe, _ = _compile_strict_win64(tmp_path, code, "pygame_live")
-    res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=15)
+    res = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8", timeout=15)
     assert res.returncode == 0, res.stderr
     lines = [line.strip() for line in res.stdout.strip().splitlines()]
     assert lines[0] == "50 50 1 0 1"

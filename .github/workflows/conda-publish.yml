@@ -42,12 +42,12 @@ jobs:
           pip install --upgrade anaconda-client
 
       - name: Upload to Anaconda.org
-        if: success()
+        if: success() && startsWith(github.ref, 'refs/tags/v')
         env:
           ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
         run: |
           if [ -n "$ANACONDA_API_TOKEN" ]; then
-            anaconda --token "$ANACONDA_API_TOKEN" upload --user m_n_nik dist/conda/noarch/*.conda --skip-existing
+            anaconda --token "$ANACONDA_API_TOKEN" upload --user m_n_nik dist/conda/noarch/*.conda --skip-existing || true
           else
             echo "ANACONDA_API_TOKEN is empty or not configured. Artifact saved."
           fi
