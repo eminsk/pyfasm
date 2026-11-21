@@ -1,3 +1,14 @@
+python3-pyfasm64 (1.2.0-1) stable; urgency=medium
+
+  * Release PyFASM64 1.2.0 (Python 3.14/3.15 Modern Suite, Dynamic Host Architecture & CLI Overhaul).
+  * Added Python 3.14 and 3.15 features: PEP 695 type aliases, generic type parameters, math.sumprod, itertools.batched, os.cpu_count.
+  * Added dynamic host Python version detection (sys.version, sys.version_info, sys.platform, sys._is_gil_enabled) and compile-time version branch folding.
+  * Added CLI flags: --gui / -w, --console / -c, --python-version / --py-ver, --optimize / -O, --verbose / -v.
+  * Modernized and added 11 showcase examples across OOP, GUI, Web, and Python 3.15 features.
+  * Fixed register clobber bug in _pyfasm_auto_to_str and raw memory indexing for alloc_memory.
+
+ -- eminsk <M_N_N@tut.by>  Sat, 21 Nov 2026 14:50:00 -0500
+
 python3-pyfasm64 (1.1.0-1) stable; urgency=medium
 
   * Release PyFASM64 1.1.0 (Comprehensive Modern GUI & Framework Enhancement).

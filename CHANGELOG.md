@@ -5,7 +5,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [1.1.0] - 2026-11-21
+## [1.2.0] - 2026-11-21
 
 ### Added
 - **Python 3.14 and 3.15 Language Features**:
@@ -24,19 +24,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - `--python-version`, `--py-ver`: Explicitly select target Python version (`3.14`, `3.15`, etc.).
   - `--optimize`, `-O`: Enable assembly peephole optimizations.
   - `--verbose`, `-v`: Enable verbose compilation diagnostics.
-  - Enhanced `pyfasm64 -V` / `--version` to display compiler version along with host Python version (e.g., `pyfasm64 1.1.0 (Host Python: 3.15.2)`).
+  - Enhanced `pyfasm64 -V` / `--version` to display compiler version along with host Python version (e.g., `pyfasm64 1.2.0 (Host Python: 3.15.2)`).
 - **Modernized & Expanded Examples**:
-  - `examples/01_hello.py`: Modernized with idiomatic f-strings and type annotations.
-  - `examples/02_fibonacci.py`: Benchmarking iterative and recursive Fibonacci calculations.
-  - `examples/03_prime_sieve.py`: Native Sieve of Eratosthenes algorithm.
-  - `examples/04_multithread_parallel.py`: Zero-GIL multi-threaded atomic counter with `spawn_thread` and `atomic_add`.
-  - `examples/05_mandelbrot_ascii.py`: High-speed ASCII Mandelbrot fractal rendering.
-  - `examples/06_classes_oop.py`: OOP, inheritance, polymorphic virtual method dispatch, and magic methods.
-  - `examples/07_tkinter_gui.py`: Native Win32 desktop application with buttons, labels, and event handlers.
-  - `examples/08_data_structures.py`: Hash dicts, lists, sets, string manipulation, and comprehensions.
-  - `examples/09_customtkinter_app.py`: Modern dark-theme desktop UI application.
-  - `examples/10_fastapi_server.py`: Standalone Winsock2 HTTP REST API server with JSON parsing.
-  - `examples/11_python314_315_features.py`: Demonstration of Python 3.14/3.15 dynamic version detection, `TypeAlias`, `sumprod`, `batched`, and `cpu_count`.
+  - `examples/01_hello.py` through `05_mandelbrot_ascii.py`: Modernized with idiomatic f-strings and type annotations.
+  - Added modern showcase examples:
+    - `06_classes_oop.py`: OOP, inheritance, polymorphic dispatch, and magic methods.
+    - `07_tkinter_gui.py`: Native Win32 desktop application with buttons, labels, and event handlers.
+    - `08_data_structures.py`: Hash dicts, lists, sets, string manipulation, and comprehensions.
+    - `09_customtkinter_app.py`: Modern dark-theme desktop UI application.
+    - `10_fastapi_server.py`: Standalone Winsock2 HTTP REST API server with JSON parsing.
+    - `11_python314_315_features.py`: Demonstration of Python 3.14/3.15 dynamic version detection, `TypeAlias`, `sumprod`, `batched`, and `cpu_count`.
+
+### Fixed
+- Fixed critical register clobber bug in `_pyfasm_auto_to_str`: `call _pyfasm_is_utf8_str_ptr` had its return register `rax` immediately clobbered by `mov rax, rbx`, which caused non-zero integers to be misidentified as string pointers and threw 0xC0000005 in `_pyfasm_str_concat`.
+- Fixed raw memory indexing for `alloc_memory`, `malloc`, and `VirtualAlloc` by correctly typing returns as `TYPE_PTR` (`mov [r8 + r11 * 8], rax` instead of Python list header offset `(r11 + 1) * 8`).
+- Fixed `ParsedModule.is_modern_gui` missing setter when overriding subsystem in `compiler.py`.
+
+---
+
+## [1.1.0] - 2026-11-21
+
+### Added
+- **Native Algorithmic Built-ins**:
+  - Added single-argument `min(sequence)` and `max(sequence)` x86-64 assembly loops with SIMD/scalar fallback.
+  - Added native built-in stubs for `tuple()`, `complex()`, `math.isfinite()`, `math.isclose()`, and `getattr()`.
 
 ### Changed
 - **Elimination of Legacy Template Overrides**:
@@ -48,11 +59,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - Added Flet lifecycle methods and window management: `page.clean()`, `page.add(...)`, `page.window_width`, `page.window_height` (routed to `_pyfasm_resize_window`), and safe no-ops for theme styling.
   - Event dispatch: added resolution for `e.control` and `control.value`.
   - Registered modern UI container components (`Container`, `Card`, `Row`, `Column`, `Stack`, `Divider`, `AppBar`, `Slider`, `ProgressBar`, `Tabs`, `Tab`, `ComboBox`, `OptionMenu`, `ScrollableFrame`).
-
-### Fixed
-- Fixed critical register clobber bug in `_pyfasm_auto_to_str`: `call _pyfasm_is_utf8_str_ptr` had its return register `rax` immediately clobbered by `mov rax, rbx`, which caused any non-zero integer to be misidentified as a string pointer and threw 0xC0000005 in `_pyfasm_str_concat`.
-- Fixed raw memory indexing for `alloc_memory`, `malloc`, and `VirtualAlloc` by correctly typing returns as `TYPE_PTR` (`mov [r8 + r11 * 8], rax` instead of Python list header offset `(r11 + 1) * 8`).
-- Fixed `ParsedModule.is_modern_gui` missing setter when overriding subsystem in `compiler.py`.
 
 ---
 

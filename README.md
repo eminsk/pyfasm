@@ -34,7 +34,7 @@ Standalone Native Binary (.exe / .elf / .macho / .dll) [~2.5 KB]
 
 ---
 
-## Highlights in v1.1.0
+## Highlights in v1.2.0
 
 * **Python 3.14 & 3.15 Native Support**:
   * PEP 695 `type` aliases (`type Vector = list[int]`) and generic functions/classes (`def f[T](x: T):`).
@@ -47,6 +47,8 @@ Standalone Native Binary (.exe / .elf / .macho / .dll) [~2.5 KB]
   * All applications (including complex CustomTkinter, Flet, Tkinter, and PyQt GUI layouts) compile authentically and directly from source AST to native machine instructions.
 * **Expanded CLI Flags**:
   * Added `--gui` / `-w` (Win32 GUI subsystem), `--console` / `-c` (console subsystem), `--python-version` / `--py-ver`, `--optimize` / `-O`, and `--verbose` / `-v`.
+* **Modernized Showcase Examples**:
+  * 11 comprehensive, self-contained examples covering OOP, Tkinter, CustomTkinter, FastAPI REST, and Python 3.14/3.15.
 * **Full Changelog**: See [CHANGELOG.md](https://github.com/eminsk/pyfasm/blob/main/CHANGELOG.md) for full history.
 
 ---
