@@ -17,7 +17,7 @@ _AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
 _AST_MATCH_OR = getattr(ast, 'MatchOr', ())
 from pyfasm.types import (
     PyFasmType, resolve_type, TYPE_INT, TYPE_VOID, TYPE_STR, TYPE_PTR,
-    TYPE_FLOAT, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR,
+    TYPE_FLOAT, TYPE_COMPLEX, TYPE_BOOL, TYPE_LIST, TYPE_DICT, TYPE_SET, TYPE_TUPLE, TYPE_GENERATOR,
     InstanceType, ListType, DictType, SetType, TupleType
 )
 from pyfasm.diagnostics import (
@@ -140,7 +140,7 @@ class ParsedModule:
 
     @property
     def is_tray_app(self) -> bool:
-        return self.has_library("pystray", "tray") or any("punto" in s.lower() or "tray" in s.lower() for s in self.classes)
+        return self.has_library("pystray", "tray") or any("tray" in s.lower() for s in self.classes)
 
     @property
     def is_keyboard_hook_app(self) -> bool:
@@ -807,8 +807,21 @@ class ClosureLifter(ast.NodeTransformer):
         free = loaded - own_args - comp_bound
         captured = sorted(n for n in free if n in enclosing)
 
+        # Capture early-bound default arguments (e.g. lambda vals=coeffs: ...)
+        orig_args_list = list(node.args.args)
+        orig_defaults = list(node.args.defaults)
+        default_caps: List[Tuple[str, ast.expr]] = []
+        new_defaults = list(orig_defaults)
+        has_dynamic_default = any(not isinstance(d, ast.Constant) for d in orig_defaults)
+        if orig_defaults and (captured or has_dynamic_default):
+            def_start = len(orig_args_list) - len(orig_defaults)
+            for d_i, d_expr in enumerate(orig_defaults):
+                a_name = orig_args_list[def_start + d_i].arg
+                default_caps.append((a_name, d_expr))
+                new_defaults[d_i] = ast.Constant(value=-9223372036854775807)
+
         self.counter += 1
-        if not captured:
+        if not captured and not default_caps:
             fn_name = f"_pyfasm_lambda_{self.counter}"
             fn_def = ast.FunctionDef(
                 name=fn_name,
@@ -834,10 +847,41 @@ class ClosureLifter(ast.NodeTransformer):
             )
             for idx, cap_name in enumerate(captured)
         ]
+        for d_i, (a_name, _) in enumerate(default_caps):
+            cap_idx = len(captured) + d_i
+            body_stmts.append(
+                ast.If(
+                    test=ast.Compare(
+                        left=ast.Name(id=a_name, ctx=ast.Load()),
+                        ops=[ast.Eq()],
+                        comparators=[ast.Constant(value=-9223372036854775807)],
+                    ),
+                    body=[
+                        ast.Assign(
+                            targets=[ast.Name(id=a_name, ctx=ast.Store())],
+                            value=ast.Call(
+                                func=ast.Name(id="_pyfasm_closure_get", ctx=ast.Load()),
+                                args=[ast.Name(id="_pyfasm_env", ctx=ast.Load()), ast.Constant(value=cap_idx)],
+                                keywords=[],
+                            ),
+                        )
+                    ],
+                    orelse=[],
+                )
+            )
         body_stmts.append(ast.Return(value=node.body))
+        patched_args = ast.arguments(
+            posonlyargs=list(getattr(node.args, "posonlyargs", [])),
+            args=orig_args_list,
+            vararg=node.args.vararg,
+            kwonlyargs=list(getattr(node.args, "kwonlyargs", [])),
+            kw_defaults=list(getattr(node.args, "kw_defaults", [])),
+            kwarg=node.args.kwarg,
+            defaults=new_defaults,
+        )
         fn_def = ast.FunctionDef(
             name=fn_name,
-            args=self._make_closure_args(node.args),
+            args=self._make_closure_args(patched_args),
             body=body_stmts,
             decorator_list=[],
             returns=None,
@@ -845,10 +889,12 @@ class ClosureLifter(ast.NodeTransformer):
             col_offset=getattr(node, "col_offset", 0),
         )
         self.lambdas.append(fn_def)
+        cap_arg_exprs = [ast.Name(id=cap_name, ctx=ast.Load()) for cap_name in captured] + [
+            d_expr for _, d_expr in default_caps
+        ]
         factory_call = ast.Call(
             func=ast.Name(id="_pyfasm_closure_new", ctx=ast.Load()),
-            args=[ast.Name(id=fn_name, ctx=ast.Load())]
-            + [ast.Name(id=cap_name, ctx=ast.Load()) for cap_name in captured],
+            args=[ast.Name(id=fn_name, ctx=ast.Load())] + cap_arg_exprs,
             keywords=[],
         )
         return ast.copy_location(factory_call, node)
@@ -1121,6 +1167,7 @@ class AstAnalyzer:
         self._current_source_file: Optional[str] = None
         self._current_mod_prefix: str = ""
         self._closure_cap_types: Dict[str, List[PyFasmType]] = {}
+        self._genexp_arg_types: Dict[str, List[PyFasmType]] = {}
         self._current_func_name: str = ""
         if self.project_root:
             self._discover_site_packages()
@@ -2798,24 +2845,26 @@ class AstAnalyzer:
                         cs = mod.classes.get(right_t.class_name)
                         if cs and rev_d in cs.methods and cs.methods[rev_d].return_type != TYPE_VOID:
                             return cs.methods[rev_d].return_type
-            if left_t.is_float() or right_t.is_float():
-                return TYPE_FLOAT
-            if left_t.is_str() or right_t.is_str():
-                return TYPE_STR
+            if left_t.is_complex() or right_t.is_complex():
+                return TYPE_COMPLEX
             if isinstance(expr.op, ast.Mult):
-                if left_t.is_list():
+                if left_t.is_list() and getattr(left_t, "element_type", None) != TYPE_FLOAT:
                     return left_t
-                if right_t.is_list():
+                if right_t.is_list() and getattr(right_t, "element_type", None) != TYPE_FLOAT:
                     return right_t
                 if left_t.is_tuple():
                     return left_t
                 if right_t.is_tuple():
                     return right_t
             if left_t.is_list() or right_t.is_list():
-                lt_elem = getattr(left_t, "element_type", None) if left_t.is_list() else None
-                rt_elem = getattr(right_t, "element_type", None) if right_t.is_list() else None
+                lt_elem = getattr(left_t, "element_type", None) if left_t.is_list() else (TYPE_FLOAT if left_t.is_float() else None)
+                rt_elem = getattr(right_t, "element_type", None) if right_t.is_list() else (TYPE_FLOAT if right_t.is_float() else None)
                 merged = self._merge_element_types([t for t in (lt_elem, rt_elem) if t is not None])
                 return ListType(element_type=merged) if merged else TYPE_LIST
+            if left_t.is_float() or right_t.is_float():
+                return TYPE_FLOAT
+            if left_t.is_str() or right_t.is_str():
+                return TYPE_STR
             if left_t.is_tuple() or right_t.is_tuple():
                 return TYPE_TUPLE
             return TYPE_INT
@@ -2859,12 +2908,49 @@ class AstAnalyzer:
                     return TYPE_STR
                 elif fid in ("alloc_memory", "malloc", "VirtualAlloc", "calloc"):
                     return TYPE_PTR
-                elif fid in ("int", "ord", "len", "hash", "abs", "round", "open", "file_open", "bit_length"):
+                elif fid in ("int", "ord", "len", "hash", "open", "file_open", "bit_length"):
                     return TYPE_INT
                 elif fid in ("float", "pow"):
                     return TYPE_FLOAT
-                elif fid in ("bool", "isinstance", "issubclass", "isdigit", "isascii"):
+                elif fid == "complex":
+                    return TYPE_COMPLEX
+                elif fid == "round":
+                    return TYPE_FLOAT if len(expr.args) >= 2 else TYPE_INT
+                elif fid == "abs":
+                    if expr.args:
+                        a0_t = self._infer_node_type(expr.args[0], local_vars)
+                        mod = getattr(self, "current_module", None)
+                        if isinstance(a0_t, InstanceType) and mod is not None:
+                            cs = mod.classes.get(a0_t.class_name)
+                            if cs and "__abs__" in cs.methods and cs.methods["__abs__"].return_type != TYPE_VOID:
+                                return cs.methods["__abs__"].return_type
+                        if a0_t.is_complex() or a0_t.is_float():
+                            return TYPE_FLOAT
+                    return TYPE_INT
+                elif fid in ("min", "max"):
+                    if len(expr.args) >= 2 and any(self._infer_node_type(a, local_vars).is_float() for a in expr.args):
+                        return TYPE_FLOAT
+                    if len(expr.args) == 1:
+                        a0_t = self._infer_node_type(expr.args[0], local_vars)
+                        if getattr(a0_t, "element_type", None) and a0_t.element_type.is_float():
+                            return TYPE_FLOAT
+                    return TYPE_INT
+                elif fid in ("bool", "isinstance", "issubclass", "hasattr", "isdigit", "isascii"):
                     return TYPE_BOOL
+                elif fid == "getattr" and len(expr.args) >= 2:
+                    if isinstance(expr.args[1], ast.Constant) and isinstance(expr.args[1].value, str):
+                        ocls = None
+                        o_t = self._infer_node_type(expr.args[0], local_vars)
+                        if isinstance(o_t, InstanceType):
+                            ocls = o_t.class_name
+                        mod_ref = getattr(self, "current_module", None)
+                        if ocls and mod_ref and ocls in mod_ref.classes:
+                            cs = mod_ref.classes[ocls]
+                            if expr.args[1].value in getattr(cs, "field_types", {}):
+                                return cs.field_types[expr.args[1].value]
+                    if len(expr.args) >= 3:
+                        return self._infer_node_type(expr.args[2], local_vars)
+                    return TYPE_INT
                 elif fid == "range":
                     return ListType(element_type=TYPE_INT)
                 elif fid in ("list", "sorted", "reversed"):
@@ -2923,12 +3009,6 @@ class AstAnalyzer:
                             )
                     return TYPE_TUPLE
                 mod = getattr(self, "current_module", None)
-                if fid == "abs" and expr.args and mod is not None:
-                    a0_t = self._infer_node_type(expr.args[0], local_vars)
-                    if isinstance(a0_t, InstanceType):
-                        cs = mod.classes.get(a0_t.class_name)
-                        if cs and "__abs__" in cs.methods and cs.methods["__abs__"].return_type != TYPE_VOID:
-                            return cs.methods["__abs__"].return_type
                 if mod is not None and fid in mod.functions:
                     rt = mod.functions[fid].return_type
                     if rt != TYPE_VOID:
@@ -2996,7 +3076,27 @@ class AstAnalyzer:
                     recv_t = self._infer_node_type(expr.func.value, local_vars)
                     if recv_t.is_list() or recv_t.is_dict() or recv_t.is_set():
                         return recv_t
-                elif attr in ("chain", "accumulate", "matmul", "zeros", "ones", "array", "asarray", "arange", "pairwise"):
+                elif attr in ("linspace", "empty", "arange", "zeros", "ones", "sign", "array", "asarray", "asanyarray"):
+                    if attr == "sign" and expr.args and not self._infer_node_type(expr.args[0], local_vars).is_list():
+                        return TYPE_FLOAT
+                    if attr in ("zeros", "ones", "empty") and expr.args and isinstance(expr.args[0], (ast.Tuple, ast.List)) and len(expr.args[0].elts) >= 2:
+                        return ListType(element_type=ListType(element_type=TYPE_FLOAT))
+                    return ListType(element_type=TYPE_FLOAT)
+                elif attr == "column_stack":
+                    return ListType(element_type=ListType(element_type=TYPE_FLOAT))
+                elif attr in ("sin", "cos", "tan", "exp", "log", "log10"):
+                    if expr.args and self._infer_node_type(expr.args[0], local_vars).is_list():
+                        return ListType(element_type=TYPE_FLOAT)
+                    return TYPE_FLOAT
+                elif attr in ("ptp", "mean", "sum", "hypot", "atan2", "pow"):
+                    return TYPE_FLOAT
+                elif attr == "sqrt":
+                    if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "cmath":
+                        return TYPE_COMPLEX
+                    return TYPE_FLOAT
+                elif attr in ("isfinite", "isnan", "isinf", "isclose", "all", "any"):
+                    return TYPE_BOOL
+                elif attr in ("chain", "accumulate", "matmul", "pairwise"):
                     if attr in ("matmul",):
                         return ListType(element_type=TYPE_LIST)
                     return TYPE_LIST
@@ -3038,9 +3138,17 @@ class AstAnalyzer:
                                 cq.extend(cs.bases)
 
         elif isinstance(expr, ast.Attribute):
+            if (
+                isinstance(expr.value, ast.Name)
+                and expr.value.id in ("math", "cmath", "np", "numpy")
+                and expr.attr in ("pi", "e", "tau", "inf", "nan")
+            ):
+                return TYPE_FLOAT
             mod = getattr(self, "current_module", None)
             if mod is not None:
                 recv_t = self._infer_node_type(expr.value, local_vars)
+                if expr.attr in ("real", "imag") and (recv_t.is_complex() or recv_t.is_float()):
+                    return TYPE_FLOAT
                 if isinstance(recv_t, InstanceType):
                     seen_c: Set[str] = set()
                     cq = [recv_t.class_name]
@@ -3084,6 +3192,11 @@ class AstAnalyzer:
                 if container_type.is_str():
                     return TYPE_STR
                 if container_type.is_list():
+                    if isinstance(sub_slice, ast.Tuple) and len(sub_slice.elts) == 2 and not any(isinstance(e, ast.Slice) for e in sub_slice.elts):
+                        elem1 = getattr(container_type, "element_type", None)
+                        if elem1 and elem1.is_list() and getattr(elem1, "element_type", None):
+                            return elem1.element_type
+                        return TYPE_INT
                     if hasattr(container_type, "element_type") and container_type.element_type:
                         return container_type.element_type
                     return TYPE_INT
@@ -3163,6 +3276,12 @@ class AstAnalyzer:
                 arg_type = TYPE_PTR
             elif arg_name == "_pyfasm_env":
                 arg_type = TYPE_PTR
+            elif node.name.startswith("_pyfasm_genexp_") and node.name in getattr(self, "_genexp_arg_types", {}):
+                gtypes = self._genexp_arg_types[node.name]
+                if idx < len(gtypes) and gtypes[idx] != TYPE_INT:
+                    arg_type = gtypes[idx]
+                else:
+                    is_dyn_arg = arg_name != "self"
             elif node.name.startswith(("_pyfasm_lambda_", "_pyfasm_closure_", "_pyfasm_nested_")):
                 is_dyn_arg = True
             elif arg_name in ("st", "s", "str", "string", "text", "txt", "msg", "prompt", "pattern", "subpattern", "word", "line"):
@@ -3304,8 +3423,18 @@ class AstAnalyzer:
                         offset += 8
                     elif self._should_upgrade_type(local_vars[vname].var_type, vtype):
                         local_vars[vname].var_type = vtype
-                elif isinstance(sub_node, ast.Call) and isinstance(sub_node.func, ast.Attribute):
-                    if isinstance(sub_node.func.value, ast.Name):
+                elif isinstance(sub_node, ast.Call):
+                    if isinstance(sub_node.func, ast.Name):
+                        cfid = sub_node.func.id
+                        if cfid == "_pyfasm_closure_new" and sub_node.args and isinstance(sub_node.args[0], ast.Name):
+                            self._closure_cap_types[sub_node.args[0].id] = [
+                                self._infer_node_type(a, local_vars) for a in sub_node.args[1:]
+                            ]
+                        elif cfid.startswith("_pyfasm_genexp_"):
+                            self._genexp_arg_types[cfid] = [
+                                self._infer_node_type(a, local_vars) for a in sub_node.args
+                            ]
+                    if isinstance(sub_node.func, ast.Attribute) and isinstance(sub_node.func.value, ast.Name):
                         cname = sub_node.func.value.id
                         attr = sub_node.func.attr
                         if attr in ("append",) and len(sub_node.args) == 1:
@@ -3452,6 +3581,13 @@ class AstAnalyzer:
                 cur_t = _get_var_type(cname)
                 if cur_t is not None and (cur_t.is_list() or cur_t == TYPE_INT):
                     merged = self._merge_element_types(obs)
+                    if (
+                        cur_t.is_list()
+                        and getattr(cur_t, "element_type", None) is not None
+                        and cur_t.element_type.is_list()
+                        and (merged is None or not merged.is_list())
+                    ):
+                        continue
                     new_lt = ListType(element_type=merged) if merged else TYPE_LIST
                     _set_var_type(cname, new_lt)
             for cname, obs in pass_set_obs.items():

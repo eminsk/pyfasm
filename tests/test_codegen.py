@@ -280,6 +280,7 @@ def main() -> int:
 
 def test_native_win32_ui_controls(tmp_path: Path):
     source = """
+import tkinter as tk
 import customtkinter as ctk
 
 class DemoApp(ctk.CTk):
@@ -289,6 +290,7 @@ class DemoApp(ctk.CTk):
         self.entry = ctk.CTkEntry(self, placeholder_text="Type query...")
         self.btn = ctk.CTkButton(self, text="Search", command=self.do_action)
         self.lst = ctk.CTkScrollableFrame(self)
+        self.box = tk.Listbox(self)
 
     def do_action(self):
         q = self.entry.get()
@@ -304,8 +306,9 @@ def main():
     assert "call _pyfasm_create_label" in asm
     assert "call _pyfasm_create_edit" in asm
     assert "call _pyfasm_create_button" in asm
+    assert "call _pyfasm_create_frame" in asm
     assert "call _pyfasm_create_listbox" in asm
-    assert "call _pyfasm_get_edit_text" in asm
+    assert "call _pyfasm_unified_get" in asm or "call _pyfasm_get_edit_text" in asm
     assert "call _pyfasm_run_window_loop" in asm
 
     src_file = tmp_path / "gui_demo.py"

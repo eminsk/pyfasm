@@ -29,6 +29,7 @@ SUPPORTED_DUNDERS_SUMMARY: str = (
 
 NATIVELY_SUPPORTED_OR_ADAPTED_MODULES: Set[str] = {
     "math",
+    "cmath",
     "json",
     "bisect",
     "heapq",

@@ -17,6 +17,9 @@ class PyFasmType:
     def is_float(self) -> bool:
         return isinstance(self, FloatType)
 
+    def is_complex(self) -> bool:
+        return isinstance(self, ComplexType)
+
     def is_bool(self) -> bool:
         return isinstance(self, BoolType)
 
@@ -58,6 +61,12 @@ class IntType(PyFasmType):
 class FloatType(PyFasmType):
     name: str = "float"
     size_bytes: int = 8  # 64-bit double precision float (SSE)
+
+
+@dataclass(frozen=True)
+class ComplexType(PyFasmType):
+    name: str = "complex"
+    size_bytes: int = 8  # Pointer to PYFCMPLX (tag, re_f64, im_f64)
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,7 @@ class VoidType(PyFasmType):
 # Singletons
 TYPE_INT = IntType()
 TYPE_FLOAT = FloatType()
+TYPE_COMPLEX = ComplexType()
 TYPE_BOOL = BoolType()
 TYPE_STR = StrType()
 TYPE_PTR = PtrType()
@@ -151,6 +161,8 @@ def resolve_type(type_name: Optional[str]) -> PyFasmType:
         return TYPE_INT
     if norm in ("float", "f64", "double"):
         return TYPE_FLOAT
+    if norm in ("complex", "c128", "complex128"):
+        return TYPE_COMPLEX
     if norm in ("bool", "boolean"):
         return TYPE_BOOL
     if norm in ("str", "string"):

@@ -1,3 +1,14 @@
+python3-pyfasm64 (2.3.0-1) stable; urgency=medium
+
+  * Release 2.3.0: Complete Universal Native Python/NumPy/Tk/CTk/Qt/Pygame/Matplotlib Compiler & Cross-Platform Runtimes.
+  * Completed pure Python, math, complex, vectorized NumPy 1D/2D arrays, generator tuples, early-bound lambda defaults, and IEEE-754 float type inference.
+  * Completed PyQt5/PyQt6/PySide6/PySide2 layouts, QTimer, widgets, signals, and authentic Win32/GDI/DIB rendering.
+  * Added native data-driven Matplotlib engine (Figure/Axes/artists/save BMP/Win32 canvas) with zero hardcoded plot templates.
+  * Completed Pygame 2D surface/draw/font/image/transform/Rect engine and removed Win64-only restrictions across Linux, macOS, and MyOS.
+  * Synchronized non-Win64 runtimes with portable GUI/Matplotlib/Pygame layers and real syscalls, eliminating duplicate labels.
+
+ -- eminsk <M_N_N@tut.by>  Sun, 22 Nov 2026 06:26:00 -0500
+
 python3-pyfasm64 (2.0.2-1) stable; urgency=medium
 
   * Release 2.0.2: Native GUI Runtime Stability, Win64 Stack Safety & NumPy Parity.

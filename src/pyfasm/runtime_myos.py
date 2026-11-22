@@ -58,6 +58,7 @@ def get_myos_runtime_code() -> str:
     """Returns native MyOS routines: Serial port I/O & VGA framebuffer output."""
     from pyfasm.runtime_common import get_common_runtime_code
     return """
+_pyfasm_alloc_memory:
 _pyfasm_alloc:
     ; RCX = bytes to allocate
     push    rbx
@@ -73,6 +74,7 @@ _pyfasm_alloc:
     pop     rbx
     ret
 
+_pyfasm_free_memory:
 _pyfasm_free:
     xor     eax, eax
     ret
@@ -355,12 +357,14 @@ _pyfasm_grid_columnconfigure:
     push    rbp
     mov     rbp, rsp
     push    rbx
+    push    r12
     sub     rsp, 32
 
     test    rcx, rcx
     jnz     .gcc_c_ok
     mov     rcx, [_pyfasm_h_wnd]
 .gcc_c_ok:
+    mov     r12, rcx
     cmp     rdx, 32
     jae     .gcc_done
 
@@ -372,7 +376,7 @@ _pyfasm_grid_columnconfigure:
     mov     r11, r10
     imul    r11, 272
     lea     rbx, [_pyfasm_container_cfg_table + r11]
-    cmp     [rbx], rcx
+    cmp     [rbx], r12
     je      .gcc_set
     inc     r10
     jmp     .gcc_find
@@ -390,13 +394,14 @@ _pyfasm_grid_columnconfigure:
     mov     ecx, 34
     rep     stosq
     pop     rdi
-    mov     [rbx], rcx
+    mov     [rbx], r12
 
 .gcc_set:
     mov     dword [rbx + 8 + rdx*4], r8d
 
 .gcc_done:
     add     rsp, 32
+    pop     r12
     pop     rbx
     mov     rsp, rbp
     pop     rbp
@@ -406,12 +411,14 @@ _pyfasm_grid_rowconfigure:
     push    rbp
     mov     rbp, rsp
     push    rbx
+    push    r12
     sub     rsp, 32
 
     test    rcx, rcx
     jnz     .grc_c_ok
     mov     rcx, [_pyfasm_h_wnd]
 .grc_c_ok:
+    mov     r12, rcx
     cmp     rdx, 32
     jae     .grc_done
 
@@ -423,7 +430,7 @@ _pyfasm_grid_rowconfigure:
     mov     r11, r10
     imul    r11, 272
     lea     rbx, [_pyfasm_container_cfg_table + r11]
-    cmp     [rbx], rcx
+    cmp     [rbx], r12
     je      .grc_set
     inc     r10
     jmp     .grc_find
@@ -441,13 +448,14 @@ _pyfasm_grid_rowconfigure:
     mov     ecx, 34
     rep     stosq
     pop     rdi
-    mov     [rbx], rcx
+    mov     [rbx], r12
 
 .grc_set:
     mov     dword [rbx + 136 + rdx*4], r8d
 
 .grc_done:
     add     rsp, 32
+    pop     r12
     pop     rbx
     mov     rsp, rbp
     pop     rbp
@@ -469,33 +477,95 @@ _pyfasm_create_frame:
     ret
 
 _pyfasm_create_canvas:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 200
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 200
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 7
+    xor     edx, edx
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_label:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 300
-    mov     [_pyfasm_last_label_hwnd], rax
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rdx, rcx
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 300
+    mov     [_pyfasm_last_label_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 1
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_edit:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 400
-    mov     [_pyfasm_last_edit_hwnd], rax
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rdx, rcx
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 400
+    mov     [_pyfasm_last_edit_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 2
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_textbox:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 500
-    mov     [_pyfasm_last_edit_hwnd], rax
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rdx, rcx
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 500
+    mov     [_pyfasm_last_edit_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 3
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_button:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rdx, rcx
     mov     rax, [_pyfasm_ctrl_count]
     cmp     rax, 128
     jge     .btn_reg_skip
@@ -504,24 +574,60 @@ _pyfasm_create_button:
     mov     dword [_pyfasm_ctrl_ids + rax*4], r10d
     mov     qword [_pyfasm_ctrl_callbacks + rax*8], r11
 .btn_reg_skip:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 600
-    mov     [_pyfasm_last_btn_hwnd], rax
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 600
+    mov     [_pyfasm_last_btn_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 4
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_checkbox:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 700
-    mov     [_pyfasm_last_btn_hwnd], rax
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rdx, rcx
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 700
+    mov     [_pyfasm_last_btn_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 5
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_create_listbox:
-    mov     rax, [_pyfasm_ctrl_count]
-    add     rax, 800
-    mov     [_pyfasm_last_list_hwnd], rax
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 40
+    and     rsp, -16
+    mov     rbx, [_pyfasm_ctrl_count]
+    add     rbx, 800
+    mov     [_pyfasm_last_list_hwnd], rbx
     inc     qword [_pyfasm_ctrl_count]
+    mov     ecx, 6
+    xor     edx, edx
+    mov     r8, rbx
+    call    _pyfasm_common_record_widget
+    mov     rax, rbx
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_register_hotkey:
@@ -564,30 +670,103 @@ _pyfasm_wnd_proc:
     ret
 
 _pyfasm_run_window_loop:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    sub     rsp, 32
+    and     rsp, -16
+
+    call    _pyfasm_render_tui_window
+
     ; Execute registered button callback if available
-    mov     rcx, [_pyfasm_ctrl_count]
-    xor     rax, rax
+    mov     rsi, [_pyfasm_ctrl_count]
+    cmp     rsi, 128
+    jle     .cb_cnt_ok
+    mov     esi, 128
+.cb_cnt_ok:
+    xor     ebx, ebx
 .cb_loop:
-    cmp     rax, rcx
+    cmp     rbx, rsi
     jge     .cb_done
-    mov     rdx, qword [_pyfasm_ctrl_callbacks + rax*8]
-    test    rdx, rdx
+    mov     rcx, qword [_pyfasm_ctrl_callbacks + rbx*8]
+    test    rcx, rcx
     jz      .next_cb
-    push    rax
-    push    rcx
-    call    rdx
-    pop     rcx
-    pop     rax
+    xor     edx, edx
+    call    _pyfasm_invoke_cb
     jmp     .cb_done
 .next_cb:
-    inc     rax
+    inc     rbx
     jmp     .cb_loop
 .cb_done:
     xor     eax, eax
+    lea     rsp, [rbp - 16]
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_message_box:
-    mov     rcx, rsi
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
     call    _pyfasm_print_str
+    call    _pyfasm_print_newline
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_file_open:
+    mov     rax, -1
+    ret
+
+_pyfasm_file_write_bytes:
+    mov     rax, -1
+    ret
+
+_pyfasm_file_read_bytes:
+    xor     eax, eax
+    ret
+
+_pyfasm_file_write_data:
+    xor     eax, eax
+    ret
+
+_pyfasm_file_read_all:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_file_close:
+    xor     eax, eax
+    ret
+
+_pyfasm_file_write:
+    xor     eax, eax
+    ret
+
+_pyfasm_input:
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .myinp_e
+    call    _pyfasm_print_str
+.myinp_e:
+    mov     ecx, 1
+    call    _pyfasm_alloc
+    mov     byte [rax], 0
+    mov     rsp, rbp
+    pop     rbp
     ret
 """ + get_common_runtime_code()
