@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [2.3.4] - 2026-11-23
+
+### Fixed
+- **codegen: dict-key augmented assignment**: `d[k] += v` (and `-=`, `*=` etc.) was compiled as raw pointer indexing with the key used as a numeric index, causing page faults (`0000000003EC3F80`) in real programs. It now compiles through `dict_get` → operation → `dict_set`.
+- **codegen: string `+=` on dict keys** now routes through `_pyfasm_str_concat`, matching plain `+` concatenation.
+- **pygame: `draw_polygon`** accepts float coordinates like pygame and keeps its point counter on an aligned stack frame (fixes a crash on polygons with 10+ points).
+
+---
+
 ## [2.0.2] - 2026-11-21
 
 ### Fixed & Enhanced
