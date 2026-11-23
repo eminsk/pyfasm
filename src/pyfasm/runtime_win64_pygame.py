@@ -18,6 +18,9 @@ WIN64_PYGAME_RUNTIME_DATA = """
     _pyfasm_pg_mouse_x      dq 0
     _pyfasm_pg_mouse_y      dq 0
     _pyfasm_pg_running      dq 1
+    _pyfasm_pg_krep_on      dq 0
+    _pyfasm_pg_krep_delay   dq 0
+    _pyfasm_pg_krep_interval dq 0
     align 8
     _pyfasm_pg_wc           rb 80
     _pyfasm_pg_msg          rb 48
@@ -456,6 +459,222 @@ _pyfasm_pg_resolve_surf:
     mov     rax, [_pyfasm_pg_mem_dc]
     mov     rdx, [_pyfasm_pg_width]
     mov     r8, [_pyfasm_pg_height]
+    ret
+
+_pyfasm_pg_get_at:
+    ; RCX = surf, RDX = x, R8 = y -> RAX = packed color (0x00RRGGBB)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rsi, rcx                ; surf
+    mov     rbx, rdx                ; x
+    mov     rdi, r8                 ; y
+    ; bounds check
+    test    rbx, rbx
+    jl      .pga_oob
+    cmp     rbx, [rsi + 8]
+    jge     .pga_oob
+    test    rdi, rdi
+    jl      .pga_oob
+    cmp     rdi, [rsi + 16]
+    jge     .pga_oob
+    mov     rdx, [rsi + 40]         ; bits ptr
+    test    rdx, rdx
+    jz      .pga_oob
+    ; offset = y * pitch + x * 3, pitch = (w*3 + 3) & ~3
+    mov     rcx, [rsi + 8]
+    lea     rcx, [rcx + rcx * 2]
+    add     rcx, 3
+    and     rcx, -4
+    imul    rcx, rdi
+    mov     rax, rbx
+    lea     rax, [rax + rax * 2]
+    add     rcx, rax
+    add     rdx, rcx
+    movzx   eax, byte [rdx]
+    movzx   ecx, byte [rdx + 1]
+    shl     ecx, 8
+    or      eax, ecx
+    movzx   ecx, byte [rdx + 2]
+    shl     ecx, 16
+    or      eax, ecx
+    jmp     .pga_done
+.pga_oob:
+    xor     eax, eax
+.pga_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_pg_set_at:
+    ; RCX = surf, RDX = x, R8 = y, R9 = color (0x00RRGGBB)
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rsi, rcx
+    mov     rbx, rdx                ; x
+    mov     rdi, r8                 ; y
+    test    rbx, rbx
+    jl      .psa_done
+    cmp     rbx, [rsi + 8]
+    jge     .psa_done
+    test    rdi, rdi
+    jl      .psa_done
+    cmp     rdi, [rsi + 16]
+    jge     .psa_done
+    mov     rdx, [rsi + 40]
+    test    rdx, rdx
+    jz      .psa_done
+    mov     rcx, [rsi + 8]
+    lea     rcx, [rcx + rcx * 2]
+    add     rcx, 3
+    and     rcx, -4
+    imul    rcx, rdi
+    mov     rax, rbx
+    lea     rax, [rax + rax * 2]
+    add     rcx, rax
+    add     rdx, rcx
+    mov     eax, r9d
+    mov     byte [rdx], al          ; blue
+    shr     eax, 8
+    mov     byte [rdx + 1], al      ; green
+    shr     eax, 8
+    mov     byte [rdx + 2], al      ; red
+.psa_done:
+    lea     rsp, [rbp - 24]
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_pg_subsurface:
+    ; RCX = parent surf, RDX = rect (PYFPGRECT or null) -> RAX = new PYFPGSRF view
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 96
+    and     rsp, -16
+    mov     rsi, rcx
+    mov     rdi, rdx
+    call    _pyfasm_pg_resolve_surf
+    mov     rbx, rax                ; parent hdc
+    mov     r12, rdx                ; parent w
+    mov     r13, r8                 ; parent h
+    xor     r14d, r14d              ; sub x
+    xor     r15d, r15d              ; sub y
+    mov     r8, r12                 ; default w
+    mov     r9, r13                 ; default h
+    test    rdi, rdi
+    jz      .pss_have
+    cmp     rcx, 65536
+    jb      .pss_have
+    cmp     qword [rdi], 4
+    jl      .pss_have
+    mov     r14d, dword [rdi + 8]   ; x
+    mov     r15d, dword [rdi + 16]  ; y
+    mov     r8d, dword [rdi + 24]   ; w
+    mov     r9d, dword [rdi + 32]   ; h
+.pss_have:
+    mov     rcx, r8
+    mov     rdx, r9
+    call    _pyfasm_pg_surface_new
+    test    rbx, rbx
+    jz      .pss_done
+    mov     r13, rax                ; child surf
+    test    rax, rax
+    jz      .pss_done
+    ; DIB is 24-bit top-down with direct bits pointer at surf+40 — copy rows directly
+    mov     r10, [rbx + 40]         ; parent bits
+    mov     r11, [r13 + 40]         ; child bits
+    test    r10, r10
+    jz      .pss_done
+    test    r11, r11
+    jz      .pss_done
+    mov     rax, [r13 + 8]          ; child w
+    mov     r9, [r13 + 16]          ; child h
+    ; clip against parent bounds
+    mov     rcx, [rbx + 8]          ; parent w
+    sub     rcx, r14
+    jle     .pss_done
+    cmp     rax, rcx
+    jle     .psw_ok
+    mov     rax, rcx
+.psw_ok:
+    mov     rcx, [rbx + 16]         ; parent h
+    sub     rcx, r15
+    jle     .pss_done
+    cmp     r9, rcx
+    jle     .psh_ok
+    mov     r9, rcx
+.psh_ok:
+    ; row pitch for 24bpp is (w*3 + 3) & ~3
+    mov     rcx, [rbx + 8]
+    lea     rcx, [rcx + rcx * 2]
+    add     rcx, 3
+    and     rcx, -4
+    mov     [rsp + 32], rcx         ; parent pitch
+    mov     rcx, [r13 + 8]
+    lea     rcx, [rcx + rcx * 2]
+    add     rcx, 3
+    and     rcx, -4
+    mov     [rsp + 40], rcx         ; child pitch
+    ; per-row copy: dst = child_bits + (y * child_pitch), src = parent_bits + ((sub_y + y) * parent_pitch) + sub_x*3
+    xor     rsi, rsi                ; y
+.pss_row:
+    cmp     rsi, r9
+    jge     .pss_done
+    mov     rdi, r11                ; dst
+    mov     rcx, rsi
+    imul    rcx, [rsp + 40]
+    add     rdi, rcx
+    mov     rdx, r10                ; src
+    mov     rcx, r15
+    add     rcx, rsi
+    imul    rcx, [rsp + 32]
+    add     rdx, rcx
+    mov     rcx, r14
+    lea     rcx, [rcx + rcx * 2]
+    add     rdx, rcx
+    mov     rcx, rax                ; bytes = w * 3
+    lea     rcx, [rcx + rcx * 2]
+    push    rsi
+    push    rcx
+    rep     movsb
+    pop     rcx
+    pop     rsi
+    inc     rsi
+    jmp     .pss_row
+.pss_done:
+    lea     rsp, [rbp - 56]
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
     ret
 
 _pyfasm_pg_unpack_color:
@@ -1270,6 +1489,88 @@ _pyfasm_pg_mouse_get_pos:
     mov     [rax + 8], rcx
     movsxd  rcx, dword [_pyfasm_pg_pt + 4]
     mov     [rax + 16], rcx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pmgsp_entry:
+_pyfasm_pg_mouse_set_pos:
+    ; RCX = x, RDX = y (client coords of the pygame window)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    mov     eax, ecx
+    movsxd  r8, edx
+    movsxd  rcx, eax
+    mov     [_pyfasm_pg_pt], ecx
+    mov     [_pyfasm_pg_pt + 4], r8d
+    mov     rcx, [_pyfasm_pg_hwnd]
+    test    rcx, rcx
+    jz      .pmsp_direct
+    lea     rdx, [_pyfasm_pg_pt]
+    call    [ClientToScreen]
+.pmsp_direct:
+    lea     rcx, [_pyfasm_pg_pt]
+    call    [SetCursorPos]
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_pg_mouse_set_visible:
+    ; RCX = 0 -> hide cursor, else show
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jz      .pmsv_hide
+    mov     rcx, [_pyfasm_pg_hwnd]
+    test    rcx, rcx
+    jz      .pmsv_show_std
+    mov     rdx, 32512              ; IDC_ARROW
+    call    [LoadCursorA]
+    mov     rcx, [_pyfasm_pg_hwnd]
+    mov     rdx, rax
+    or      rdx, rdx
+    jz      .pmsv_done
+    jmp     .pmsv_set
+.pmsv_show_std:
+    xor     ecx, ecx
+    mov     rdx, 32512              ; IDC_ARROW
+    call    [LoadCursorA]
+    mov     rcx, [_pyfasm_pg_hwnd]
+    mov     rdx, rax
+    test    rdx, rdx
+    jz      .pmsv_done
+.pmsv_set:
+    call    [SetCursor]
+    jmp     .pmsv_done
+.pmsv_hide:
+    xor     ecx, ecx
+    call    [SetCursor]
+.pmsv_done:
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pkrep_entry:
+_pyfasm_pg_key_set_repeat:
+    ; RCX = delay ms, RDX = interval ms; 0/0 disables
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    mov     rax, rcx
+    or      rax, rdx
+    jz      .pksr_off
+    mov     [_pyfasm_pg_krep_delay], rcx
+    mov     [_pyfasm_pg_krep_interval], rdx
+    mov     byte [_pyfasm_pg_krep_on], 1
+    jmp     .pksr_done
+.pksr_off:
+    mov     byte [_pyfasm_pg_krep_on], 0
+.pksr_done:
     mov     rsp, rbp
     pop     rbp
     ret

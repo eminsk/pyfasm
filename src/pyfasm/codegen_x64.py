@@ -6351,6 +6351,41 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return True
 
+        if attr_name == "set_pos" and "mouse" in func_dump_lower and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "x (or point tuple)")
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax", "y")
+            else:
+                self.emit("movsxd rdx, dword [rax + 8]", "y from tuple")
+            self.emit("call _pyfasm_pg_mouse_set_pos")
+            self.emit("mov eax, 1", "None")
+            return True
+
+        if attr_name == "set_visible" and ("mouse" in func_dump_lower or "display" in func_dump_lower):
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "visibility flag")
+            else:
+                self.emit("mov rcx, 1", "default visible")
+            self.emit("call _pyfasm_pg_mouse_set_visible")
+            self.emit("mov eax, 1", "None")
+            return True
+
+        if attr_name == "set_repeat" and ("key" in func_dump_lower or "pygame" in func_dump_lower):
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "delay ms")
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax", "interval ms")
+            else:
+                self.emit("xor ecx, ecx", "disable repeat")
+                self.emit("xor edx, edx")
+            self.emit("call _pyfasm_pg_key_set_repeat")
+            self.emit("mov eax, 1", "None")
+            return True
+
         if attr_name == "Clock" or func_name == "Clock":
             self.emit("mov rax, 1", "pygame Clock handle")
             return True
@@ -6732,7 +6767,61 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return True
 
-        if "mixer" in func_dump_lower and attr_name in ("init", "Sound", "play", "stop", "load", "set_volume", "get_busy", "fadeout"):
+        if attr_name in ("rotozoom", "scale2x") and (prefix in ("transform", "pygame", "pg") or "transform" in func_dump_lower):
+            self.emit("sub rsp, 64")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 32], rax", "Surface")
+            if attr_name == "scale2x":
+                self.emit("mov qword [rsp + 40], 2", "scale2x doubles the size")
+            elif len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov [rsp + 40], rax", "angle")
+            else:
+                self.emit("mov qword [rsp + 40], 0", "default angle 0")
+            if len(call.args) >= 3:
+                self._generate_expr(call.args[2])
+                self.emit("mov r8, rax", "zoom")
+            elif attr_name == "scale2x":
+                self.emit("xor r8d, r8d", "zoom ignored for scale2x")
+            else:
+                self.emit("mov r8, 1", "default zoom 1.0 bits")
+            self.emit("mov rcx, [rsp + 32]")
+            self.emit("mov rdx, [rsp + 40]")
+            self.emit("call _pyfasm_pg_transform_scale")
+            self.emit("add rsp, 64")
+            return True
+
+        if attr_name in ("get_at", "set_at") and isinstance(call.func, ast.Attribute):
+            self.emit("sub rsp, 64")
+            self._generate_expr(call.func.value)
+            self.emit("mov [rsp + 32], rax", "Surface")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 40], rax", "x")
+            if len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov [rsp + 48], rax", "y")
+            else:
+                self.emit("mov qword [rsp + 48], 0")
+            self.emit("mov rcx, [rsp + 32]")
+            self.emit("mov rdx, [rsp + 40]")
+            self.emit("mov r8, [rsp + 48]")
+            self.emit(f"call _pyfasm_pg_{attr_name}")
+            self.emit("add rsp, 64")
+            return True
+
+        if attr_name == "subsurface" and isinstance(call.func, ast.Attribute):
+            self.emit("sub rsp, 80")
+            self._generate_expr(call.func.value)
+            self.emit("mov [rsp + 32], rax", "parent Surface")
+            self._generate_expr(call.args[0])
+            self.emit("mov [rsp + 40], rax", "Rect")
+            self.emit("mov rcx, [rsp + 32]")
+            self.emit("mov rdx, [rsp + 40]")
+            self.emit("call _pyfasm_pg_subsurface")
+            self.emit("add rsp, 80")
+            return True
+
+        if "mixer" in func_dump_lower and attr_name in ("init", "Sound", "play", "stop", "load", "set_volume", "get_busy", "fadeout", "quit", "pause", "unpause", "set_num_channels", "get_init"):
             self.emit("call _pyfasm_pg_mixer_noop")
             return True
 

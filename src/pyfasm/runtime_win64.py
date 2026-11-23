@@ -13047,6 +13047,9 @@ section '.idata' import data readable writeable
            PeekMessageW, 'PeekMessageW', \\
            GetAsyncKeyState, 'GetAsyncKeyState', \\
            ScreenToClient, 'ScreenToClient', \\
+           ClientToScreen, 'ClientToScreen', \\
+           SetCursorPos, 'SetCursorPos', \\
+           SetCursor, 'SetCursor', \\
            DestroyWindow, 'DestroyWindow', \\
            AdjustWindowRectEx, 'AdjustWindowRectEx', \\
            InvalidateRect, 'InvalidateRect', \\
