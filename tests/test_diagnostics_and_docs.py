@@ -94,14 +94,28 @@ def test_e2001_e2002_e2003_unsupported_constructs(tmp_path: Path):
     assert any(d.code == "E2002" for d in rep_m.errors)
     assert "error[E2002]" in rep_m.format_all()
 
-    nonlocal_file = tmp_path / "nonlocal_mod.py"
-    nonlocal_file.write_text(
+    nonlocal_valid = tmp_path / "nonlocal_valid_mod.py"
+    nonlocal_valid.write_text(
         "def outer() -> int:\n"
         "    x = 1\n"
         "    def inner() -> int:\n"
         "        nonlocal x\n"
         "        x = 2\n"
         "        return x\n"
+        "    return inner()\n",
+        encoding="utf-8",
+    )
+    ok_nv, rep_nv = compiler.check_file(str(nonlocal_valid))
+    assert ok_nv
+    assert not rep_nv.errors
+
+    nonlocal_file = tmp_path / "nonlocal_mod.py"
+    nonlocal_file.write_text(
+        "def outer() -> int:\n"
+        "    def inner() -> int:\n"
+        "        nonlocal missing_x\n"
+        "        missing_x = 2\n"
+        "        return missing_x\n"
         "    return inner()\n",
         encoding="utf-8",
     )

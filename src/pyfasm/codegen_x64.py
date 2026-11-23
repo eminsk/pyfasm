@@ -144,12 +144,14 @@ BUILTIN_EXCEPTIONS_AND_SYMBOLS: Set[str] = {
     "getattr", "hasattr", "setattr", "delattr", "isinstance", "issubclass",
     "callable", "classmethod", "staticmethod", "property", "super",
     "type", "object", "id", "repr", "dir", "vars", "format", "hash",
-    "sorted", "reversed", "slice", "complex", "frozenset", "globals", "locals",
+    "sorted", "reversed", "slice", "complex", "frozenset", "globals", "locals", "eval",
     "bisect", "bisect_right", "bisect_left", "zip", "enumerate",
     "heappush", "heappop", "heapify", "heapreplace", "sort", "list_sort",
     "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa",
     "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate",
-    "reduce", "set", "count", "math_gcd", "_pyfasm_closure_new", "_pyfasm_closure_get",
+    "reduce", "set", "count", "math_gcd",
+    "_pyfasm_closure_new", "_pyfasm_closure_get",
+    "_pyfasm_cell_new", "_pyfasm_cell_get", "_pyfasm_cell_set",
     "ctk", "np", "math", "sys", "os", "json", "itertools", "time", "re",
 }
 
@@ -480,6 +482,12 @@ class X64CodeGen:
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 fid = node.func.id
+                if fid == "_pyfasm_cell_get" and node.args and isinstance(node.args[0], ast.Name):
+                    cvt = getattr(self.module, "cell_val_types", {}).get(node.args[0].id)
+                    if isinstance(cvt, InstanceType):
+                        return cvt.class_name
+                if fid == "_pyfasm_cell_set" and len(node.args) >= 2:
+                    return self.resolve_instance_class(node.args[1])
                 if fid in self.module.classes:
                     return fid
                 if getattr(self.current_func, "is_classmethod", False) and self.current_func and self.current_func.args:
@@ -1043,6 +1051,8 @@ class X64CodeGen:
                 if ct.is_dict() and getattr(ct, "val_type", None) is None and len(expr.args) < 2:
                     return True
             if isinstance(expr.func, ast.Name):
+                if expr.func.id == "eval":
+                    return True
                 if expr.func.id in self.module.functions:
                     if getattr(self.module.functions[expr.func.id], "is_dynamic_return", False):
                         return True
@@ -1054,6 +1064,15 @@ class X64CodeGen:
             elif isinstance(expr.func, ast.Subscript) and self._infer_expr_type(expr) == TYPE_INT:
                 return True
         return self._infer_expr_type(expr) == TYPE_PTR
+
+    @staticmethod
+    def _is_direct_eval_call(expr: Optional[ast.AST]) -> bool:
+        return (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "eval"
+            and bool(expr.args)
+        )
 
     def _method_call_target(self, cls_name: Optional[str], vcall_key: str, concrete_target: str) -> str:
         if cls_name and self._method_has_polymorphic_impls(cls_name, vcall_key):
@@ -1267,6 +1286,15 @@ class X64CodeGen:
 
         if isinstance(expr, ast.Constant) and expr.value is None:
             self.emit("lea rax, [none_str]")
+            return
+
+        if not is_repr and self._is_direct_eval_call(expr):
+            self._generate_expr(expr)
+            self.emit("mov rcx, rax")
+            self.emit("mov rdx, [_pyfasm_eval_last_type]")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_eval_to_str")
+            self.emit("add rsp, 32")
             return
 
         part_type = self._infer_expr_type(expr)
@@ -2030,7 +2058,7 @@ class X64CodeGen:
             self.emit_raw("; Unresolved External Python Symbols / Fallback Stubs")
             self.emit_raw("; ============================================================")
             for sym in sorted(self.unresolved_symbols):
-                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce", "set", "count", "math_gcd", "_pyfasm_closure_new", "_pyfasm_closure_get", "StopIteration"):
+                if sym in ("bisect", "bisect_right", "bisect_left", "zip", "enumerate", "heappush", "heappop", "heapify", "heapreplace", "sorted", "sort", "list_sort", "matmul", "nanogemm_matmul", "nanogemm_simd_isa", "get_simd_isa", "zeros", "ones", "gcd", "lcm", "isqrt", "factorial", "chain", "accumulate", "reduce", "set", "count", "math_gcd", "eval", "_pyfasm_closure_new", "_pyfasm_closure_get", "_pyfasm_cell_new", "_pyfasm_cell_get", "_pyfasm_cell_set", "StopIteration"):
                     continue
                 lbl = safe_asm_label(sym)
                 self.emit_raw(f"{lbl}:")
@@ -2162,6 +2190,8 @@ include 'runtime.inc'
 
 include 'functions.inc'
 """
+            if self.target == "myos":
+                main_asm += "\nalign 16\n_pyfasm_myos_heap_base:\n"
         from pyfasm.optimizer import optimize_fasm_code
         res_dict = {
             "main.asm": main_asm,
@@ -2202,6 +2232,8 @@ include 'functions.inc'
                 "    dd 0, 8\n"
                 "end if\n"
             )
+        elif self.target == "myos":
+            raw_parts.append("align 16\n_pyfasm_myos_heap_base:\n")
         raw = "\n".join(raw_parts)
         from pyfasm.optimizer import optimize_fasm_code
         return optimize_fasm_code(raw)
@@ -3944,6 +3976,16 @@ include 'functions.inc'
                                 return cs.field_types[expr.args[1].value]
                     if len(expr.args) >= 3:
                         return self._infer_expr_type(expr.args[2])
+                    return TYPE_INT
+                if fn_id == "_pyfasm_cell_new":
+                    return TYPE_PTR
+                if fn_id == "_pyfasm_cell_get":
+                    if expr.args and isinstance(expr.args[0], ast.Name):
+                        return getattr(self.module, "cell_val_types", {}).get(expr.args[0].id, TYPE_INT)
+                    return TYPE_INT
+                if fn_id == "_pyfasm_cell_set":
+                    if len(expr.args) >= 2:
+                        return self._infer_expr_type(expr.args[1])
                     return TYPE_INT
                 if fn_id in self.module.classes:
                     return InstanceType(class_name=fn_id)
@@ -7490,6 +7532,58 @@ include 'functions.inc'
             self.emit(f"mov rax, [rax + {(cap_idx + 2) * 8}]", f"load closure capture {cap_idx}")
             return
 
+        if func_name == "_pyfasm_cell_new":
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("sub rsp, 16", "aligned slot for initial cell value")
+                self.emit("mov [rsp], rax")
+                self.emit("mov ecx, 8", "allocate 8-byte nonlocal cell box")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_alloc")
+                self.emit("add rsp, 32")
+                self.emit("mov rdx, [rsp]", "restore initial cell value")
+                self.emit("add rsp, 16")
+                self.emit("mov [rax], rdx", "store initial cell value")
+            else:
+                self.emit("mov ecx, 8", "allocate 8-byte nonlocal cell box")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_alloc")
+                self.emit("add rsp, 32")
+                self.emit("mov qword [rax], 0", "initialize empty cell to 0")
+            return
+
+        if func_name == "_pyfasm_cell_get" and call.args:
+            lbl_done = self.new_label("cell_get_done")
+            self._generate_expr(call.args[0])
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_done}")
+            self.emit("mov rax, [rax]", "dereference nonlocal cell box")
+            self.emit_raw(f"{lbl_done}:")
+            return
+
+        if func_name == "_pyfasm_cell_set" and len(call.args) >= 2:
+            lbl_done = self.new_label("cell_set_done")
+            self._generate_expr(call.args[1])
+            self.emit("sub rsp, 16", "aligned slot for new cell value")
+            self.emit("mov [rsp], rax")
+            self._generate_expr(call.args[0])
+            self.emit("mov rdx, [rsp]", "restore new cell value")
+            self.emit("add rsp, 16")
+            self.emit("test rax, rax")
+            self.emit(f"jz {lbl_done}")
+            self.emit("mov [rax], rdx", "store value into nonlocal cell box")
+            self.emit_raw(f"{lbl_done}:")
+            self.emit("mov rax, rdx", "cell assignment returns stored value")
+            return
+
+        if func_name == "eval" and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "expression string")
+            self.emit("sub rsp, 32", "shadow space for _pyfasm_eval")
+            self.emit("call _pyfasm_eval")
+            self.emit("add rsp, 32")
+            return
+
         if "pygame" in self.features:
             if self._try_emit_pygame_call(call, func_name, attr_name, prefix):
                 return
@@ -7930,6 +8024,14 @@ include 'functions.inc'
         # int(val) conversion / cast
         if func_name == "int" and call.args:
             arg0 = call.args[0]
+            if self._is_direct_eval_call(arg0):
+                self._generate_expr(arg0)
+                self.emit("mov rcx, rax")
+                self.emit("mov rdx, [_pyfasm_eval_last_type]")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_eval_to_int")
+                self.emit("add rsp, 32")
+                return
             arg_type = self._infer_expr_type(arg0)
             self._generate_expr(arg0)
             if arg_type.is_float():
@@ -7945,6 +8047,14 @@ include 'functions.inc'
         # float(val) conversion / cast
         if func_name == "float" and call.args:
             arg0 = call.args[0]
+            if self._is_direct_eval_call(arg0):
+                self._generate_expr(arg0)
+                self.emit("mov rcx, rax")
+                self.emit("mov rdx, [_pyfasm_eval_last_type]")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_eval_to_float")
+                self.emit("add rsp, 32")
+                return
             arg_type = self._infer_expr_type(arg0)
             self._generate_expr(arg0)
             if not arg_type.is_float():
@@ -8082,6 +8192,14 @@ include 'functions.inc'
         # str(val) / repr(val) conversion
         if func_name in ("str", "repr") and call.args:
             arg0 = call.args[0]
+            if func_name == "str" and self._is_direct_eval_call(arg0):
+                self._generate_expr(arg0)
+                self.emit("mov rcx, rax")
+                self.emit("mov rdx, [_pyfasm_eval_last_type]")
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_eval_to_str")
+                self.emit("add rsp, 32")
+                return
             if self.target in ("win64", "dll"):
                 self._emit_win64_to_str(arg0, is_repr=(func_name == "repr"), call_node=call)
                 return
@@ -10578,6 +10696,13 @@ include 'functions.inc'
                     if isinstance(arg, ast.Constant) and arg.value is None:
                         self.emit("lea rcx, [none_str]")
                         self.emit("call _pyfasm_print_str")
+                    elif self._is_direct_eval_call(arg):
+                        self._generate_expr(arg)
+                        self.emit("mov rcx, rax")
+                        self.emit("mov rdx, [_pyfasm_eval_last_type]")
+                        self.emit("sub rsp, 32", "shadow space")
+                        self.emit("call _pyfasm_print_eval_value")
+                        self.emit("add rsp, 32")
                     else:
                         arg_type = self._infer_expr_type(arg)
                         self._generate_expr(arg)
@@ -10629,7 +10754,7 @@ include 'functions.inc'
                             self.emit("mov rcx, rax")
                             self.emit("call _pyfasm_print_str")
                         elif arg_type.is_int():
-                            if self.target in ("win64", "dll") and self._is_ambiguous_dynamic_expr(arg):
+                            if self._is_ambiguous_dynamic_expr(arg):
                                 self.emit("mov rcx, rax")
                                 self.emit("sub rsp, 32", "shadow space")
                                 self.emit("call _pyfasm_print_auto")

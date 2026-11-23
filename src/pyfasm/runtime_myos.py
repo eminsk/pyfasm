@@ -50,7 +50,6 @@ _pyfasm_lfb_height      dd 768
 _pyfasm_lfb_pitch       dd 4096
 align 16
 _pyfasm_myos_heap_ptr   dq _pyfasm_myos_heap_base
-_pyfasm_myos_heap_base  rb 16 * 1024 * 1024
 """ + get_common_runtime_data()
 
 

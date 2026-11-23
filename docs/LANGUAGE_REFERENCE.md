@@ -75,7 +75,7 @@ Running `pyfasm64 check` or `pyfasm64 compile` flags these immediately instead o
 * **Hard Errors**:
   * `E2001`: `async def`, `await`, `async for`, `async with` (use `spawn_thread()` or `pyfasm64 bundle`)
   * `E2002`: `class X(metaclass=...)`
-  * `E2003`: `nonlocal` statements in nested scopes
+  * `E2003`: Unbound `nonlocal` statements (valid `nonlocal` bindings in enclosing function scopes compile natively)
 * **Warnings (promoted to errors under `--strict`)**:
   * `W2004`: `with <expr>:` where `<expr>` is neither `open(...)` nor a class instance defining `__enter__`/`__exit__`
   * `W2005`: Imports of known unsupported/binary C-extension packages

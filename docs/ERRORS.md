@@ -16,7 +16,7 @@ Warnings (`Wxxxx`) still allow compilation to succeed in default mode (emitting 
 | **`E2000`** | `error` | AST Lowering | AST preprocessing failure |
 | **`E2001`** | `error` | Semantic Check | Asyncio construct (`async def`, `await`, `async for`, `async with`) in AOT compile mode |
 | **`E2002`** | `error` | Semantic Check | Metaclass (`class X(metaclass=...)`) in AOT compile mode |
-| **`E2003`** | `error` | Semantic Check | `nonlocal` statement inside nested closure |
+| **`E2003`** | `error` | Semantic Check | Invalid `nonlocal <name>` with no enclosing function binding |
 | **`W2004`** / **`E2004`** | `warning` (strict -> `error`) | Semantic Check | `with <expr>:` where `<expr>` is not `open(...)` or a class defining `__enter__`/`__exit__` |
 | **`W2005`** / **`E2005`** | `warning` (strict -> `error`) | Import Check | Unsupported external or binary C-extension module import (`pandas`, `asyncio`, `torch`, etc.) |
 | **`W2006`** / **`E2006`** | `warning` (strict -> `error`) | OOP Check | Class defines a magic method not wired for automatic dispatch (`__getattr__`, `__hash__`, `__del__`, etc.) |
@@ -76,9 +76,11 @@ error[E2001]: Asyncio construct 'async FunctionDef' is not supported in AOT nati
 
 ---
 
-### `E2003` — `nonlocal` not supported
+### `E2003` — Unbound `nonlocal` target
 
-**Fix:** Store mutable shared state on a class instance (`self.count`), pass a 1-element list/box, or use module globals.
+**Note:** `nonlocal` statements referencing variables bound in an enclosing function scope compile natively via shared cell boxes. `E2003` is emitted only when `nonlocal` appears at module level or names a variable not bound in any enclosing function.
+
+**Fix:** Bind the variable in an enclosing function scope before declaring `nonlocal`, or use `global` for module-level variables.
 
 ---
 

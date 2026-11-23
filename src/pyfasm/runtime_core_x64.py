@@ -7,6 +7,9 @@ All functions strictly adhere to the Microsoft x64 ABI (RCX, RDX, R8, R9) and st
 """
 
 
+from .runtime_eval_x64 import get_eval_x64_code, get_eval_x64_data
+
+
 def get_core_x64_data() -> str:
     return r"""
     align 8
@@ -40,7 +43,7 @@ def get_core_x64_data() -> str:
     align 8
     _pyfasm_attr_table_ptr  dq 0
     _pyfasm_dyn_attrs_head  dq 0
-"""
+""" + get_eval_x64_data()
 
 
 def get_core_x64_code() -> str:
@@ -2845,4 +2848,4 @@ _pyfasm_list_remove_str:
     pop     rsi
     pop     rbx
     ret
-"""
+""" + get_eval_x64_code()

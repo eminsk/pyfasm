@@ -5923,13 +5923,23 @@ _pyfasm_is_utf8_str_ptr:
     ret
 
 _pyfasm_print_auto:
-    ; RCX = value (int64 or UTF-8 string pointer)
+    ; RCX = value (int64, f64 bits, or UTF-8 string pointer)
     push    rbp
     mov     rbp, rsp
     push    rbx
     sub     rsp, 40
     and     rsp, -16
     mov     rbx, rcx
+    mov     rax, rbx
+    sar     rax, 48
+    test    rax, rax
+    jz      .pa_not_flt
+    cmp     rax, -1
+    je      .pa_not_flt
+    call    _pyfasm_eval_print_clean_float
+    jmp     .pa_done
+.pa_not_flt:
+    mov     rcx, rbx
     call    _pyfasm_is_utf8_str_ptr
     mov     rcx, rbx
     test    eax, eax
@@ -6468,13 +6478,23 @@ _pyfasm_str_to_repr:
     ret
 
 _pyfasm_auto_to_str:
-    ; RCX = value -> RAX = string pointer (if UTF-8 ptr returns RCX, else _pyfasm_int_to_str)
+    ; RCX = value -> RAX = string pointer
     push    rbp
     mov     rbp, rsp
     push    rbx
     sub     rsp, 40
     and     rsp, -16
     mov     rbx, rcx
+    mov     rax, rbx
+    sar     rax, 48
+    test    rax, rax
+    jz      .ats_not_flt
+    cmp     rax, -1
+    je      .ats_not_flt
+    call    _pyfasm_eval_float_to_clean_str
+    jmp     .ats_done
+.ats_not_flt:
+    mov     rcx, rbx
     call    _pyfasm_is_utf8_str_ptr
     test    eax, eax
     jz      .ats_int
@@ -18118,13 +18138,23 @@ _pyfasm_is_utf8_str_ptr:
     ret
 
 _pyfasm_print_auto:
-    ; RCX = value (int64 or UTF-8 string pointer)
+    ; RCX = value (int64, f64 bits, or UTF-8 string pointer)
     push    rbp
     mov     rbp, rsp
     push    rbx
     sub     rsp, 40
     and     rsp, -16
     mov     rbx, rcx
+    mov     rax, rbx
+    sar     rax, 48
+    test    rax, rax
+    jz      .pa_not_flt
+    cmp     rax, -1
+    je      .pa_not_flt
+    call    _pyfasm_eval_print_clean_float
+    jmp     .pa_done
+.pa_not_flt:
+    mov     rcx, rbx
     call    _pyfasm_is_utf8_str_ptr
     mov     rcx, rbx
     test    eax, eax
@@ -18663,13 +18693,23 @@ _pyfasm_str_to_repr:
     ret
 
 _pyfasm_auto_to_str:
-    ; RCX = value -> RAX = string pointer (if UTF-8 ptr returns RCX, else _pyfasm_int_to_str)
+    ; RCX = value -> RAX = string pointer
     push    rbp
     mov     rbp, rsp
     push    rbx
     sub     rsp, 40
     and     rsp, -16
     mov     rbx, rcx
+    mov     rax, rbx
+    sar     rax, 48
+    test    rax, rax
+    jz      .ats_not_flt
+    cmp     rax, -1
+    je      .ats_not_flt
+    call    _pyfasm_eval_float_to_clean_str
+    jmp     .ats_done
+.ats_not_flt:
+    mov     rcx, rbx
     call    _pyfasm_is_utf8_str_ptr
     test    eax, eax
     jz      .ats_int

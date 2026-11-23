@@ -128,6 +128,7 @@ class ParsedModule:
     source_files: Dict[str, str] = field(default_factory=dict)
     http_routes: List[HttpRouteSpec] = field(default_factory=list)
     type_aliases: Dict[str, PyFasmType] = field(default_factory=dict)
+    cell_val_types: Dict[str, PyFasmType] = field(default_factory=dict)
     python_version: Tuple[int, int] = field(default_factory=lambda: (sys.version_info.major, sys.version_info.minor))
 
     def has_library(self, *names: str) -> bool:
@@ -1052,8 +1053,9 @@ class GeneratorExpLifter(ast.NodeTransformer):
         "range", "len", "print", "int", "str", "float", "bool",
         "abs", "min", "max", "sum", "list", "dict", "set", "tuple",
         "next", "iter", "open", "round", "pow", "ord", "chr", "input",
-        "any", "all", "map", "filter", "zip", "enumerate",
+        "any", "all", "map", "filter", "zip", "enumerate", "eval",
         "bisect", "bisect_right", "bisect_left", "heappush", "heappop",
+        "_pyfasm_cell_new", "_pyfasm_cell_get", "_pyfasm_cell_set",
         "gcd", "lcm", "isqrt", "factorial", "accumulate", "chain", "reduce",
         # Inspection & Object model
         "getattr", "hasattr", "setattr", "delattr", "isinstance", "issubclass",
@@ -1204,6 +1206,372 @@ class GeneratorExpLifter(ast.NodeTransformer):
         return ast.copy_location(call_node, node)
 
 
+class NonlocalCellTransformer(ast.NodeTransformer):
+    """Boxes variables captured via `nonlocal` into shared 8-byte heap cells before ClosureLifter."""
+
+    def __init__(self):
+        super().__init__()
+        self.counter: int = 0
+        self.active_cells: Dict[str, str] = {}
+
+    @staticmethod
+    def _collect_target_names(target: ast.AST, out: Set[str]) -> None:
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                NonlocalCellTransformer._collect_target_names(elt, out)
+        elif isinstance(target, ast.Starred):
+            NonlocalCellTransformer._collect_target_names(target.value, out)
+
+    @classmethod
+    def collect_direct_bindings(cls, fn_node: ast.AST) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
+        """Return (own_params, own_bound, own_globals, own_nonlocals) for a function AST node."""
+        own_params: Set[str] = set()
+        args = getattr(fn_node, "args", None)
+        if args is not None:
+            for a in getattr(args, "posonlyargs", []):
+                own_params.add(a.arg)
+            for a in args.args:
+                own_params.add(a.arg)
+            for a in getattr(args, "kwonlyargs", []):
+                own_params.add(a.arg)
+            if args.vararg:
+                own_params.add(args.vararg.arg)
+            if args.kwarg:
+                own_params.add(args.kwarg.arg)
+
+        assigned: Set[str] = set(own_params)
+        own_globals: Set[str] = set()
+        own_nonlocals: Set[str] = set()
+        for sub in walk_local_scope(fn_node):
+            if isinstance(sub, ast.Global):
+                own_globals.update(sub.names)
+            elif isinstance(sub, ast.Nonlocal):
+                own_nonlocals.update(sub.names)
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    cls._collect_target_names(t, assigned)
+            elif isinstance(sub, ast.AnnAssign):
+                cls._collect_target_names(sub.target, assigned)
+            elif isinstance(sub, ast.AugAssign):
+                cls._collect_target_names(sub.target, assigned)
+            elif isinstance(sub, ast.For):
+                cls._collect_target_names(sub.target, assigned)
+            elif isinstance(sub, ast.With):
+                for item in sub.items:
+                    if item.optional_vars:
+                        cls._collect_target_names(item.optional_vars, assigned)
+            elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                assigned.add(sub.name)
+            elif isinstance(sub, ast.NamedExpr):
+                cls._collect_target_names(sub.target, assigned)
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and sub is not fn_node:
+                assigned.add(sub.name)
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    assigned.add(alias.asname or alias.name.split(".")[0])
+
+        own_bound = assigned - own_globals - own_nonlocals
+        return own_params, own_bound, own_globals, own_nonlocals
+
+    @classmethod
+    def _find_needed_nonlocals(cls, container: ast.AST, candidates: Set[str]) -> Set[str]:
+        needed: Set[str] = set()
+        if not candidates:
+            return needed
+
+        def _walk_children(node: ast.AST, rem: Set[str]) -> None:
+            if not rem:
+                return
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _, sub_bound, sub_globals, sub_nonlocals = cls.collect_direct_bindings(child)
+                    needed.update(rem & sub_nonlocals)
+                    next_rem = rem - sub_bound - sub_globals
+                    if next_rem:
+                        _walk_children(child, next_rem)
+                else:
+                    _walk_children(child, rem)
+
+        _walk_children(container, set(candidates))
+        return needed
+
+    @staticmethod
+    def _make_cell_get(cell_name: str, ref_node: Optional[ast.AST] = None) -> ast.Call:
+        call = ast.Call(
+            func=ast.Name(id="_pyfasm_cell_get", ctx=ast.Load()),
+            args=[ast.Name(id=cell_name, ctx=ast.Load())],
+            keywords=[],
+        )
+        return ast.copy_location(call, ref_node) if ref_node is not None else call
+
+    @staticmethod
+    def _make_cell_set(cell_name: str, value_expr: ast.expr, ref_node: Optional[ast.AST] = None) -> ast.Call:
+        call = ast.Call(
+            func=ast.Name(id="_pyfasm_cell_set", ctx=ast.Load()),
+            args=[ast.Name(id=cell_name, ctx=ast.Load()), value_expr],
+            keywords=[],
+        )
+        return ast.copy_location(call, ref_node) if ref_node is not None else call
+
+    def _target_has_cell_store(self, node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store) and sub.id in self.active_cells:
+                return True
+        return False
+
+    def _replace_cell_stores_with_temps(self, target: ast.AST, replacements: List[Tuple[str, str]]) -> ast.AST:
+        """Replace cell-var stores in a complex target with fresh temps and rewrite nested loads."""
+        if isinstance(target, ast.Name):
+            if isinstance(target.ctx, ast.Store) and target.id in self.active_cells:
+                self.counter += 1
+                tmp_name = f"_pyfasm_nl_tmp_{self.counter}"
+                replacements.append((self.active_cells[target.id], tmp_name))
+                return ast.copy_location(ast.Name(id=tmp_name, ctx=ast.Store()), target)
+            return target
+        if isinstance(target, (ast.Tuple, ast.List)):
+            target.elts = [self._replace_cell_stores_with_temps(elt, replacements) for elt in target.elts]
+            return target
+        if isinstance(target, ast.Starred):
+            target.value = self._replace_cell_stores_with_temps(target.value, replacements)
+            return target
+        return self.visit(target)
+
+    def _visit_stmt_block(self, stmts: List[ast.stmt]) -> List[ast.stmt]:
+        out: List[ast.stmt] = []
+        for s in stmts:
+            res = self.visit(s)
+            if res is None:
+                continue
+            if isinstance(res, list):
+                out.extend(res)
+            else:
+                out.append(res)
+        return out
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id in self.active_cells:
+            return self._make_cell_get(self.active_cells[node.id], node)
+        return node
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.AST:
+        remaining = [nm for nm in node.names if nm not in self.active_cells]
+        if not remaining:
+            return ast.copy_location(ast.Pass(), node)
+        node.names = remaining
+        return node
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> ast.AST:
+        new_val = self.visit(node.value)
+        if node.target.id in self.active_cells:
+            return self._make_cell_set(self.active_cells[node.target.id], new_val, node)
+        node.value = new_val
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        new_val = self.visit(node.value)
+        if (
+            len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self.active_cells
+        ):
+            call = self._make_cell_set(self.active_cells[node.targets[0].id], new_val, node)
+            return ast.copy_location(ast.Expr(value=call), node)
+
+        if any(self._target_has_cell_store(t) for t in node.targets):
+            replacements: List[Tuple[str, str]] = []
+            new_targets = [self._replace_cell_stores_with_temps(t, replacements) for t in node.targets]
+            node.targets = new_targets
+            node.value = new_val
+            stmts: List[ast.stmt] = [node]
+            for cell_name, tmp_name in replacements:
+                set_call = self._make_cell_set(cell_name, ast.Name(id=tmp_name, ctx=ast.Load()), node)
+                stmts.append(ast.copy_location(ast.Expr(value=set_call), node))
+            return stmts
+
+        node.targets = [self.visit(t) for t in node.targets]
+        node.value = new_val
+        return node
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
+        if isinstance(node.target, ast.Name) and node.target.id in self.active_cells:
+            if node.value is not None:
+                new_val = self.visit(node.value)
+                call = self._make_cell_set(self.active_cells[node.target.id], new_val, node)
+                return ast.copy_location(ast.Expr(value=call), node)
+            return ast.copy_location(ast.Pass(), node)
+        node.target = self.visit(node.target)
+        if node.value is not None:
+            node.value = self.visit(node.value)
+        return node
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
+        new_val = self.visit(node.value)
+        if isinstance(node.target, ast.Name) and node.target.id in self.active_cells:
+            cell_name = self.active_cells[node.target.id]
+            bin_op = ast.copy_location(
+                ast.BinOp(left=self._make_cell_get(cell_name, node), op=node.op, right=new_val),
+                node,
+            )
+            call = self._make_cell_set(cell_name, bin_op, node)
+            return ast.copy_location(ast.Expr(value=call), node)
+        node.target = self.visit(node.target)
+        node.value = new_val
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.AST:
+        node.iter = self.visit(node.iter)
+        node.body = self._visit_stmt_block(node.body)
+        node.orelse = self._visit_stmt_block(node.orelse)
+        if self._target_has_cell_store(node.target):
+            replacements: List[Tuple[str, str]] = []
+            node.target = self._replace_cell_stores_with_temps(node.target, replacements)
+            prefix: List[ast.stmt] = [
+                ast.copy_location(
+                    ast.Expr(value=self._make_cell_set(cell_name, ast.Name(id=tmp_name, ctx=ast.Load()), node)),
+                    node,
+                )
+                for cell_name, tmp_name in replacements
+            ]
+            node.body = prefix + node.body
+        else:
+            node.target = self.visit(node.target)
+        return node
+
+    def visit_With(self, node: ast.With) -> ast.AST:
+        node.items = [
+            ast.withitem(
+                context_expr=self.visit(item.context_expr),
+                optional_vars=self.visit(item.optional_vars) if item.optional_vars is not None else None,
+            )
+            for item in node.items
+        ]
+        node.body = self._visit_stmt_block(node.body)
+        return node
+
+    def visit_If(self, node: ast.If) -> ast.AST:
+        node.test = self.visit(node.test)
+        node.body = self._visit_stmt_block(node.body)
+        node.orelse = self._visit_stmt_block(node.orelse)
+        return node
+
+    def visit_While(self, node: ast.While) -> ast.AST:
+        node.test = self.visit(node.test)
+        node.body = self._visit_stmt_block(node.body)
+        node.orelse = self._visit_stmt_block(node.orelse)
+        return node
+
+    def visit_Try(self, node: ast.Try) -> ast.AST:
+        node.body = self._visit_stmt_block(node.body)
+        for handler in node.handlers:
+            if handler.type is not None:
+                handler.type = self.visit(handler.type)
+            handler.body = self._visit_stmt_block(handler.body)
+        node.orelse = self._visit_stmt_block(node.orelse)
+        node.finalbody = self._visit_stmt_block(node.finalbody)
+        return node
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        node.args.defaults = [self.visit(d) for d in node.args.defaults]
+        node.args.kw_defaults = [self.visit(kd) if kd is not None else None for kd in node.args.kw_defaults]
+        own_args: Set[str] = set()
+        for a in getattr(node.args, "posonlyargs", []):
+            own_args.add(a.arg)
+        for a in node.args.args:
+            own_args.add(a.arg)
+        for a in getattr(node.args, "kwonlyargs", []):
+            own_args.add(a.arg)
+        if node.args.vararg:
+            own_args.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            own_args.add(node.args.kwarg.arg)
+        prev = self.active_cells
+        self.active_cells = {k: v for k, v in prev.items() if k not in own_args}
+        try:
+            node.body = self.visit(node.body)
+        finally:
+            self.active_cells = prev
+        return node
+
+    def _visit_comprehension(self, node: ast.AST) -> ast.AST:
+        gens = getattr(node, "generators", [])
+        if gens:
+            gens[0].iter = self.visit(gens[0].iter)
+        comp_bound: Set[str] = set()
+        for g in gens:
+            self._collect_target_names(g.target, comp_bound)
+        prev = self.active_cells
+        self.active_cells = {k: v for k, v in prev.items() if k not in comp_bound}
+        try:
+            for idx, g in enumerate(gens):
+                if idx > 0:
+                    g.iter = self.visit(g.iter)
+                g.ifs = [self.visit(c) for c in g.ifs]
+            if isinstance(node, ast.DictComp):
+                node.key = self.visit(node.key)
+                node.value = self.visit(node.value)
+            else:
+                node.elt = self.visit(node.elt)
+        finally:
+            self.active_cells = prev
+        return node
+
+    def visit_ListComp(self, node: ast.ListComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
+        return self._visit_comprehension(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.bases = [self.visit(b) for b in node.bases]
+        node.keywords = [ast.keyword(arg=k.arg, value=self.visit(k.value)) for k in node.keywords]
+        node.decorator_list = [self.visit(d) for d in node.decorator_list]
+        node.body = self._visit_stmt_block(node.body)
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node.decorator_list = [self.visit(d) for d in node.decorator_list]
+        node.args.defaults = [self.visit(d) for d in node.args.defaults]
+        node.args.kw_defaults = [self.visit(kd) if kd is not None else None for kd in node.args.kw_defaults]
+
+        own_params, own_bound, own_globals, _ = self.collect_direct_bindings(node)
+        needed_here = self._find_needed_nonlocals(node, own_bound)
+
+        owned_cells: Dict[str, str] = {}
+        init_stmts: List[ast.stmt] = []
+        for var_name in sorted(needed_here):
+            self.counter += 1
+            cell_name = f"_pyfasm_cell_{self.counter}_{var_name}"
+            owned_cells[var_name] = cell_name
+            init_args = [ast.Name(id=var_name, ctx=ast.Load())] if var_name in own_params else []
+            init_assign = ast.Assign(
+                targets=[ast.Name(id=cell_name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="_pyfasm_cell_new", ctx=ast.Load()),
+                    args=init_args,
+                    keywords=[],
+                ),
+            )
+            init_stmts.append(ast.copy_location(init_assign, node))
+
+        prev = self.active_cells
+        child_cells = {k: v for k, v in prev.items() if k not in own_bound and k not in own_globals}
+        child_cells.update(owned_cells)
+        self.active_cells = child_cells
+        try:
+            node.body = init_stmts + self._visit_stmt_block(node.body)
+        finally:
+            self.active_cells = prev
+        return node
+
+
 def preprocess_ast(
     tree: ast.AST,
     py_version: Optional[Tuple[int, int]] = None,
@@ -1216,6 +1584,7 @@ def preprocess_ast(
     tree = ChainedCompareTransformer().visit(tree)
     tree = ConstantFolder(py_version=py_version, py_micro=py_micro).visit(tree)
     tree = YieldFromTransformer().visit(tree)
+    tree = NonlocalCellTransformer().visit(tree)
 
     known_globals = set()
     for node in getattr(tree, "body", []):
@@ -1416,20 +1785,6 @@ class AstAnalyzer:
                                 hint=f"Supported dunder methods: {SUPPORTED_DUNDERS_SUMMARY}.",
                             )
                         )
-            elif isinstance(node, ast.Nonlocal):
-                module.diagnostics.append(
-                    CompilerDiagnostic(
-                        severity="error",
-                        code="E2003",
-                        message="The `nonlocal` statement is not supported in PyFASM64 closures",
-                        file_path=key,
-                        lineno=ln,
-                        col_offset=col,
-                        end_col_offset=end_col,
-                        source_line=src_line,
-                        hint="Pass mutable state via a class instance, list/dict argument, or module-level variable (`global`).",
-                    )
-                )
             elif isinstance(node, ast.With):
                 for item in node.items:
                     ctx = item.context_expr
@@ -1463,6 +1818,65 @@ class AstAnalyzer:
             elif isinstance(node, ast.ImportFrom):
                 if getattr(node, "level", 0) == 0 and node.module:
                     _check_import(node.module, node)
+
+        # Lexical scope check for `nonlocal`: reject only unbound module-level or missing bindings
+        def _emit_nonlocal_err(nl_node: ast.Nonlocal, var_name: str, reason: str) -> None:
+            nl_ln, nl_col, nl_end = self._ast_span(nl_node)
+            module.diagnostics.append(
+                CompilerDiagnostic(
+                    severity="error",
+                    code="E2003",
+                    message=f"No binding for nonlocal '{var_name}' {reason}",
+                    file_path=key,
+                    lineno=nl_ln,
+                    col_offset=nl_col,
+                    end_col_offset=nl_end,
+                    source_line=_line_at(nl_ln),
+                    hint=f"Bind '{var_name}' in an enclosing function scope (or declare it `global` at module level).",
+                )
+            )
+
+        def _validate_nonlocal_container(container: ast.AST, encl_bounds: List[Set[str]]) -> None:
+            for sub in walk_local_scope(container):
+                if isinstance(sub, ast.Nonlocal):
+                    for nm in sub.names:
+                        if not encl_bounds:
+                            _emit_nonlocal_err(sub, nm, "allowed at module scope")
+                        elif not any(nm in b for b in encl_bounds):
+                            _emit_nonlocal_err(sub, nm, "found in enclosing function scopes")
+
+            def _scan_children(cur: ast.AST) -> None:
+                for child in ast.iter_child_nodes(cur):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        _, own_bound, _, _ = NonlocalCellTransformer.collect_direct_bindings(child)
+                        _validate_nonlocal_container_with_bound(child, encl_bounds, own_bound)
+                    else:
+                        _scan_children(child)
+
+            _scan_children(container)
+
+        def _validate_nonlocal_container_with_bound(
+            fn_node: ast.AST, encl_bounds: List[Set[str]], own_bound: Set[str]
+        ) -> None:
+            for sub in walk_local_scope(fn_node):
+                if isinstance(sub, ast.Nonlocal):
+                    for nm in sub.names:
+                        if not any(nm in b for b in encl_bounds):
+                            _emit_nonlocal_err(sub, nm, "found in enclosing function scopes")
+            encl_bounds.append(own_bound)
+            try:
+                def _scan_nested(cur: ast.AST) -> None:
+                    for child in ast.iter_child_nodes(cur):
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            _, sub_bound, _, _ = NonlocalCellTransformer.collect_direct_bindings(child)
+                            _validate_nonlocal_container_with_bound(child, encl_bounds, sub_bound)
+                        else:
+                            _scan_nested(child)
+                _scan_nested(fn_node)
+            finally:
+                encl_bounds.pop()
+
+        _validate_nonlocal_container(tree, [])
 
     def get_or_create_string(self, text: str) -> str:
         for s in self.strings:
@@ -2846,6 +3260,8 @@ class AstAnalyzer:
                 if ct.is_dict() and getattr(ct, "val_type", None) is None and len(expr.args) < 2:
                     return True
             elif isinstance(expr.func, ast.Name):
+                if expr.func.id == "eval":
+                    return True
                 mod = getattr(self, "current_module", None)
                 if expr.func.id in local_vars and self._infer_node_type(expr, local_vars) == TYPE_INT:
                     return True
@@ -3105,6 +3521,17 @@ class AstAnalyzer:
                             self._infer_node_type(a, local_vars) for a in expr.args[1:]
                         ]
                     return TYPE_PTR
+                if fid == "_pyfasm_cell_new":
+                    return TYPE_PTR
+                if fid == "_pyfasm_cell_get":
+                    mod = getattr(self, "current_module", None)
+                    if mod is not None and expr.args and isinstance(expr.args[0], ast.Name):
+                        return mod.cell_val_types.get(expr.args[0].id, TYPE_INT)
+                    return TYPE_INT
+                if fid == "_pyfasm_cell_set":
+                    if len(expr.args) >= 2:
+                        return self._infer_node_type(expr.args[1], local_vars)
+                    return TYPE_INT
                 if fid in ("str", "repr", "chr", "input", "hex", "bin", "oct", "file_read", "get_simd_isa"):
                     return TYPE_STR
                 elif fid in ("alloc_memory", "malloc", "VirtualAlloc", "calloc"):
@@ -3536,6 +3963,13 @@ class AstAnalyzer:
             elif vname in global_names or (mod is not None and vname in mod.global_var_types):
                 self._record_global_var_type(mod, vname, new_t, mod_prefix)
 
+        def _record_cell_val(cname: str, new_t: Optional[PyFasmType]) -> None:
+            if mod is None or new_t is None:
+                return
+            cur_c = mod.cell_val_types.get(cname)
+            if cur_c is None or self._should_upgrade_type(cur_c, new_t):
+                mod.cell_val_types[cname] = new_t
+
         for _pass in range(4):
             pass_list_obs: Dict[str, List[Optional[PyFasmType]]] = {}
             pass_set_obs: Dict[str, List[Optional[PyFasmType]]] = {}
@@ -3544,6 +3978,15 @@ class AstAnalyzer:
 
             for sub_node in walk_local_scope(node):
                 if isinstance(sub_node, ast.Assign):
+                    if (
+                        len(sub_node.targets) == 1
+                        and isinstance(sub_node.targets[0], ast.Name)
+                        and isinstance(sub_node.value, ast.Call)
+                        and isinstance(sub_node.value.func, ast.Name)
+                        and sub_node.value.func.id == "_pyfasm_cell_new"
+                        and sub_node.value.args
+                    ):
+                        _record_cell_val(sub_node.targets[0].id, self._infer_node_type(sub_node.value.args[0], local_vars))
                     inferred_type = self._infer_node_type(sub_node.value, local_vars)
                     rhs_dynamic = inferred_type == TYPE_INT and self._is_dynamic_expr(sub_node.value, local_vars)
                     rhs_widget_kind = self._constructed_widget_kind(sub_node.value)
@@ -3644,10 +4087,28 @@ class AstAnalyzer:
                             self._closure_cap_types[sub_node.args[0].id] = [
                                 self._infer_node_type(a, local_vars) for a in sub_node.args[1:]
                             ]
+                        elif cfid == "_pyfasm_cell_set" and len(sub_node.args) >= 2 and isinstance(sub_node.args[0], ast.Name):
+                            _record_cell_val(sub_node.args[0].id, self._infer_node_type(sub_node.args[1], local_vars))
                         elif cfid.startswith("_pyfasm_genexp_"):
                             self._genexp_arg_types[cfid] = [
                                 self._infer_node_type(a, local_vars) for a in sub_node.args
                             ]
+                    if (
+                        isinstance(sub_node.func, ast.Attribute)
+                        and isinstance(sub_node.func.value, ast.Call)
+                        and isinstance(sub_node.func.value.func, ast.Name)
+                        and sub_node.func.value.func.id == "_pyfasm_cell_get"
+                        and sub_node.func.value.args
+                        and isinstance(sub_node.func.value.args[0], ast.Name)
+                    ):
+                        cell_n = sub_node.func.value.args[0].id
+                        m_attr = sub_node.func.attr
+                        if m_attr == "append" and len(sub_node.args) == 1:
+                            _record_cell_val(cell_n, ListType(element_type=self._infer_node_type(sub_node.args[0], local_vars)))
+                        elif m_attr == "insert" and len(sub_node.args) >= 2:
+                            _record_cell_val(cell_n, ListType(element_type=self._infer_node_type(sub_node.args[1], local_vars)))
+                        elif m_attr == "extend" and len(sub_node.args) == 1:
+                            _record_cell_val(cell_n, ListType(element_type=self._infer_iter_element_type(sub_node.args[0], local_vars)))
                     if isinstance(sub_node.func, ast.Attribute) and isinstance(sub_node.func.value, ast.Name):
                         cname = sub_node.func.value.id
                         attr = sub_node.func.attr

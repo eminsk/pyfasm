@@ -1,3 +1,12 @@
+python3-pyfasm64 (2.3.1-1) stable; urgency=medium
+
+  * Release version 2.3.1.
+  * Native nonlocal support with cell boxing and lexical scope resolution.
+  * Native eval(...) and print(eval(input())) cross-platform runtime engine.
+  * Multi-platform Win64, Linux, macOS, and MyOS full stability fixes.
+
+ -- M_N_Nik <workspace@code.ml.ai>  Sun, 22 Nov 2026 23:00:00 -0500
+
 python3-pyfasm64 (2.3.0-1) stable; urgency=medium
 
   * Release 2.3.0: Complete Universal Native Python/NumPy/Tk/CTk/Qt/Pygame/Matplotlib Compiler & Cross-Platform Runtimes.
