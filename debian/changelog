@@ -1,3 +1,12 @@
+python3-pyfasm64 (2.3.6-1) stable; urgency=medium
+
+  * Release version 2.3.6.
+  * pygame: semi-transparent blit rewritten — src bit walker kept in r10 (was clobbered through ecx), colour scratch moved off rbx/r14, dst width re-read from the surface.
+  * pygame: dedicated 24bpp bottom-up blend path (pitch (w*3+3)&~3, 3-byte R/W) so per-pixel alpha lands correctly on plain surfaces; no more page faults/hangs on multi-row blends.
+  * pygame: offscreen blend frame has its own stack slot for the base row (r15 no longer overwritten); double src-row advance in row_end removed.
+  * codegen: statement-level fill/set_at/draw_polygon clear rax (None return) so tmp-free no longer releases the canvas right after the call.
+  * pygame: fill converts GDI COLORREF to DIB pixel order with A=255 for RGB; set_mode clears _pyfasm_pg_hdc; surface_new falls back to CreateCompatibleDC(NULL).
+
 python3-pyfasm64 (2.3.5-1) stable; urgency=medium
 
   * Release version 2.3.5.
