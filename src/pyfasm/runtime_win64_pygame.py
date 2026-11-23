@@ -1839,7 +1839,35 @@ _pyfasm_pg_surface_free:
     inc     rdx
     jmp     .psf_scan
 .psf_deselect:
-    ; GDI cleanup temporarily disabled for debugging
+    mov     rdx, [rbx + 48]         ; old bitmap saved at creation (SelectObject result)
+    mov     rcx, [rbx + 24]         ; memory DC
+    test    rcx, rcx
+    jz      .psf_bitmap
+    test    rdx, rdx
+    jz      .psf_bitmap
+    push    rdx
+    sub     rsp, 32
+    call    [SelectObject]
+    add     rsp, 32
+    pop     rdx
+.psf_bitmap:
+    mov     rcx, [rbx + 32]         ; DIB bitmap
+    test    rcx, rcx
+    jz      .psf_dc
+    push    rdx
+    sub     rsp, 32
+    call    [DeleteObject]
+    add     rsp, 32
+    pop     rdx
+.psf_dc:
+    mov     rcx, [rbx + 24]
+    test    rcx, rcx
+    jz      .psf_mem
+    push    rdx
+    sub     rsp, 32
+    call    [DeleteDC]
+    add     rsp, 32
+    pop     rdx
 .psf_mem:
     mov     rcx, rbx
 

@@ -3217,6 +3217,27 @@ include 'functions.inc'
 
         elif isinstance(stmt, ast.Expr):
             self._generate_expr(stmt.value)
+            # Free temporary pygame surfaces discarded by expression statements
+            # (e.g. pygame.transform.rotate(...) results not stored anywhere).
+            lbl_free = self.new_label("expr_tmp_free")
+            lbl_free_end = self.new_label("expr_tmp_done")
+            self.emit("mov rcx, rax", "expr result")
+            self.emit("test rcx, rcx")
+            self.emit(f"jz {lbl_free_end}")
+            self.emit("cmp rcx, 65536")
+            self.emit(f"jb {lbl_free_end}")
+            self.emit("mov rdx, 4652534750465950h", "'PYFPGSRF'")
+            self.emit("cmp [rcx], rdx")
+            self.emit(f"jne {lbl_free_end}")
+            self.emit("xor eax, eax")
+            self.emit("mov [rcx], rax", "poison magic")
+            if "pygame" in self.features and self.target in ("win64", "dll"):
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_pg_surface_free")
+                self.emit("add rsp, 32")
+            else:
+                self.emit("mov rax, rcx", "no pygame runtime: skip surface free")
+            self.emit_raw(f"{lbl_free_end}:")
 
         elif isinstance(stmt, ast.If):
             l_else = self.new_label("if_else")
