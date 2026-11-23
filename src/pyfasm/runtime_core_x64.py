@@ -30,6 +30,7 @@ def get_core_x64_data() -> str:
     _pyfasm_flt_exp_min     dq 0C0874910D52D3051h ; ~-745.1332
     _pyfasm_flt_1e_9        dq 3E112E0BE826D695h ; 1e-9
     _pyfasm_flt_1e15        dq 430C6BF526340000h ; 1e15
+    _pyfasm_rand_state      dq 0
     _pyfasm_str_j           db 'j', 0
     _pyfasm_str_plus        db '+', 0
     _pyfasm_str_real_key    db 'real', 0

@@ -1815,7 +1815,7 @@ _pyfasm_pg_surface_new:
     mov     ecx, 64
     call    _pyfasm_alloc
     mov     rbx, rax
-    mov     rax, 5059465047535246h
+    mov     rax, 4652534750465950h
     mov     [rbx + 0], rax
     mov     [rbx + 8], rsi
     mov     [rbx + 16], rdi

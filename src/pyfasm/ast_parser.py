@@ -41,6 +41,7 @@ class VariableSymbol:
     is_dynamic: bool = False
     fn_alias: Optional[str] = None
     widget_kind: Optional[str] = None
+    pyfasm_group: bool = False
 
 
 @dataclass
@@ -3108,6 +3109,9 @@ class AstAnalyzer:
         first = concrete[0]
         if all(t == first for t in concrete):
             return first
+        # Numeric tower: mixed int/float sequences are stored as doubles.
+        if all(t in (TYPE_INT, TYPE_FLOAT) for t in concrete):
+            return TYPE_FLOAT
         if all(t.is_list() for t in concrete):
             inner = [getattr(t, "element_type", None) for t in concrete if getattr(t, "element_type", None) is not None]
             if inner:
@@ -3662,6 +3666,10 @@ class AstAnalyzer:
                             cq.extend(cs.bases)
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
+                if attr == "Group":
+                    return ListType(element_type=TYPE_PTR)
+                if isinstance(expr.func.value, ast.Name) and expr.func.value.id == "random":
+                    return TYPE_FLOAT if attr in ("random", "uniform") else TYPE_INT
                 mod = getattr(self, "current_module", None)
                 gui_t = gui_method_result_type(
                     self._receiver_widget_kind(expr.func.value, local_vars), attr, len(expr.args)

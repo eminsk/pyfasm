@@ -3610,6 +3610,100 @@ _pyfasm_random_choice:
     pop     rbp
     ret
 
+_pyfasm_random_next:
+    ; -> RAX = next pseudo-random 64-bit (LCG, seeded by rdtsc chain)
+    mov     rax, [_pyfasm_rand_state]
+    test    rax, rax
+    jnz     .rn_have
+    rdtsc
+    shl     rdx, 32
+    or      rax, rdx
+    or      rax, 1
+    mov     [_pyfasm_rand_state], rax
+.rn_have:
+    mov     rcx, 6364136223846793005
+    imul    rax, rcx
+    mov     rcx, 1442695040888963407
+    add     rax, rcx
+    mov     [_pyfasm_rand_state], rax
+    mov     rax, [_pyfasm_rand_state]
+    shr     rax, 17
+    mov     rcx, [_pyfasm_rand_state]
+    shr     rcx, 33
+    xor     rax, rcx
+    ret
+
+_pyfasm_random_randint:
+    ; RCX = lo, RDX = hi (inclusive) -> RAX = int in [lo, hi]
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    cmp     rdx, rcx
+    jge     .ri_ok
+    xchg    rcx, rdx
+.ri_ok:
+    mov     r12, rdx
+    sub     r12, rcx
+    inc     r12                 ; range = hi - lo + 1
+    mov     r13, rcx            ; save lo (next clobbers rcx)
+    test    r12, r12
+    jz      .ri_zero
+    call    _pyfasm_random_next
+    xor     rdx, rdx
+    div     r12
+    mov     rax, rdx
+    add     rax, r13
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.ri_zero:
+    mov     rax, rcx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_random_uniform:
+    ; RCX = lo (double bits), RDX = hi (double bits) -> RAX = double bits in [lo, hi)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    movq    xmm0, rcx
+    movq    xmm1, rdx
+    subsd   xmm1, xmm0          ; span = hi - lo
+    call    _pyfasm_random_next
+    shr     rax, 11             ; 53 random bits
+    mov     r8, rax
+    cvtsi2sd xmm2, r8          ; double(rand)
+    mov     rax, 9007199254740992  ; 2**53
+    mov     r8, rax
+    cvtsi2sd xmm3, r8          ; double(2**53)
+    divsd   xmm2, xmm3         ; [0, 1)
+    mulsd   xmm2, xmm1          ; * span
+    addsd   xmm2, xmm0          ; + lo
+    movq    rax, xmm2
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_random_random:
+    ; -> RAX = double bits in [0, 1)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    _pyfasm_random_next
+    mov     r8, rax
+    cvtsi2sd xmm0, r8          ; double(rand), rand < 2**47 after xor-shift
+    mov     r8, 140737488355328  ; 2**47
+    cvtsi2sd xmm1, r8          ; double(2**47)
+    divsd   xmm0, xmm1         ; [0, 1)
+    movq    rax, xmm0
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_list_pop:
     ; RCX = list_ptr
     test    rcx, rcx
@@ -12961,12 +13055,16 @@ section '.idata' import data readable writeable
     library kernel32, 'KERNEL32.DLL', \\
             user32, 'USER32.DLL', \\
             gdi32, 'GDI32.DLL', \\
+            msimg32, 'MSIMG32.DLL', \\
             comdlg32, 'COMDLG32.DLL', \\
             shell32, 'SHELL32.DLL', \\
             dwmapi, 'DWMAPI.DLL', \\
             uxtheme, 'UXTHEME.DLL', \\
             advapi32, 'ADVAPI32.DLL', \\
             wininet, 'WININET.DLL'
+
+    import msimg32, \\
+           TransparentBlt, 'TransparentBlt'
 
     import kernel32, \\
            GetStdHandle, 'GetStdHandle', \\
@@ -15843,6 +15941,101 @@ _pyfasm_random_choice:
     ret
 .rc_null:
     xor     eax, eax
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+
+_pyfasm_random_next:
+    ; -> RAX = next pseudo-random 64-bit (LCG, seeded by rdtsc chain)
+    mov     rax, [_pyfasm_rand_state]
+    test    rax, rax
+    jnz     .rn_have
+    rdtsc
+    shl     rdx, 32
+    or      rax, rdx
+    or      rax, 1
+    mov     [_pyfasm_rand_state], rax
+.rn_have:
+    mov     rcx, 6364136223846793005
+    imul    rax, rcx
+    mov     rcx, 1442695040888963407
+    add     rax, rcx
+    mov     [_pyfasm_rand_state], rax
+    mov     rax, [_pyfasm_rand_state]
+    shr     rax, 17
+    mov     rcx, [_pyfasm_rand_state]
+    shr     rcx, 33
+    xor     rax, rcx
+    ret
+
+_pyfasm_random_randint:
+    ; RCX = lo, RDX = hi (inclusive) -> RAX = int in [lo, hi]
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    cmp     rdx, rcx
+    jge     .ri_ok
+    xchg    rcx, rdx
+.ri_ok:
+    mov     r12, rdx
+    sub     r12, rcx
+    inc     r12                 ; range = hi - lo + 1
+    mov     r13, rcx            ; save lo (next clobbers rcx)
+    test    r12, r12
+    jz      .ri_zero
+    call    _pyfasm_random_next
+    xor     rdx, rdx
+    div     r12
+    mov     rax, rdx
+    add     rax, r13
+    mov     rsp, rbp
+    pop     rbp
+    ret
+.ri_zero:
+    mov     rax, rcx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_random_uniform:
+    ; RCX = lo (double bits), RDX = hi (double bits) -> RAX = double bits in [lo, hi)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 48
+    and     rsp, -16
+    movq    xmm0, rcx
+    movq    xmm1, rdx
+    subsd   xmm1, xmm0          ; span = hi - lo
+    call    _pyfasm_random_next
+    shr     rax, 11             ; 53 random bits
+    mov     r8, rax
+    cvtsi2sd xmm2, r8          ; double(rand)
+    mov     rax, 9007199254740992  ; 2**53
+    mov     r8, rax
+    cvtsi2sd xmm3, r8          ; double(2**53)
+    divsd   xmm2, xmm3         ; [0, 1)
+    mulsd   xmm2, xmm1          ; * span
+    addsd   xmm2, xmm0          ; + lo
+    movq    rax, xmm2
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
+_pyfasm_random_random:
+    ; -> RAX = double bits in [0, 1)
+    push    rbp
+    mov     rbp, rsp
+    sub     rsp, 32
+    and     rsp, -16
+    call    _pyfasm_random_next
+    mov     r8, rax
+    cvtsi2sd xmm0, r8          ; double(rand), rand < 2**47 after xor-shift
+    mov     r8, 140737488355328  ; 2**47
+    cvtsi2sd xmm1, r8          ; double(2**47)
+    divsd   xmm0, xmm1         ; [0, 1)
+    movq    rax, xmm0
     mov     rsp, rbp
     pop     rbp
     ret

@@ -2249,6 +2249,7 @@ include 'functions.inc'
             self.emit("mov r10, 505946434C535447h", f"class tag PYFCLSTG for '{cls_sym.name}'")
             self.emit("mov [rax + 2032], r10")
             self.emit(f"mov qword [rax + 2040], {cid}", f"class_id = {cid}")
+            self.emit("mov qword [rax + 2024], 0", "sprite alive flag = alive")
 
         # Check if Background System Tray Application (pystray / tray)
         module_imports = getattr(self.module, "imports", [])
@@ -2563,6 +2564,19 @@ include 'functions.inc'
                 for _t in stmt.targets:
                     if isinstance(_t, ast.Name):
                         self._np_array_vars.add(_t.id)
+            # Track lists initialized with float elements -> element loads infer float
+            if isinstance(stmt.value, ast.List) and any(
+                isinstance(e, ast.Constant) and isinstance(e.value, float) for e in stmt.value.elts
+            ):
+                for _t in stmt.targets:
+                    if isinstance(_t, ast.Name) and self.current_func and _t.id in self.current_func.local_vars:
+                        _vt = self.current_func.local_vars[_t.id].var_type
+                        object.__setattr__(_vt, "pyfasm_float_elems", True)
+            # Track variables assigned pygame.sprite.Group()
+            if isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Attribute) and stmt.value.func.attr == "Group":
+                for _t in stmt.targets:
+                    if isinstance(_t, ast.Name) and self.current_func and _t.id in self.current_func.local_vars:
+                        self.current_func.local_vars[_t.id].pyfasm_group = True
             # Target = Expr
             if len(stmt.targets) == 1 and isinstance(stmt.targets[0], (ast.Tuple, ast.List)):
                 target_tup = stmt.targets[0]
@@ -2698,6 +2712,11 @@ include 'functions.inc'
                 if isinstance(target, ast.Name):
                     var = self.current_func.local_vars.get(target.id) if self.current_func else None
                     if var:
+                        _vt = self._infer_expr_type(stmt.value)
+                        if _vt.is_list() and getattr(_vt, "element_type", None) is not None and var.var_type != _vt:
+                            object.__setattr__(var, "var_type", _vt)
+                        elif _vt.is_float() and var.var_type.is_int():
+                            object.__setattr__(var, "var_type", TYPE_FLOAT)
                         self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                     elif (self.current_func and hasattr(self.current_func, "global_names") and target.id in self.current_func.global_names) or (target.id in self.module.global_vars):
                         self.emit(f"mov [{safe_global_label(target.id)}], rax", f"store global {target.id}")
@@ -2809,6 +2828,13 @@ include 'functions.inc'
                         self.emit("mov r8, rax", "array base pointer")
                         self.emit("pop r11", "index")
                         self.emit("pop rax", "value")
+                        if not is_dict_target and not isinstance(slice_unwrapped, ast.Slice):
+                            cont_t = self._infer_expr_type(target.value)
+                            val_t = self._infer_expr_type(stmt.value)
+                            cont_elem = getattr(cont_t, "element_type", None) if cont_t is not None else None
+                            if cont_elem == TYPE_FLOAT and (val_t is None or val_t == TYPE_INT):
+                                self.emit("cvtsi2sd xmm0, rax", "coerce int val to double for float list")
+                                self.emit("movq rax, xmm0")
                         is_ptr_target = False
                         if isinstance(target.value, ast.Name) and self.current_func:
                             v = self.current_func.local_vars.get(target.value.id)
@@ -2899,6 +2925,77 @@ include 'functions.inc'
                             self.emit(f"call {safe_asm_label(prop.setter_name)}")
                             self.emit("add rsp, 32")
                         else:
+                            # pygame Rect special attribute assignment: rect.centerx = v, rect.center = (x, y) ...
+                            if target.attr in ("centerx", "centery", "center", "topleft", "topright", "bottomleft", "bottomright", "midtop", "midbottom", "midleft", "midright") and self._looks_like_pygame_rect(target.value):
+                                if target.attr in ("centerx", "centery"):
+                                    self._generate_expr(stmt.value)
+                                    self.emit("mov rcx, rax", "new center value")
+                                    self._generate_expr(target.value)
+                                    self.emit("mov r8, rax", "rect ptr")
+                                    lbl_bad = self.new_label("rect_bad")
+                                    lbl_ok = self.new_label("rect_ok")
+                                    self.emit("test r8, r8")
+                                    self.emit(f"jz {lbl_bad}")
+                                    self.emit("cmp r8, 65536")
+                                    self.emit(f"jb {lbl_bad}")
+                                    self.emit("mov rax, 5059465245435421h", "PYFRECT!")
+                                    self.emit("cmp [r8], rax")
+                                    self.emit(f"jne {lbl_bad}")
+                                    if target.attr == "centerx":
+                                        self.emit("mov rax, [r8 + 64]", "w")
+                                        self.emit("sar rax, 1", "w // 2")
+                                        self.emit("sub rcx, rax", "x = cx - w//2")
+                                        self.emit("mov [r8 + 48], rcx", "rect.x")
+                                    else:
+                                        self.emit("mov rax, [r8 + 72]", "h")
+                                        self.emit("sar rax, 1", "h // 2")
+                                        self.emit("sub rcx, rax", "y = cy - h//2")
+                                        self.emit("mov [r8 + 56], rcx", "rect.y")
+                                    self.emit(f"jmp {lbl_ok}")
+                                    self.emit_raw(f"{lbl_bad}:")
+                                    self.emit("xor eax, eax")
+                                    self.emit_raw(f"{lbl_ok}:")
+                                else:
+                                    self.emit("sub rsp, 64", "frame for point-attr assign")
+                                    self._generate_expr(stmt.value)
+                                    self.emit("mov [rsp + 32], rax", "point tuple")
+                                    self._generate_expr(target.value)
+                                    self.emit("mov [rsp + 40], rax", "rect ptr")
+                                    lbl_bad = self.new_label("rect_bad")
+                                    lbl_ok = self.new_label("rect_ok")
+                                    self.emit("mov r8, [rsp + 40]")
+                                    self.emit("test r8, r8")
+                                    self.emit(f"jz {lbl_bad}")
+                                    self.emit("cmp r8, 65536")
+                                    self.emit(f"jb {lbl_bad}")
+                                    self.emit("mov rax, 5059465245435421h", "PYFRECT!")
+                                    self.emit("cmp [r8], rax")
+                                    self.emit(f"jne {lbl_bad}")
+                                    self.emit("mov rcx, [rsp + 32]", "tuple ptr")
+                                    self.emit("test rcx, rcx")
+                                    self.emit(f"jz {lbl_bad}")
+                                    self.emit("mov rdx, [rcx]", "tuple len")
+                                    self.emit("cmp rdx, 2")
+                                    self.emit(f"jb {lbl_bad}")
+                                    self.emit("mov rax, [rcx + 8]", "point x")
+                                    self.emit("mov r9, rax", "px")
+                                    self.emit("mov rcx, [rsp + 32]")
+                                    self.emit("mov rax, [rcx + 16]", "point y")
+                                    self.emit("mov r10, rax", "py")
+                                    self.emit("mov rax, [r8 + 64]", "w")
+                                    self.emit("sar rax, 1", "w // 2")
+                                    self.emit("sub r9, rax", "x = px - w//2")
+                                    self.emit("mov rax, [r8 + 72]", "h")
+                                    self.emit("sar rax, 1", "h // 2")
+                                    self.emit("sub r10, rax", "y = py - h//2")
+                                    self.emit("mov [r8 + 48], r9", "rect.x")
+                                    self.emit("mov [r8 + 56], r10", "rect.y")
+                                    self.emit(f"jmp {lbl_ok}")
+                                    self.emit_raw(f"{lbl_bad}:")
+                                    self.emit("xor eax, eax")
+                                    self.emit_raw(f"{lbl_ok}:")
+                                    self.emit("add rsp, 64")
+                                return
                             # obj.field = val (e.g. self.x = 10)
                             self._record_class_attr(self.resolve_instance_class(target.value), target.attr)
                             self.emit("push rax", "save value to assign")
@@ -3062,7 +3159,25 @@ include 'functions.inc'
                         self.emit("mov rax, [r8 + (rdx + 1) * 8]", "current val")
                     else:
                         self.emit("mov rax, [r8 + rdx * 8]", "current val")
-                    self._generate_binop_instr(stmt.op)
+                    if is_list_target and self._is_float_arith(
+                        stmt.op,
+                        self._infer_expr_type(stmt.value),
+                        self._infer_expr_type(stmt.value),
+                        stmt.value,
+                    ):
+                        # list elements are untyped slots: decide float arith by the RHS;
+                        # the loaded element may be either float bits or an int, and there is
+                        # no runtime tag, so trust the RHS: treat both sides as float bits
+                        # rax holds the loaded element and r11 the delta, which is
+                        # exactly the RAX <op> R11 convention of _emit_float_arith
+                        self._emit_float_arith(stmt.op, True, True)
+                        if isinstance(stmt.target.value, ast.Name):
+                            gv = self.module.globals.get(stmt.target.value.id) if hasattr(self.module, "globals") else None
+                            lvar = self.current_func.local_vars.get(stmt.target.value.id) if self.current_func else None
+                            if lvar is not None:
+                                object.__setattr__(lvar.var_type, "pyfasm_float_elems", True)
+                    else:
+                        self._generate_binop_instr(stmt.op)
                     if is_list_target:
                         self.emit("mov [r8 + (rdx + 1) * 8], rax", "store updated list[idx]")
                     else:
@@ -3542,6 +3657,21 @@ include 'functions.inc'
                 elt_t = getattr(iter_t, "key_type", None)
             if isinstance(elt_t, InstanceType):
                 self.local_var_classes[stmt.target.id] = elt_t.class_name
+            if elt_t is not None and self.current_func:
+                tgt_sym = self.current_func.local_vars.get(stmt.target.id)
+                if tgt_sym is not None:
+                    tgt_sym.var_type = elt_t
+        elif isinstance(stmt.target, ast.Tuple) and (iter_t.is_list() or iter_t.is_tuple()):
+            inner_t = getattr(iter_t, "element_type", None)
+            if inner_t is not None and (inner_t.is_list() or inner_t.is_tuple()):
+                elt_t = getattr(inner_t, "element_type", None)
+            else:
+                elt_t = inner_t
+            for tgt in stmt.target.elts:
+                if isinstance(tgt, ast.Name) and self.current_func:
+                    tgt_sym = self.current_func.local_vars.get(tgt.id)
+                    if tgt_sym is not None and elt_t is not None:
+                        tgt_sym.var_type = elt_t
         if iter_t.is_str() and self.target in ("win64", "dll"):
             if buf_var and idx_var:
                 self.emit(f"mov [rbp - {buf_var.stack_offset}], rax", "str ptr to stack slot")
@@ -3762,6 +3892,15 @@ include 'functions.inc'
         self.emit_raw(f"{l_end}:")
         self.loop_stack.pop()
 
+    def _emit_float_store_coerce(self, elt: ast.expr, list_elem_type) -> None:
+        """Convert int rax to double bits when storing into a float-typed list."""
+        if list_elem_type != TYPE_FLOAT:
+            return
+        et = self._infer_expr_type(elt)
+        if et == TYPE_INT:
+            self.emit("cvtsi2sd xmm0, rax", "coerce int elem to double for float list")
+            self.emit("movq rax, xmm0")
+
     def _merge_expr_element_types(self, types: List[Optional[PyFasmType]]) -> Optional[PyFasmType]:
         """Return common element type across elements or None if heterogeneous."""
         concrete = [t for t in types if t is not None]
@@ -3770,6 +3909,9 @@ include 'functions.inc'
         first = concrete[0]
         if all(t == first for t in concrete):
             return first
+        # Numeric tower: mixed int/float sequences are stored as doubles.
+        if all(t in (TYPE_INT, TYPE_FLOAT) for t in concrete):
+            return TYPE_FLOAT
         if all(isinstance(t, InstanceType) for t in concrete):
             def _ancestors(cname: str) -> List[str]:
                 res: List[str] = []
@@ -3892,7 +4034,8 @@ include 'functions.inc'
                     return TYPE_INT
                 if hasattr(val_type, "element_type") and val_type.element_type:
                     return val_type.element_type
-                return TYPE_INT
+                # untyped list slot: if any initializer or prior store is float, treat as float
+                return TYPE_FLOAT if getattr(val_type, "pyfasm_float_elems", False) else TYPE_INT
             if val_type.is_tuple():
                 if (
                     isinstance(sub_slice, ast.Constant)
@@ -3990,6 +4133,10 @@ include 'functions.inc'
         if isinstance(expr, ast.JoinedStr):
             return TYPE_STR
         if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr == "Group":
+                return ListType(element_type=TYPE_PTR)
+            if isinstance(expr.func, ast.Attribute) and isinstance(expr.func.value, ast.Name) and expr.func.value.id == "random":
+                return TYPE_FLOAT if expr.func.attr in ("random", "uniform") else TYPE_INT
             if isinstance(expr.func, ast.Name):
                 fn_id = expr.func.id
                 if fn_id in ("str", "repr", "chr", "input", "strip", "lower", "upper", "hex", "bin", "oct", "get_simd_isa"):
@@ -4000,6 +4147,16 @@ include 'functions.inc'
                     return TYPE_FLOAT if len(expr.args) >= 2 else TYPE_INT
                 if fn_id in ("float",):
                     return TYPE_FLOAT
+                if fn_id in ("random", "uniform", "random_random", "random_uniform"):
+                    return TYPE_FLOAT
+                if fn_id in ("randint", "random_randint", "randrange", "random_randrange"):
+                    return TYPE_INT
+                if fn_id.startswith("math_") and expr.func.id in ("math_sin", "math_cos", "math_tan", "math_exp", "math_log", "math_log10", "math_sqrt"):
+                    return TYPE_FLOAT
+                if isinstance(expr.func, ast.Attribute) and expr.func.value.id == "random" and expr.func.attr in ("random", "uniform"):
+                    return TYPE_FLOAT
+                if isinstance(expr.func, ast.Attribute) and expr.func.value.id == "random" and expr.func.attr in ("randint", "randrange"):
+                    return TYPE_INT
                 if fn_id in ("complex",):
                     return TYPE_COMPLEX
                 if fn_id in ("sin", "cos", "tan", "atan2", "exp", "log", "log10", "hypot", "sqrt"):
@@ -4537,6 +4694,16 @@ include 'functions.inc'
                         elif mod_name == "math" and expr.attr in ("gcd", "lcm", "isqrt", "factorial", "sin", "cos", "sqrt"):
                             self.emit(f"lea rax, [_pyfasm_math_{expr.attr}]", f"address of math.{expr.attr}")
                             val_handled = True
+                        elif mod_name == "random" and expr.attr in ("randint", "uniform", "random", "randrange", "choice") and self.target in ("win64", "dll"):
+                            addr_map = {
+                                "randint": "_pyfasm_random_randint",
+                                "uniform": "_pyfasm_random_uniform",
+                                "random": "_pyfasm_random_random",
+                                "randrange": "_pyfasm_random_randint",
+                                "choice": "_pyfasm_random_choice",
+                            }
+                            self.emit(f"lea rax, [{addr_map[expr.attr]}]", f"address of random.{expr.attr}")
+                            val_handled = True
                         elif expr.attr in ("gcd", "lcm", "isqrt", "factorial"):
                             self.emit(f"lea rax, [_pyfasm_math_{expr.attr}]", f"address of {expr.attr}")
                             val_handled = True
@@ -4565,7 +4732,12 @@ include 'functions.inc'
                         return
                     self.emit("xor eax, eax", f"safe fallback for module/class attribute {expr.attr}")
             else:
-                if expr.attr == "size":
+                if expr.attr == "size" and not (
+                    self.resolve_instance_class(expr.value)
+                    or (getattr(self.current_func, "class_name", None)
+                        and isinstance(expr.value, ast.Attribute)
+                        and expr.value.attr == "self")
+                ) and self._infer_expr_type(expr.value).is_list() | self._infer_expr_type(expr.value).is_str() | self._infer_expr_type(expr.value).is_dict() | self._infer_expr_type(expr.value).is_tuple() | self._infer_expr_type(expr.value).is_set():
                     self._generate_expr(expr.value)
                     self.emit("mov r8, rax")
                     lbl_null_sz = self.new_label("null_sz")
@@ -5545,9 +5717,15 @@ include 'functions.inc'
                 self.emit("call _pyfasm_alloc")
                 self.emit("mov r8, rax", "base pointer")
                 self.emit(f"mov qword [r8], {num_elts}", "store length")
+                seq_elem_t = (
+                    self._merge_expr_element_types([self._infer_expr_type(e) for e in expr.elts])
+                    if expr.elts
+                    else None
+                )
                 for idx, elt in enumerate(expr.elts):
                     self.emit("push r8")
                     self._generate_expr(elt)
+                    self._emit_float_store_coerce(elt, seq_elem_t)
                     self.emit("pop r8")
                     self.emit(f"mov [r8 + {(idx + 1) * 8}], rax", f"store item[{idx}]")
                 self.emit("mov rax, r8", "return seq pointer")
@@ -5608,6 +5786,13 @@ include 'functions.inc'
 
         for gen in node.generators:
             target_var = self.current_func.local_vars.get(gen.target.id) if isinstance(gen.target, ast.Name) and self.current_func else None
+            if target_var is not None:
+                iter_t = self._infer_expr_type(gen.iter)
+                iter_elem_t = getattr(iter_t, "element_type", None)
+                if iter_elem_t is not None:
+                    target_var.var_type = iter_elem_t
+                    if isinstance(iter_elem_t, InstanceType):
+                        self.local_var_classes[gen.target.id] = iter_elem_t.class_name
             if isinstance(gen.iter, ast.Call) and isinstance(gen.iter.func, ast.Name) and gen.iter.func.id == "range":
                 args = gen.iter.args
                 start_expr = None
@@ -5652,6 +5837,10 @@ include 'functions.inc'
                     self.emit(f"jz {lbl_skip}")
 
                 self._generate_expr(node.elt)
+                self._emit_float_store_coerce(
+                    node.elt,
+                    self._infer_expr_type(node),
+                )
                 self.emit("mov rdx, rax", "element")
                 self.emit("mov rcx, [rsp]", "list_ptr on stack")
                 self.emit("call _pyfasm_list_append")
@@ -6289,6 +6478,169 @@ include 'functions.inc'
             self.emit("cvtsi2sd xmm0, rax", "int -> float64")
             self.emit("movq rax, xmm0")
 
+    def _looks_like_pygame_rect(self, value_node: ast.expr) -> bool:
+        """True если receiver — pygame.Rect или локальная переменная, хранящая PYFRECT."""
+        name = None
+        if isinstance(value_node, ast.Name):
+            name = value_node.id
+        elif isinstance(value_node, ast.Attribute):
+            name = value_node.attr
+        if name and ("rect" in name.lower() or name.lower() in ("r", "hitbox")):
+            return True
+        if self.current_func and name:
+            var = self.current_func.local_vars.get(name)
+            if var is not None and getattr(var.var_type, "pyfasm_rect", False):
+                return True
+        return self.resolve_instance_class(value_node) == "Rect"
+
+    def _is_pygame_sprite_group(self, func_node: ast.expr) -> bool:
+        """True если receiver выглядит как pygame.sprite.Group (local var, holding group list)."""
+        if not (isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name)):
+            return False
+        var_name = func_node.value.id
+        lower = var_name.lower()
+        if any(k in lower for k in ("group", "sprites", "all_sprites", "lasers", "bullets")):
+            return True
+        if self.current_func:
+            var = self.current_func.local_vars.get(var_name)
+            if var is not None and getattr(var, "pyfasm_group", False):
+                return True
+            if var is not None and getattr(var.var_type, "pyfasm_group", False):
+                return True
+        return False
+
+    def _mark_group_receiver(self, func_node: ast.expr) -> None:
+        """Помечает local var как pygame-группу после успешного перехвата её метода."""
+        if isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name) and self.current_func:
+            var = self.current_func.local_vars.get(func_node.value.id)
+            if var is not None:
+                var.pyfasm_group = True
+
+    def _receiver_is_sprite_instance(self, func_node: ast.expr) -> bool:
+        """True если receiver — экземпляр пользовательского класса (возможный спрайт)."""
+        if not isinstance(func_node, ast.Attribute):
+            return False
+        recv = func_node.value
+        if isinstance(recv, ast.Name) and self.current_func:
+            var = self.current_func.local_vars.get(recv.id)
+            if var is None:
+                return False
+        cls = self.resolve_instance_class(recv)
+        if cls and cls in self.module.classes:
+            return True
+        # attribute receivers like state["player"].kill() are unknown; be permissive for names
+        return isinstance(recv, ast.Name)
+
+    def _emit_sprite_image_rect(self, sprite_ptr_slot: str, image_out: str, rect_out: str) -> None:
+        """Загружает sprite.image в image_out и sprite.rect в rect_out (оба qword-слоты на стеке).
+
+        Смещения image/rect берутся из таблицы атрибутных смещений; если атрибут ещё
+        не встречался, смещение фиксируется сейчас (единая таблица на модуль).
+        """
+        img_off = self._get_attribute_offset("image")
+        rect_off = self._get_attribute_offset("rect")
+        self.emit(f"mov rax, [rsp + {sprite_ptr_slot}]", "sprite ptr")
+        self.emit(f"mov {image_out}, [rax + {img_off}]", "sprite.image")
+        self.emit(f"mov {rect_out}, [rax + {rect_off}]", "sprite.rect")
+
+    def _emit_pygame_group_draw(self, call: ast.Call) -> None:
+        """group.draw(surface): blit каждого живого спрайта в surface по его rect."""
+        self.emit("sub rsp, 96", "aligned frame for Group.draw loop")
+        self._generate_expr(call.args[0])
+        self.emit("mov [rsp + 32], rax", "dst surface")
+        self._generate_expr(call.func.value)
+        self.emit("mov [rsp + 40], rax", "group list")
+        self.emit("mov qword [rsp + 48], 0", "index i = 0")
+        lbl_loop = self.new_label("gdraw_loop")
+        lbl_next = self.new_label("gdraw_next")
+        lbl_done = self.new_label("gdraw_done")
+        lbl_skip = self.new_label("gdraw_skip")
+        self.emit_raw(f"{lbl_loop}:")
+        self.emit("mov rbx, [rsp + 40]", "group list")
+        self.emit("mov rax, [rbx]", "n = len(group)")
+        self.emit("cmp [rsp + 48], rax", "i < n ?")
+        self.emit(f"jae {lbl_done}")
+        self.emit("mov rcx, [rsp + 48]")
+        self.emit("mov rax, [rbx + rcx * 8 + 8]", "sprite = group[i]")
+        self.emit("test rax, rax")
+        self.emit(f"jz {lbl_next}")
+        self.emit("cmp rax, 65536", "skip non-instance junk")
+        self.emit(f"jb {lbl_next}")
+        self.emit("mov r10, 505946434C535447h", "PYFCLSTG")
+        self.emit("cmp [rax + 2032], r10")
+        self.emit(f"jne {lbl_next}")
+        self.emit("cmp qword [rax + 2024], 0", "sprite alive?")
+        self.emit(f"jne {lbl_skip}")
+        self.emit("mov [rsp + 56], rax", "save sprite ptr")
+        self._emit_sprite_image_rect("56", "rdx", "r8")
+        self.emit("mov [rsp + 64], rdx", "sprite.image")
+        self.emit("mov [rsp + 72], r8", "sprite.rect")
+        self.emit("test rdx, rdx", "no image -> skip")
+        self.emit(f"jz {lbl_skip}")
+        self.emit("mov rax, 5059465245435421h", "PYFRECT!")
+        self.emit("cmp [r8], rax", "rect is a PYFRECT?")
+        self.emit(f"jne {lbl_skip}")
+        self.emit("mov rcx, [rsp + 32]", "dst surface")
+        self.emit("mov rdx, [rsp + 64]", "src image")
+        self.emit("mov r8, [rsp + 72]", "dest rect")
+        self.emit("sub rsp, 32", "shadow space for blit")
+        self.emit("call _pyfasm_pg_blit")
+        self.emit("add rsp, 32")
+        self.emit_raw(f"{lbl_skip}:")
+        self.emit("inc qword [rsp + 48]")
+        self.emit(f"jmp {lbl_next}")
+        self.emit_raw(f"{lbl_next}:")
+        self.emit(f"jmp {lbl_loop}")
+        self.emit_raw(f"{lbl_done}:")
+        self.emit("add rsp, 96")
+
+    def _emit_pygame_group_update(self, call: ast.Call) -> None:
+        """group.update(args...): for each alive sprite call its update method (polymorphic)."""
+        self.emit("sub rsp, 160", "aligned frame for Group.update loop")
+        self._generate_expr(call.func.value)
+        self.emit("mov [rsp + 32], rax", "group list")
+        self.emit("mov qword [rsp + 40], 0", "index i = 0")
+        arg_slots = 64
+        for idx, arg in enumerate(call.args[:8]):
+            self._generate_expr(arg)
+            self.emit(f"mov [rsp + {arg_slots + idx * 8}], rax", f"update arg {idx}")
+        n_args = min(len(call.args), 8)
+        lbl_loop = self.new_label("gupd_loop")
+        lbl_call = self.new_label("gupd_call")
+        lbl_next = self.new_label("gupd_next")
+        lbl_done = self.new_label("gupd_done")
+        self.emit_raw(f"{lbl_loop}:")
+        self.emit("mov rbx, [rsp + 32]", "group list")
+        self.emit("mov rax, [rbx]", "n = len(group)")
+        self.emit("cmp [rsp + 40], rax", "i < n ?")
+        self.emit(f"jae {lbl_done}")
+        self.emit("mov rcx, [rsp + 40]")
+        self.emit("mov rcx, [rbx + rcx * 8 + 8]", "sprite = group[i]")
+        self.emit("test rcx, rcx")
+        self.emit(f"jz {lbl_next}")
+        self.emit("cmp rcx, 65536")
+        self.emit(f"jb {lbl_next}")
+        self.emit("mov r10, 505946434C535447h", "PYFCLSTG")
+        self.emit("cmp [rcx + 2032], r10")
+        self.emit(f"jne {lbl_next}")
+        self.emit("cmp qword [rcx + 2024], 0", "sprite alive?")
+        self.emit(f"jne {lbl_next}")
+        self.emit("mov [rsp + 48], rcx", "save sprite self")
+        self.emit("mov rcx, [rsp + 48]", "self")
+        for idx in range(n_args):
+            self.emit(f"mov rdx, [rsp + {arg_slots + idx * 8}]", f"arg {idx}")
+            if idx == 0:
+                self.emit("mov r8, rdx", "shift for fast path")
+        self.emit("mov [rsp + 56], rdx", "keep last arg for trampoline (rdx)")
+        self.emit("mov rdx, [rsp + 56]", "first/only update arg")
+        self._used_vcalls.add("update")
+        self.emit(f"call {self._vcall_label('update')}", "sprite.update(self, arg0)")
+        self.emit_raw(f"{lbl_next}:")
+        self.emit("inc qword [rsp + 40]")
+        self.emit(f"jmp {lbl_loop}")
+        self.emit_raw(f"{lbl_done}:")
+        self.emit("add rsp, 160")
+
     def _try_emit_pygame_call(
         self, call: ast.Call, func_name: str, attr_name: str, prefix: str
     ) -> bool:
@@ -6463,6 +6815,12 @@ include 'functions.inc'
             self.emit("call _pyfasm_pg_event_post")
             self.emit("add rsp, 32")
             self.emit("mov eax, 1", "True")
+            return True
+
+        if attr_name == "get_focused" and "mouse" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_mouse_get_focused")
+            self.emit("add rsp, 32")
             return True
 
         if attr_name == "get_focused" and "key" in func_dump_lower:
@@ -6760,6 +7118,71 @@ include 'functions.inc'
             self.emit("sub rsp, 32")
             self.emit(f"call _pyfasm_pg_surface_{attr_name}")
             self.emit("add rsp, 32")
+            # get_rect(**kwargs): apply placement kwargs (center, topleft, x, y, ...) to the new rect
+            if attr_name == "get_rect" and (call.keywords or call.args):
+                kw = call.keywords[0] if call.keywords else None
+                val_node = kw.value if kw else call.args[0]
+                kw_name = kw.arg if kw else (call.args[1].value if len(call.args) > 1 and isinstance(call.args[1], ast.Constant) else None)
+                if kw_name in ("center", "topleft", "centerx", "centery", "x", "y", "top", "left", "bottom", "right") and val_node is not None:
+                    self.emit("mov [rsp - 8], rax", "new rect (red zone keep via push)")
+                    self.emit("push rax", "rect ptr")
+                    self._generate_expr(val_node)
+                    self.emit("mov rbx, rax", "point/value")
+                    self.emit("pop rdi", "rect ptr")
+                    lbl_gr_ok = self.new_label("getrect_ok")
+                    lbl_gr_bad = self.new_label("getrect_bad")
+                    self.emit("test rdi, rdi")
+                    self.emit(f"jz {lbl_gr_bad}")
+                    self.emit("mov rax, 5059465245435421h", "PYFRECT!")
+                    self.emit("cmp [rdi], rax")
+                    self.emit(f"jne {lbl_gr_bad}")
+                    if kw_name in ("x", "left", "top", "bottom", "right", "centerx", "centery"):
+                        self.emit("mov rcx, [rbx]", "value")
+                        if kw_name in ("x", "left"):
+                            self.emit("mov [rdi + 48], rcx", "x")
+                        elif kw_name == "top":
+                            self.emit("mov [rdi + 56], rcx", "y")
+                        elif kw_name == "bottom":
+                            self.emit("mov rax, [rdi + 72]", "h")
+                            self.emit("sub rcx, rax", "y = v - h")
+                            self.emit("mov [rdi + 56], rcx", "y")
+                        elif kw_name == "right":
+                            self.emit("mov rax, [rdi + 64]", "w")
+                            self.emit("sub rcx, rax", "x = v - w")
+                            self.emit("mov [rdi + 48], rcx", "x")
+                        elif kw_name == "centerx":
+                            self.emit("mov rax, [rdi + 64]", "w")
+                            self.emit("sar rax, 1")
+                            self.emit("sub rcx, rax")
+                            self.emit("mov [rdi + 48], rcx", "x")
+                        else:
+                            self.emit("mov rax, [rdi + 72]", "h")
+                            self.emit("sar rax, 1")
+                            self.emit("sub rcx, rax")
+                            self.emit("mov [rdi + 56], rcx", "y")
+                        self.emit(f"jmp {lbl_gr_ok}")
+                    else:
+                        # point kwarg: center/topleft/(x,y) tuple
+                        self.emit("test rbx, rbx")
+                        self.emit(f"jz {lbl_gr_bad}")
+                        self.emit("cmp qword [rbx], 2", "tuple of 2?")
+                        self.emit(f"jb {lbl_gr_bad}")
+                        self.emit("mov rcx, [rbx + 8]", "px")
+                        self.emit("mov rdx, [rbx + 16]", "py")
+                        if kw_name == "center":
+                            self.emit("mov rax, [rdi + 64]", "w")
+                            self.emit("sar rax, 1")
+                            self.emit("sub rcx, rax", "x = px - w//2")
+                            self.emit("mov rax, [rdi + 72]", "h")
+                            self.emit("sar rax, 1")
+                            self.emit("sub rdx, rax", "y = py - h//2")
+                        self.emit("mov [rdi + 48], rcx", "x")
+                        self.emit("mov [rdi + 56], rdx", "y")
+                        self.emit(f"jmp {lbl_gr_ok}")
+                    self.emit_raw(f"{lbl_gr_bad}:")
+                    self.emit("xor eax, eax")
+                    self.emit_raw(f"{lbl_gr_ok}:")
+                    self.emit("mov rax, rdi", "rect back")
             return True
 
         if attr_name in ("convert", "convert_alpha") and isinstance(call.func, ast.Attribute):
@@ -6955,6 +7378,58 @@ include 'functions.inc'
         if attr_name == "Group" and ("sprite" in func_dump_lower or prefix == "sprite"):
             self.emit("sub rsp, 32")
             self.emit("call _pyfasm_pg_group_new")
+            self.emit("add rsp, 32")
+            return True
+
+        # --- pygame.sprite.Group methods (Group is a plain list of sprite instances) ---
+        if prefix == "sprite" or ("sprite" in func_dump_lower) or self._is_pygame_sprite_group(call.func):
+            if attr_name == "add" and call.args:
+                # group.add(sprite...) -> list_append per sprite
+                self._mark_group_receiver(call.func)
+                self.emit("sub rsp, 64", "aligned frame for Group.add")
+                self._generate_expr(call.func.value)
+                self.emit("mov [rsp + 32], rax", "group list")
+                for arg in call.args:
+                    self._generate_expr(arg)
+                    self.emit("mov rdx, rax", "sprite instance")
+                    self.emit("mov rcx, [rsp + 32]", "group list")
+                    self.emit("call _pyfasm_list_append")
+                self.emit("xor eax, eax")
+                self.emit("add rsp, 64")
+                return True
+            if attr_name == "empty" and not call.args:
+                self.emit("sub rsp, 32")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "group list")
+                self.emit("call _pyfasm_group_empty")
+                self.emit("add rsp, 32")
+                return True
+            if attr_name == "sprites" and not call.args:
+                self._generate_expr(call.func.value)
+                return True
+            if attr_name == "draw" and call.args:
+                # group.draw(surface): for each alive sprite blit sprite.image at sprite.rect
+                self._mark_group_receiver(call.func)
+                self._emit_pygame_group_draw(call)
+                return True
+            if attr_name == "update":
+                self._mark_group_receiver(call.func)
+                self._emit_pygame_group_update(call)
+                return True
+
+        # --- sprite instance methods: kill() / alive() ----------------------
+        if attr_name == "kill" and not call.args and self._receiver_is_sprite_instance(call.func):
+            self.emit("sub rsp, 32")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "sprite instance")
+            self.emit("call _pyfasm_sprite_kill")
+            self.emit("add rsp, 32")
+            return True
+        if attr_name == "alive" and not call.args and self._receiver_is_sprite_instance(call.func):
+            self.emit("sub rsp, 32")
+            self._generate_expr(call.func.value)
+            self.emit("mov rcx, rax", "sprite instance")
+            self.emit("call _pyfasm_sprite_alive")
             self.emit("add rsp, 32")
             return True
 
@@ -7758,13 +8233,15 @@ include 'functions.inc'
                                 if f"{prefix}_{attr_name}" in self.module.functions:
                                     func_name = f"{prefix}_{attr_name}"
                                 elif self.current_func and hasattr(self.current_func, "local_vars") and prefix in self.current_func.local_vars:
-                                    for cls in self.module.classes.values():
-                                        if attr_name in ("__init__", "__new__", "register"):
-                                            continue
-                                        resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
-                                        if resolved:
-                                            func_name = resolved
-                                            break
+                                    lvar = self.current_func.local_vars[prefix]
+                                    if not getattr(lvar, "pyfasm_group", False):
+                                        for cls in self.module.classes.values():
+                                            if attr_name in ("__init__", "__new__", "register"):
+                                                continue
+                                            resolved = self.resolve_class_method(cls.name, attr_name, skip_cls=False)
+                                            if resolved:
+                                                func_name = resolved
+                                                break
                                 if not func_name:
                                     func_name = f"{prefix}_{attr_name}"
                 else:
@@ -8160,6 +8637,10 @@ include 'functions.inc'
                     runtime_fn = "_pyfasm_list_remove_str" if is_str_item else "_pyfasm_list_remove"
                 if runtime_fn:
                     self._generate_expr(call.args[0])
+                    if attr_name == "append" and ctype.is_list():
+                        self._emit_float_store_coerce(
+                            call.args[0], getattr(ctype, "element_type", None)
+                        )
                     self.emit("mov rdx, rax", f"item to {attr_name}")
                     self.emit(f"mov rcx, {operand}", "container_ptr")
                     self.emit(f"call {runtime_fn}")
@@ -8525,11 +9006,42 @@ include 'functions.inc'
                 self.emit("call _pyfasm_json_parse")
                 return
 
-        if (func_name == "choice" and prefix in ("random", "")) or func_name == "random_choice":
-            if call.args:
-                self._generate_expr(call.args[0])
-                self.emit("mov rcx, rax", "list pointer")
-                self.emit("call _pyfasm_random_choice")
+        if (
+            func_name in ("randint", "random_randint", "randrange", "random_randrange", "uniform", "random_uniform", "choice", "random_choice", "random", "random_random")
+            or (attr_name in ("randint", "randrange", "uniform", "choice", "random") and prefix in ("random", ""))
+        ):
+            if attr_name in ("randint", "randrange", "uniform", "choice") or func_name not in ("random", "random_random"):
+                if func_name in ("randint", "random_randint", "randrange", "random_randrange") and len(call.args) >= 2:
+                    self._generate_expr(call.args[0])
+                    self.emit("mov rcx, rax", "lo")
+                    self._generate_expr(call.args[1])
+                    self.emit("mov rdx, rax", "hi")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_random_randint")
+                    self.emit("add rsp, 32")
+                    return
+                if func_name in ("uniform", "random_uniform") and len(call.args) >= 2:
+                    self._generate_expr(call.args[0])
+                    self.emit("movq xmm0, rax", "lo double")
+                    self._generate_expr(call.args[1])
+                    self.emit("movq xmm1, rax", "hi double")
+                    self.emit("movq rcx, xmm0", "lo bits")
+                    self.emit("movq rdx, xmm1", "hi bits")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_random_uniform")
+                    self.emit("add rsp, 32")
+                    return
+                if func_name in ("choice", "random_choice") and call.args:
+                    self._generate_expr(call.args[0])
+                    self.emit("mov rcx, rax", "list pointer")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_random_choice")
+                    self.emit("add rsp, 32")
+                    return
+            if not call.args:
+                self.emit("sub rsp, 32", "shadow space")
+                self.emit("call _pyfasm_random_random")
+                self.emit("add rsp, 32")
                 return
 
         if (func_name == "loads" and prefix == "json") or func_name == "json_loads":

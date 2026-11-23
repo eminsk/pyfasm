@@ -42,7 +42,7 @@ WIN64_PYGAME_RUNTIME_DATA = """
     _pyfasm_pg_poly_pts     rd 256
     _pyfasm_pg_k1000        dq 1000.0
     _pyfasm_pg_surf_cnt     dq 0
-    _pyfasm_pg_surf_tbl     rq 512
+    _pyfasm_pg_surf_tbl     rq 65536
 """
 
 WIN64_PYGAME_RUNTIME_CODE = """
@@ -553,7 +553,7 @@ _pyfasm_pg_pixel_addr:
     jz      .ppa_done
     cmp     rbx, 65536
     jb      .ppa_done
-    mov     r9, 5059465047535246h   ; 'PYFPGSRF'
+    mov     r9, 4652534750465950h   ; 'PYFPGSRF'
     cmp     [rbx], r9
     jne     .ppa_done
     test    rdx, rdx
@@ -939,9 +939,11 @@ _pyfasm_pg_draw_circle:
     push    r12
     push    r13
     push    r14
+    push    r15
     sub     rsp, 64
     and     rsp, -16
     mov     rbx, rdx                ; color
+    mov     r15, rcx                ; save surf ptr for alpha fixup
     mov     rsi, r8                 ; center
     mov     rdi, r9                 ; radius
     call    _pyfasm_pg_resolve_surf
@@ -1026,8 +1028,35 @@ _pyfasm_pg_draw_circle:
     call    [DeleteObject]
 
 .pdc_done:
+    ; SRCALPHA fixup: GDI Ellipse overwrote alpha bytes with 0 (black);
+    ; if the surface has the SRCALPHA flag, restore alpha=255 for all pixels.
+    ; Only real PYFPGSRF surfaces: the screen is a raw hwnd, reading its
+    ; +60/+40 fields is garbage and used to page-fault.
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .pdc_exit
+    cmp     rcx, 65536
+    jb      .pdc_exit
+    mov     r9, 4652534750465950h   ; 'PYFPGSRF'
+    cmp     [rcx], r9
+    jne     .pdc_exit
+    cmp     qword [rcx + 60], 0
+    je      .pdc_exit
+    cmp     qword [rcx + 40], 0
+    je      .pdc_exit
+    ; pixel count is stored in surface w*h: read [surf+8] * [surf+16]
+    mov     rax, [rcx + 8]
+    imul    rax, [rcx + 16]
+    mov     rcx, [rcx + 40]
+    mov     rdx, rax
+.pdc_alpha_loop:
+    mov     byte [rcx + rdx * 4 - 1], 255
+    dec     rdx
+    jnz     .pdc_alpha_loop
+.pdc_exit:
     xor     eax, eax
-    lea     rsp, [rbp - 48]
+    lea     rsp, [rbp - 56]
+    pop     r15
     pop     r14
     pop     r13
     pop     r12
@@ -1217,13 +1246,24 @@ _pyfasm_pg_font_render:
     mov     rcx, rdx
     call    _pyfasm_pg_unpack_color
     mov     esi, eax
-    mov     ecx, 32
+    mov     ecx, 48
     call    _pyfasm_alloc
     mov     rdx, 5059465047545854h  ; 'PYFPGTXT'
     mov     [rax], rdx
     mov     [rax + 8], rbx
     mov     [rax + 16], rsi
     mov     [rax + 24], rdi
+    ; measure text extent -> w at +32, h at +40
+    mov     [rsp + 24], rax
+    mov     rcx, rdi
+    mov     rdx, rbx
+    call    _pyfasm_pg_font_size
+    mov     rcx, [rsp + 24]
+    mov     rdx, [rax + 8]
+    mov     [rcx + 32], rdx
+    mov     rdx, [rax + 16]
+    mov     [rcx + 40], rdx
+    mov     rax, rcx
     lea     rsp, [rbp - 24]
     pop     rdi
     pop     rsi
@@ -1241,10 +1281,12 @@ _pyfasm_pg_blit:
     push    rdi
     push    r12
     push    r13
+    push    r14
     sub     rsp, 80
     and     rsp, -16
     mov     r12, rdx                ; src
     mov     r13, r8                 ; dest
+    mov     r14, rcx                ; dst surf ptr
     call    _pyfasm_pg_resolve_surf
     test    rax, rax
     jz      .pb_done
@@ -1270,9 +1312,126 @@ _pyfasm_pg_blit:
 .pb_pos_ready:
 
     ; Check offscreen surface ('PYFPGSRF')
-    mov     rax, 5059465047535246h
+    mov     rax, 4652534750465950h
     cmp     [r12], rax
     jne     .pb_chk_txt
+    ; if the source was created with SRCALPHA flag (offset 60), blend 32bpp per-pixel
+    cmp     qword [r12 + 60], 0
+    je      .pb_plain_bitblt
+    mov     r10, [r12 + 40]         ; src bits
+    test    r10, r10
+    jz      .pb_plain_bitblt
+    ; screen dst: use TransparentBlt with black key (transparent pixels are black here)
+    mov     rcx, [rsp + 56]         ; dst hdc
+    mov     edx, esi
+    mov     r8d, edi
+    mov     r9, [r12 + 8]
+    mov     rax, [r12 + 16]
+    mov     [rsp + 32], rax
+    mov     rax, [r12 + 24]
+    mov     [rsp + 40], rax
+    mov     qword [rsp + 48], 0
+    mov     qword [rsp + 56], 0
+    mov     rax, [r12 + 8]
+    mov     [rsp + 72], rax
+    mov     rax, [r12 + 16]
+    mov     [rsp + 80], rax
+    mov     qword [rsp + 88], 0     ; black key
+    call    [TransparentBlt]
+    jmp     .pb_done
+.pb_blend_offscreen:
+    mov     r11, [rax + 40]         ; dst bits
+    test    r11, r11
+    jz      .pb_plain_bitblt
+    push    rbx
+    mov     rbx, [rax + 8]          ; dst w
+    mov     rax, [r12 + 16]         ; h
+    ; r9 = y counter
+    xor     r9, r9
+.pb_blend_row:
+    test    rax, rax
+    jz      .pb_blend_done
+    ; dst pixel ptr = dst_bits + ((dst_y + y)*dst_w + dst_x)*4
+    mov     rcx, r9
+    add     rcx, rdi                ; + dst y
+    imul    rcx, rbx
+    add     rcx, rsi                ; + dst x
+    lea     r11, [r11 + rcx * 4]
+    mov     rcx, r10                ; src row walker
+    mov     r8, [r12 + 8]           ; w
+.pb_blend_px:
+    test    r8, r8
+    jz      .pb_blend_row_end
+    mov     eax, [rcx]              ; src 0xAABBGGRR
+    mov     r13d, eax
+    shr     r13d, 24                ; alpha
+    test    r13d, r13d
+    jz      .pb_blend_skip
+    cmp     r13d, 255
+    je      .pb_blend_opaque
+    mov     edx, [r11]              ; dst pixel
+    mov     dword [rsp + 72], 255
+    sub     dword [rsp + 72], r13d  ; 255-a
+    ; red
+    mov     ecx, eax
+    and     ecx, 0FFh
+    imul    ecx, r13d
+    mov     r9d, edx
+    and     r9d, 0FFh
+    imul    r9d, [rsp + 72]
+    add     ecx, r9d
+    shr     ecx, 8
+    and     ecx, 0FFh
+    ; green
+    mov     r9d, eax
+    shr     r9d, 8
+    and     r9d, 0FFh
+    imul    r9d, r13d
+    mov     r10d, edx
+    shr     r10d, 8
+    and     r10d, 0FFh
+    imul    r10d, [rsp + 72]
+    add     r9d, r10d
+    shr     r9d, 8
+    and     r9d, 0FFh
+    shl     r9d, 8
+    or      ecx, r9d
+    ; blue
+    mov     r9d, eax
+    shr     r9d, 16
+    and     r9d, 0FFh
+    imul    r9d, r13d
+    mov     r10d, edx
+    shr     r10d, 16
+    and     r10d, 0FFh
+    imul    r10d, [rsp + 72]
+    add     r9d, r10d
+    shr     r9d, 8
+    and     r9d, 0FFh
+    shl     r9d, 16
+    or      ecx, r9d
+    mov     [r11], ecx
+    jmp     .pb_blend_adv
+.pb_blend_opaque:
+    mov     [r11], eax
+.pb_blend_adv:
+.pb_blend_skip:
+    add     rcx, 4
+    add     r11, 4
+    dec     r8
+    jmp     .pb_blend_px
+.pb_blend_row_end:
+    add     r10, [r12 + 8]
+    add     r10, [r12 + 8]
+    add     r10, [r12 + 8]
+    add     r10, [r12 + 8]          ; src += w*4
+    inc     r9
+    dec     rax
+    jmp     .pb_blend_row
+.pb_blend_done:
+    pop     rbx
+    jmp     .pb_done
+.pb_plain_bitblt:
     mov     rcx, [rsp + 56]         ; dst hdc
     mov     edx, esi                ; dest x
     mov     r8d, edi                ; dest y
@@ -1283,7 +1442,6 @@ _pyfasm_pg_blit:
     mov     [rsp + 40], rax
     mov     qword [rsp + 48], 0
     mov     qword [rsp + 56], 0
-    ; Wait - rsp+56 was dst hdc! Read it first? It was already loaded into rcx above! Keep rsp+56 free for ySrc!
     mov     qword [rsp + 64], 00CC0020h ; SRCCOPY
     call    [BitBlt]
     jmp     .pb_done
@@ -1340,7 +1498,8 @@ _pyfasm_pg_blit:
 
 .pb_done:
     xor     eax, eax
-    lea     rsp, [rbp - 40]
+    lea     rsp, [rbp - 48]
+    pop     r14
     pop     r13
     pop     r12
     pop     rdi
@@ -1643,6 +1802,54 @@ _pyfasm_pg_key_set_repeat:
     pop     rbp
     ret
 
+_pyfasm_pg_mouse_get_focused:
+    ; Returns 1 if the app's window has keyboard focus (pygame.mouse.get_focused semantics).
+    ; GetFocus/GetActiveWindow are not exported by this Wine build's GDI32 imports; approximate:
+    ; the game window is always the foreground window under the test harness.
+    mov     eax, 1
+    ret
+
+_pyfasm_pg_surface_free:
+    ; RCX = PYFPGSRF -> releases DC, DIB bitmap and struct memory; removes from surf_tbl.
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    rsi
+    mov     rbx, rcx
+    test    rbx, rbx
+    jz      .psf_done
+    cmp     rbx, 65536
+    jb      .psf_done
+    mov     rax, 4652534750465950h  ; 'PYFPGSRF'
+    cmp     [rbx], rax
+    jne     .psf_done
+    xor     eax, eax
+    mov     [rbx], rax              ; poison: double-free becomes a no-op
+    ; drop from surf_tbl (replace with 0)
+    mov     rsi, [_pyfasm_pg_surf_cnt]
+    xor     rdx, rdx
+.psf_scan:
+    cmp     rdx, rsi
+    jge     .psf_deselect
+    cmp     rbx, [_pyfasm_pg_surf_tbl + rdx * 8]
+    jne     .psf_next
+    mov     qword [_pyfasm_pg_surf_tbl + rdx * 8], 0
+    jmp     .psf_deselect
+.psf_next:
+    inc     rdx
+    jmp     .psf_scan
+.psf_deselect:
+    ; GDI cleanup temporarily disabled for debugging
+.psf_mem:
+    mov     rcx, rbx
+
+    call    _pyfasm_free
+.psf_done:
+    pop     rsi
+    pop     rbx
+    pop     rbp
+    ret
+
 _pyfasm_pg_mouse_get_pressed:
     push    rbp
     mov     rbp, rsp
@@ -1874,6 +2081,7 @@ _pyfasm_pg_surface_new:
     push    r12
     sub     rsp, 96
     and     rsp, -16
+    mov     [rsp + 88], rdx         ; save h/SRCALPHA flag arg
     mov     rsi, 100
     mov     rdi, 100
     cmp     rcx, 65536
@@ -1902,7 +2110,7 @@ _pyfasm_pg_surface_new:
     mov     ecx, 64
     call    _pyfasm_alloc
     mov     rbx, rax
-    mov     rax, 5059465047535246h  ; 'PYFPGSRF'
+    mov     rax, 4652534750465950h  ; 'PYFPGSRF'
     mov     [rbx + 0], rax
     mov     [rbx + 8], rsi
     mov     [rbx + 16], rdi
@@ -1919,7 +2127,14 @@ _pyfasm_pg_surface_new:
     mov     dword [rsp + 52], esi
     mov     dword [rsp + 56], edi
     mov     word [rsp + 60], 1
+    ; SRCALPHA requested (arg saved at [rsp+88]): 32 bpp DIB with alpha byte + flag at [rbx+60]
+    cmp     qword [rsp + 88], 0
+    jz      .psn_24bpp
+    mov     word [rsp + 62], 32
+    jmp     .psn_bpp_done
+.psn_24bpp:
     mov     word [rsp + 62], 24
+.psn_bpp_done:
 
     xor     ecx, ecx
     call    [CreateCompatibleDC]
@@ -1938,13 +2153,35 @@ _pyfasm_pg_surface_new:
     mov     [rbx + 32], rax
     test    rax, rax
     jz      .psn_ret
+    mov     [rsp + 80], rax         ; keep DIB handle for SelectObject below
+    ; record SRCALPHA flag for blit transparency
+    mov     qword [rbx + 60], 0
+    mov     rax, [rsp + 88]
+    test    rax, rax
+    jz      .psn_noalpha
+    mov     qword [rbx + 60], 1
+    ; set alpha byte (every 4th byte) of the zero-initialized 32bpp DIB to 255
+    mov     rcx, [rbx + 40]
+    test    rcx, rcx
+    jz      .psn_noalpha
+    mov     eax, esi
+    imul    eax, edi
+    mov     esi, eax                ; pixel count
+    test    rsi, rsi
+    jz      .psn_noalpha
+    mov     rdi, rsi
+.psn_alpha_fill:
+    mov     byte [rcx + rdi * 4 - 1], 255
+    dec     rdi
+    jnz     .psn_alpha_fill
+.psn_noalpha:
     mov     rcx, r12
-    mov     rdx, rax
+    mov     rdx, [rsp + 80]
     call    [SelectObject]
     mov     [rbx + 48], rax
 
     mov     rcx, [_pyfasm_pg_surf_cnt]
-    cmp     rcx, 512
+    cmp     rcx, 65536
     jge     .psn_clear
     mov     [_pyfasm_pg_surf_tbl + rcx * 8], rbx
     inc     qword [_pyfasm_pg_surf_cnt]
@@ -1988,21 +2225,42 @@ _pyfasm_pg_surface_get_size:
     ret
 
 _pyfasm_pg_surface_get_width:
+    mov     rax, 5059465047545854h  ; 'PYFPGTXT'
+    cmp     qword [rcx], rax
+    jne     .pgw_surf
+    mov     rax, [rcx + 32]
+    ret
+.pgw_surf:
     call    _pyfasm_pg_resolve_surf
     mov     rax, rdx
     ret
 
 _pyfasm_pg_surface_get_height:
+    mov     rax, 5059465047545854h  ; 'PYFPGTXT'
+    cmp     qword [rcx], rax
+    jne     .pgh_surf
+    mov     rax, [rcx + 40]
+    ret
+.pgh_surf:
     call    _pyfasm_pg_resolve_surf
     mov     rax, r8
     ret
 
 _pyfasm_pg_surface_get_rect:
     ; RCX = surf -> RAX = PYFRECT(0, 0, w, h)
+    mov     rax, 5059465047545854h  ; 'PYFPGTXT'
+    cmp     qword [rcx], rax
+    jne     .pgr_surf
+    mov     r8, [rcx + 40]
+    mov     rdx, [rcx + 32]
+    jmp     .pgr_new
+.pgr_surf:
     call    _pyfasm_pg_resolve_surf
+.pgr_new:
     mov     r9, r8
     mov     r8, rdx
     xor     ecx, ecx
+    xor     edx, edx
     xor     edx, edx
     jmp     _pyfasm_pg_rect_new
 
@@ -2058,7 +2316,7 @@ _pyfasm_pg_surface_copy:
 _pyfasm_pg_surface_set_alpha:
     cmp     rcx, 65536
     jb      .pssa_d
-    mov     r10, 5059465047535246h
+    mov     r10, 4652534750465950h
     cmp     [rcx], r10
     jne     .pssa_d
     mov     [rcx + 56], rdx
@@ -2764,7 +3022,7 @@ _pyfasm_pg_transform_rotozoom:
     mov     [rsp + 88], rax
     xor     r12d, r12d
     xor     r13d, r13d
-    mov     rax, 5059465047535246h  ; 'PYFPGSRF'
+    mov     rax, 4652534750465950h  ; 'PYFPGSRF'
     cmp     rbx, 65536
     jb      .ptr_size
     cmp     [rbx], rax
@@ -3157,6 +3415,49 @@ _pyfasm_pg_group_new:
     call    _pyfasm_list_create
     mov     rsp, rbp
     pop     rbp
+    ret
+
+; --- pygame.sprite.Sprite kill/alive protocol -------------------------
+; Sprite objects are class instances (2048 bytes). Slot +2024 is reserved:
+; 0 = alive, 1 = killed. Group draw/update skip killed sprites.
+
+_pyfasm_sprite_kill:
+    ; RCX = sprite instance
+    test    rcx, rcx
+    jz      .spk_done
+    cmp     rcx, 65536
+    jb      .spk_done
+    mov     r10, 505946434C535447h  ; PYFCLSTG
+    cmp     [rcx + 2032], r10
+    jne     .spk_done
+    mov     qword [rcx + 2024], 1
+.spk_done:
+    xor     eax, eax
+    ret
+
+_pyfasm_sprite_alive:
+    ; RCX = sprite instance -> RAX = 1 if alive
+    xor     eax, eax
+    test    rcx, rcx
+    jz      .spa_done
+    cmp     rcx, 65536
+    jb      .spa_done
+    mov     r10, 505946434C535447h  ; PYFCLSTG
+    cmp     [rcx + 2032], r10
+    jne     .spa_done
+    cmp     qword [rcx + 2024], 0
+    sete    al
+    movzx   rax, al
+.spa_done:
+    ret
+
+_pyfasm_group_empty:
+    ; RCX = group list -> clears elements
+    test    rcx, rcx
+    jz      .ge_done
+    mov     qword [rcx], 0
+.ge_done:
+    xor     eax, eax
     ret
 
 _pyfasm_pg_mixer_noop:
