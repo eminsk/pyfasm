@@ -1,7 +1,7 @@
 """
 PyFASM: Free-Threaded (No-GIL) Python to Pure FASM x64 Native Compiler.
 """
-__version__ = "2.3.4"
+__version__ = "2.3.5"
 
 from pyfasm.compiler import PyFasmCompiler
 from pyfasm.bundler import ProjectBundler
