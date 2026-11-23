@@ -4498,6 +4498,9 @@ include 'functions.inc'
                     if pg_val is not None:
                         self.emit(f"mov rax, {pg_val}", f"pygame constant {expr.attr}")
                         val_handled = True
+                    elif expr.attr in ("Surface", "Rect", "Font", "SysFont", "Color", "event", "draw", "image", "mixer", "transform", "font", "mouse", "key", "time", "display"):
+                        self.emit("xor eax, eax", f"pygame type/namespace {expr.attr} placeholder (calls route via shim)")
+                        val_handled = True
                 if not val_handled:
                     math_consts = {
                         "pi": 3.141592653589793,
@@ -6190,6 +6193,38 @@ include 'functions.inc'
             "SRCALPHA": 65536,
             "RESIZABLE": 16,
             "FULLSCREEN": -2147483648,
+            "USEREVENT": 24,
+            "USEREVENT_DROP_EVENT": 25,
+            "KMOD_NONE": 0,
+            "KMOD_LSHIFT": 1,
+            "KMOD_RSHIFT": 2,
+            "KMOD_SHIFT": 1 | 2,
+            "KMOD_LCTRL": 64,
+            "KMOD_RCTRL": 128,
+            "KMOD_CTRL": 64 | 128,
+            "KMOD_LALT": 256,
+            "KMOD_RALT": 512,
+            "KMOD_ALT": 256 | 512,
+            "KMOD_NUM": 4096,
+            "KMOD_CAPS": 8192,
+            "VIDEOEXPOSE": 512,
+            "VIDEORESIZE": 513,
+            "ACTIVEEVENT": 512,
+            "JOYAXISMOTION": 1536,
+            "JOYBALLMOTION": 1537,
+            "JOYHATMOTION": 1538,
+            "JOYBUTTONDOWN": 1539,
+            "JOYBUTTONUP": 1540,
+            "CONTROLLERAXISMOTION": 1616,
+            "CONTROLLERBUTTONDOWN": 1617,
+            "CONTROLLERBUTTONUP": 1618,
+            "FINGERDOWN": 1792,
+            "FINGERUP": 1793,
+            "FINGERMOTION": 1794,
+            "TEXTEDITING": 770,
+            "TEXTINPUT": 771,
+            "AUDIODEVICEADDED": 4352,
+            "DROPFILE": 4096,
         }
         for fi in range(1, 13):
             pg_consts[f"K_F{fi}"] = 111 + fi
@@ -6200,6 +6235,12 @@ include 'functions.inc'
             if "a" <= ch <= "z" or "0" <= ch <= "9":
                 return ord(ch)
         return None
+
+    def _emit_pg_float_arg(self, expr: ast.expr) -> None:
+        self._generate_expr(expr)
+        if not self._infer_expr_type(expr).is_float():
+            self.emit("cvtsi2sd xmm0, rax", "int -> float64")
+            self.emit("movq rax, xmm0")
 
     def _try_emit_pygame_call(
         self, call: ast.Call, func_name: str, attr_name: str, prefix: str
@@ -6336,6 +6377,98 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return True
 
+        if attr_name == "clear" and "event" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_pump_messages")
+            self.emit("add rsp, 32")
+            self.emit("mov rax, [_pyfasm_pg_ev_tail]", "drop queued events")
+            self.emit("mov [_pyfasm_pg_ev_head], rax")
+            self.emit("mov eax, 1", "None")
+            return True
+
+        if attr_name in ("set_blocked", "set_allowed", "set_grab") and "event" in func_dump_lower:
+            for arg in call.args:
+                self._generate_expr(arg)
+            self.emit("mov eax, 1", "None")
+            return True
+
+        if attr_name == "wait" and "time" in func_dump_lower:
+            if call.args:
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "milliseconds")
+            else:
+                self.emit("xor ecx, ecx")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_delay")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "wait" and "event" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_event_wait")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "post" and "event" in func_dump_lower and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov rcx, rax", "Event object or type id")
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_event_post")
+            self.emit("add rsp, 32")
+            self.emit("mov eax, 1", "True")
+            return True
+
+        if attr_name == "get_focused" and "key" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_pump_messages")
+            self.emit("add rsp, 32")
+            self.emit("mov eax, 1", "window has focus")
+            return True
+
+        if attr_name == "set_mods" and "key" in func_dump_lower and call.args:
+            self._generate_expr(call.args[0])
+            self.emit("mov [_pyfasm_pg_kmods], rax", "stored modifier mask")
+            self.emit("mov eax, 1", "None")
+            return True
+
+        if attr_name == "get_rel" and "mouse" in func_dump_lower:
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_mouse_get_rel")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "get_fonts" and "font" in func_dump_lower:
+            self.emit("mov eax, 0", "empty font list")
+            return True
+
+        if attr_name == "get_driver":
+            self.emit("mov eax, 0", "empty driver name")
+            return True
+
+        if attr_name == "get_ticks":
+            self.emit("sub rsp, 32", "shadow space")
+            self.emit("call _pyfasm_pg_get_ticks")
+            self.emit("add rsp, 32")
+            return True
+
+        if attr_name == "Info" or func_name in ("pygame_display_Info", "display_Info"):
+            self.emit("mov eax, 0", "Info() -> zero dict placeholder")
+            return True
+
+        if attr_name == "Event" or func_name == "pygame_event_Event":
+            self.emit("sub rsp, 48")
+            if call.args:
+                self._generate_expr(call.args[0])
+            else:
+                self.emit("xor eax, eax")
+            self.emit("mov [rsp + 32], rax", "event type id")
+            self.emit("mov ecx, 80")
+            self.emit("call _pyfasm_alloc")
+            self.emit("mov rcx, [rsp + 32]")
+            self.emit("mov [rax + 32], rcx", "Event.type")
+            self.emit("add rsp, 48")
+            return True
+
         if attr_name == "get_pressed":
             self.emit("sub rsp, 32", "shadow space")
             if "mouse" in func_dump_lower:
@@ -6352,14 +6485,22 @@ include 'functions.inc'
             return True
 
         if attr_name == "set_pos" and "mouse" in func_dump_lower and call.args:
-            self._generate_expr(call.args[0])
-            self.emit("mov rcx, rax", "x (or point tuple)")
             if len(call.args) >= 2:
+                self.emit("sub rsp, 16")
+                self._generate_expr(call.args[0])
+                self.emit("mov [rsp], rax", "x")
                 self._generate_expr(call.args[1])
                 self.emit("mov rdx, rax", "y")
+                self.emit("mov rcx, [rsp]")
+                self.emit("add rsp, 16")
             else:
-                self.emit("movsxd rdx, dword [rax + 8]", "y from tuple")
+                self._generate_expr(call.args[0])
+                self.emit("mov rcx, rax", "(x, y) point")
+                self.emit("call _pyfasm_pg_point_xy")
+                self.emit("mov rcx, rax", "x")
+            self.emit("sub rsp, 32", "shadow space")
             self.emit("call _pyfasm_pg_mouse_set_pos")
+            self.emit("add rsp, 32")
             self.emit("mov eax, 1", "None")
             return True
 
@@ -6369,8 +6510,9 @@ include 'functions.inc'
                 self.emit("mov rcx, rax", "visibility flag")
             else:
                 self.emit("mov rcx, 1", "default visible")
+            self.emit("sub rsp, 32", "shadow space")
             self.emit("call _pyfasm_pg_mouse_set_visible")
-            self.emit("mov eax, 1", "None")
+            self.emit("add rsp, 32")
             return True
 
         if attr_name == "set_repeat" and ("key" in func_dump_lower or "pygame" in func_dump_lower):
@@ -6382,7 +6524,9 @@ include 'functions.inc'
             else:
                 self.emit("xor ecx, ecx", "disable repeat")
                 self.emit("xor edx, edx")
+            self.emit("sub rsp, 32", "shadow space")
             self.emit("call _pyfasm_pg_key_set_repeat")
+            self.emit("add rsp, 32")
             self.emit("mov eax, 1", "None")
             return True
 
@@ -6767,39 +6911,47 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return True
 
-        if attr_name in ("rotozoom", "scale2x") and (prefix in ("transform", "pygame", "pg") or "transform" in func_dump_lower):
+        if attr_name in ("rotozoom", "rotate", "scale2x", "scale_by") and call.args and ("transform" in func_dump_lower or prefix == "transform"):
             self.emit("sub rsp, 64")
             self._generate_expr(call.args[0])
             self.emit("mov [rsp + 32], rax", "Surface")
-            if attr_name == "scale2x":
-                self.emit("mov qword [rsp + 40], 2", "scale2x doubles the size")
-            elif len(call.args) >= 2:
-                self._generate_expr(call.args[1])
-                self.emit("mov [rsp + 40], rax", "angle")
+            if attr_name in ("rotozoom", "rotate") and len(call.args) >= 2:
+                self._emit_pg_float_arg(call.args[1])
             else:
-                self.emit("mov qword [rsp + 40], 0", "default angle 0")
-            if len(call.args) >= 3:
-                self._generate_expr(call.args[2])
-                self.emit("mov r8, rax", "zoom")
+                self.emit("xor eax, eax", "angle 0.0")
+            self.emit("mov [rsp + 40], rax", "angle degrees (float64)")
+            if attr_name == "rotozoom" and len(call.args) >= 3:
+                self._emit_pg_float_arg(call.args[2])
+            elif attr_name == "scale_by" and len(call.args) >= 2:
+                self._emit_pg_float_arg(call.args[1])
             elif attr_name == "scale2x":
-                self.emit("xor r8d, r8d", "zoom ignored for scale2x")
+                self.emit("mov rax, 4000000000000000h", "2.0")
             else:
-                self.emit("mov r8, 1", "default zoom 1.0 bits")
+                self.emit("mov rax, 3FF0000000000000h", "1.0")
+            self.emit("mov r8, rax", "zoom (float64)")
             self.emit("mov rcx, [rsp + 32]")
             self.emit("mov rdx, [rsp + 40]")
-            self.emit("call _pyfasm_pg_transform_scale")
+            self.emit("call _pyfasm_pg_transform_rotozoom")
             self.emit("add rsp, 64")
             return True
 
-        if attr_name in ("get_at", "set_at") and isinstance(call.func, ast.Attribute):
+        if attr_name in ("get_at", "set_at") and isinstance(call.func, ast.Attribute) and call.args:
+            unbound = isinstance(call.func.value, ast.Attribute) and call.func.value.attr == "Surface"
+            args = list(call.args)
+            if unbound:
+                surf_expr = args.pop(0)
+            else:
+                surf_expr = call.func.value
+            if not args:
+                return False
             self.emit("sub rsp, 64")
-            self._generate_expr(call.func.value)
+            self._generate_expr(surf_expr)
             self.emit("mov [rsp + 32], rax", "Surface")
-            self._generate_expr(call.args[0])
-            self.emit("mov [rsp + 40], rax", "x")
-            if len(call.args) >= 2:
-                self._generate_expr(call.args[1])
-                self.emit("mov [rsp + 48], rax", "y")
+            self._generate_expr(args[0])
+            self.emit("mov [rsp + 40], rax", "(x, y) point")
+            if attr_name == "set_at" and len(args) >= 2:
+                self._generate_expr(args[1])
+                self.emit("mov [rsp + 48], rax", "color")
             else:
                 self.emit("mov qword [rsp + 48], 0")
             self.emit("mov rcx, [rsp + 32]")

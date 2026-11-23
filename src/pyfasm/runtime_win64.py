@@ -13050,6 +13050,7 @@ section '.idata' import data readable writeable
            ClientToScreen, 'ClientToScreen', \\
            SetCursorPos, 'SetCursorPos', \\
            SetCursor, 'SetCursor', \\
+           ShowCursor, 'ShowCursor', \\
            DestroyWindow, 'DestroyWindow', \\
            AdjustWindowRectEx, 'AdjustWindowRectEx', \\
            InvalidateRect, 'InvalidateRect', \\
