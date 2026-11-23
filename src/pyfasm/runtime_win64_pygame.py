@@ -7,6 +7,8 @@ WIN64_PYGAME_RUNTIME_DATA = """
     _pyfasm_pg_title_w      du 'PyFASM Pygame Window', 0
     align 8
     _pyfasm_pg_hwnd         dq 0
+    _pyfasm_pg_hdc          dq 0
+    _pyfasm_pg_screen_surf  dq 0
     _pyfasm_pg_mem_dc       dq 0
     _pyfasm_pg_bmp          dq 0
     _pyfasm_pg_old_bmp      dq 0
@@ -444,14 +446,51 @@ _pyfasm_pg_set_mode:
     mov     rcx, rax
     call    [GetDC]
     mov     rbx, rax
+    mov     [_pyfasm_pg_hdc], rax
     mov     rcx, rbx
     call    [CreateCompatibleDC]
     mov     [_pyfasm_pg_mem_dc], rax
 
-    mov     rcx, rbx
-    mov     rdx, rsi
-    mov     r8, rdi
-    call    [CreateCompatibleBitmap]
+    ; Screen surface: a real readable 24bpp PYFPGSRF DIB so get_at /
+    ; blit / fill on the display surface work like on any other surface.
+    mov     ecx, 64
+    call    _pyfasm_alloc
+    mov     [_pyfasm_pg_screen_surf], rax
+    mov     r11, 4652534750465950h  ; 'PYFPGSRF'
+    mov     [rax + 0], r11
+    mov     [rax + 8], rsi
+    mov     [rax + 16], rdi
+    mov     r11, [_pyfasm_pg_mem_dc]
+    mov     [rax + 24], r11
+    mov     qword [rax + 56], 255
+    mov     qword [rax + 60], 0     ; 24bpp
+
+    ; Zero BITMAPINFOHEADER [rsp+48..95]
+    xor     ecx, ecx
+.psm_z:
+    mov     qword [rsp + 48 + rcx], 0
+    add     ecx, 8
+    cmp     ecx, 48
+    jl      .psm_z
+    mov     dword [rsp + 48], 40
+    mov     dword [rsp + 52], esi
+    mov     dword [rsp + 56], edi
+    mov     word [rsp + 60], 1
+    mov     word [rsp + 62], 24
+
+    mov     r11, [_pyfasm_pg_mem_dc]
+    mov     rcx, r11
+    lea     rdx, [rsp + 48]
+    xor     r8d, r8d
+    mov     r10, [_pyfasm_pg_screen_surf]
+    lea     r9, [r10 + 40]          ; bits_ptr
+    mov     qword [rsp + 32], 0
+    mov     qword [rsp + 40], 0
+    call    [CreateDIBSection]
+    mov     r10, [_pyfasm_pg_screen_surf]
+    mov     [r10 + 32], rax
+    test    rax, rax
+    jz      .psm_ret_zero
     mov     [_pyfasm_pg_bmp], rax
 
     mov     rcx, [_pyfasm_pg_mem_dc]
@@ -462,6 +501,7 @@ _pyfasm_pg_set_mode:
     mov     rcx, [_pyfasm_pg_hwnd]
     mov     rdx, rbx
     call    [ReleaseDC]
+    mov     qword [_pyfasm_pg_hdc], 0   ; window DC released: surface_new must not reuse it
 
     mov     rcx, [_pyfasm_pg_hwnd]
     mov     edx, 5
@@ -469,7 +509,14 @@ _pyfasm_pg_set_mode:
     mov     rcx, [_pyfasm_pg_hwnd]
     call    [UpdateWindow]
 
-    mov     rax, [_pyfasm_pg_hwnd]
+    mov     rcx, [_pyfasm_pg_surf_cnt]
+    cmp     rcx, 65536
+    jge     .psm_reg_done
+    mov     r10, [_pyfasm_pg_screen_surf]
+    mov     [_pyfasm_pg_surf_tbl + rcx * 8], r10
+    inc     qword [_pyfasm_pg_surf_cnt]
+.psm_reg_done:
+    mov     rax, [_pyfasm_pg_screen_surf]
     jmp     .psm_exit
 .psm_ret_zero:
     xor     eax, eax
@@ -567,6 +614,8 @@ _pyfasm_pg_pixel_addr:
     mov     r9, [rbx + 40]
     test    r9, r9
     jz      .ppa_done
+    cmp     qword [rbx + 60], 0
+    jne     .ppa_32bpp
     ; bottom-up 24bpp DIB: row = h - 1 - y, pitch = (w*3 + 3) & ~3
     mov     rcx, [rbx + 8]
     lea     rcx, [rcx + rcx * 2]
@@ -577,6 +626,19 @@ _pyfasm_pg_pixel_addr:
     sub     rax, r8
     imul    rax, rcx
     lea     rcx, [rdx + rdx * 2]
+    add     rax, rcx
+    add     rax, r9
+    jmp     .ppa_done
+.ppa_32bpp:
+    ; SRCALPHA 32bpp DIB: pitch = w*4, BGRA order
+    mov     rcx, [rbx + 8]
+    shl     rcx, 2
+    mov     rax, [rbx + 16]
+    dec     rax
+    sub     rax, r8
+    imul    rax, rcx
+    lea     rcx, [rdx + rdx * 2]
+    add     rcx, rdx
     add     rax, rcx
     add     rax, r9
 .ppa_done:
@@ -596,6 +658,7 @@ _pyfasm_pg_get_at:
     mov     r8, rdx
     mov     rdx, rax
     mov     rcx, rsi
+    mov     rdi, [rsi + 60]        ; SRCALPHA flag saved before any call
     call    _pyfasm_pg_pixel_addr
     mov     rbx, rax
     mov     ecx, 40
@@ -610,6 +673,10 @@ _pyfasm_pg_get_at:
     mov     [rax + 16], rcx
     movzx   ecx, byte [rbx]
     mov     [rax + 24], rcx
+    test    rdi, rdi
+    jz      .pga_done
+    movzx   ecx, byte [rbx + 3]
+    mov     [rax + 32], rcx
 .pga_done:
     add     rsp, 32
     pop     rsi
@@ -752,6 +819,13 @@ _pyfasm_pg_unpack_color:
     mov     eax, r8d
     or      eax, r9d
     or      eax, r10d
+    cmp     rax, 4
+    jl      .puc_noalpha
+    mov     r11d, [rcx + 32]        ; A
+    and     r11d, 0FFh
+    shl     r11d, 24
+    or      eax, r11d
+.puc_noalpha:
     ret
 .puc_chk_str:
     xor     edx, edx
@@ -817,7 +891,8 @@ _pyfasm_pg_fill:
     push    rdi
     sub     rsp, 48
     and     rsp, -16
-    mov     rsi, rdx
+    mov     rsi, rdx                ; color
+    mov     rbx, rcx                ; surface
     call    _pyfasm_pg_resolve_surf
     test    rax, rax
     jz      .pf_done
@@ -828,6 +903,37 @@ _pyfasm_pg_fill:
     mov     dword [_pyfasm_pg_rc + 12], r8d
     mov     rcx, rsi
     call    _pyfasm_pg_unpack_color
+    ; On a 32bpp surface with readable bits, write pixels directly so the
+    ; alpha byte is set (GDI FillRect leaves it untouched).
+    mov     r11, 4652534750465950h  ; 'PYFPGSRF'
+    cmp     [rbx], r11
+    jne     .pf_gdi
+    cmp     qword [rbx + 60], 0
+    je      .pf_gdi
+    mov     r11, [rbx + 40]         ; bits
+    test    r11, r11
+    jz      .pf_gdi
+    test    eax, 0FF000000h
+    jnz     .pf_alpha_ok
+    or      eax, 0FF000000h         ; RGB tuple on SRCALPHA surface -> opaque
+.pf_alpha_ok:
+    mov     r8d, eax
+    ; convert COLORREF (A<<24|B<<16|G<<8|R) to DIB pixel dword (A<<24|R<<16|G<<8|B)
+    mov     r9d, eax
+    and     r8d, 0FF00FF00h
+    and     r9d, 000FF00FFh
+    rol     r9d, 16
+    or      r8d, r9d
+    mov     rax, [rbx + 8]
+    imul    rax, [rbx + 16]         ; pixel count
+    mov     rdx, rax
+.pf_px:
+    test    rdx, rdx
+    jz      .pf_done
+    mov     [r11 + rdx * 4 - 4], r8d
+    dec     rdx
+    jmp     .pf_px
+.pf_gdi:
     mov     ecx, eax
     call    [CreateSolidBrush]
     mov     rbx, rax
@@ -1321,6 +1427,33 @@ _pyfasm_pg_blit:
     mov     r10, [r12 + 40]         ; src bits
     test    r10, r10
     jz      .pb_plain_bitblt
+    ; Prefer true per-pixel alpha blend when the destination is a surface
+    ; with readable bits (TransparentBlt only keys one colour).
+    mov     rax, r14
+    mov     r11, 4652534750465950h  ; 'PYFPGSRF'
+    cmp     [rax], r11
+    jne     .pb_screen_key
+    mov     r11, [rax + 40]         ; dst bits
+    test    r11, r11
+    jz      .pb_screen_key
+    ; blend path needs an unclipped, fully on-surface destination
+    test    esi, esi
+    jl      .pb_screen_key
+    test    edi, edi
+    jl      .pb_screen_key
+    mov     rcx, [r12 + 8]
+    add     rcx, rsi
+    cmp     rcx, [rax + 8]
+    jg      .pb_screen_key
+    mov     rcx, [r12 + 16]
+    add     rcx, rdi
+    cmp     rcx, [rax + 16]
+    jg      .pb_screen_key
+    mov     r10, [r12 + 40]         ; reload src bits (r10 clobbered above)
+    test    r10, r10
+    jz      .pb_plain_bitblt
+    jmp     .pb_blend_offscreen
+.pb_screen_key:
     ; screen dst: use TransparentBlt with black key (transparent pixels are black here)
     mov     rcx, [rsp + 56]         ; dst hdc
     mov     edx, esi
@@ -1340,29 +1473,42 @@ _pyfasm_pg_blit:
     call    [TransparentBlt]
     jmp     .pb_done
 .pb_blend_offscreen:
-    mov     r11, [rax + 40]         ; dst bits
+    mov     r11, [r14 + 40]         ; dst bits
     test    r11, r11
     jz      .pb_plain_bitblt
     push    rbx
-    mov     rbx, [rax + 8]          ; dst w
-    mov     rax, [r12 + 16]         ; h
-    ; r9 = y counter
+    push    r15
+    mov     r15, r11                ; dst bits base
+    mov     rbx, [r14 + 8]          ; dst w
+    mov     rax, [r12 + 16]         ; src h
+    push    rax                     ; row counter  -> [rsp+24]
+    xor     r9, r9                  ; y counter starts at 0
+    push    r9                      ; y counter    -> [rsp+16]
     xor     r9, r9
+    push    r9                      ; base row idx -> [rsp+8]
+    push    r9                      ; blend temp   -> [rsp]
+    mov     rcx, [r14 + 16]         ; dst h
+    sub     rcx, rdi                ; dst_h - dst_y - 1 = first bottom-up row
+    dec     rcx
+    mov     [rsp + 8], rcx          ; base row index
 .pb_blend_row:
-    test    rax, rax
-    jz      .pb_blend_done
-    ; dst pixel ptr = dst_bits + ((dst_y + y)*dst_w + dst_x)*4
-    mov     rcx, r9
-    add     rcx, rdi                ; + dst y
-    imul    rcx, rbx
+    cmp     qword [rsp + 24], 0
+    je      .pb_blend_done
+    mov     r9, [rsp + 16]          ; restore y counter
+    ; dst pixel ptr = dst_bits + ((base_row - y)*dst_w + dst_x)*4 (24bpp bottom-up)
+    mov     rcx, [rsp + 8]
+    sub     rcx, r9
+    mov     rax, [r14 + 8]          ; dst w (re-read: rbx is a colour scratch)
+    imul    rcx, rax
     add     rcx, rsi                ; + dst x
-    lea     r11, [r11 + rcx * 4]
-    mov     rcx, r10                ; src row walker
+    lea     r11, [r15 + rcx * 4]
     mov     r8, [r12 + 8]           ; w
+    cmp     qword [r14 + 60], 0     ; dst is SRCALPHA (32bpp)?
+    je      .pb_blend_row24
 .pb_blend_px:
     test    r8, r8
     jz      .pb_blend_row_end
-    mov     eax, [rcx]              ; src 0xAABBGGRR
+    mov     eax, [r10]              ; src 0xAABBGGRR
     mov     r13d, eax
     shr     r13d, 24                ; alpha
     test    r13d, r13d
@@ -1370,15 +1516,15 @@ _pyfasm_pg_blit:
     cmp     r13d, 255
     je      .pb_blend_opaque
     mov     edx, [r11]              ; dst pixel
-    mov     dword [rsp + 72], 255
-    sub     dword [rsp + 72], r13d  ; 255-a
+    mov     ebx, 255
+    sub     ebx, r13d               ; 255-a (lives for the pixel)
     ; red
     mov     ecx, eax
     and     ecx, 0FFh
     imul    ecx, r13d
     mov     r9d, edx
     and     r9d, 0FFh
-    imul    r9d, [rsp + 72]
+    imul    r9d, ebx
     add     ecx, r9d
     shr     ecx, 8
     and     ecx, 0FFh
@@ -1387,11 +1533,12 @@ _pyfasm_pg_blit:
     shr     r9d, 8
     and     r9d, 0FFh
     imul    r9d, r13d
-    mov     r10d, edx
-    shr     r10d, 8
-    and     r10d, 0FFh
-    imul    r10d, [rsp + 72]
-    add     r9d, r10d
+    mov     [rsp], r9d
+    mov     r9d, edx
+    shr     r9d, 8
+    and     r9d, 0FFh
+    imul    r9d, ebx
+    add     r9d, [rsp]
     shr     r9d, 8
     and     r9d, 0FFh
     shl     r9d, 8
@@ -1401,11 +1548,12 @@ _pyfasm_pg_blit:
     shr     r9d, 16
     and     r9d, 0FFh
     imul    r9d, r13d
-    mov     r10d, edx
-    shr     r10d, 16
-    and     r10d, 0FFh
-    imul    r10d, [rsp + 72]
-    add     r9d, r10d
+    mov     [rsp], r9d
+    mov     r9d, edx
+    shr     r9d, 16
+    and     r9d, 0FFh
+    imul    r9d, ebx
+    add     r9d, [rsp]
     shr     r9d, 8
     and     r9d, 0FFh
     shl     r9d, 16
@@ -1413,22 +1561,111 @@ _pyfasm_pg_blit:
     mov     [r11], ecx
     jmp     .pb_blend_adv
 .pb_blend_opaque:
+    mov     eax, [r10]              ; opaque: copy src pixel as-is
     mov     [r11], eax
 .pb_blend_adv:
 .pb_blend_skip:
-    add     rcx, 4
+    add     r10, 4
     add     r11, 4
     dec     r8
     jmp     .pb_blend_px
+.pb_blend_row24:
+    ; 24bpp bottom-up dst: pitch = (w*3+3)&~3, 3 bytes per pixel
+    ; dst w re-read from the surface: rbx is clobbered as a colour scratch
+    mov     rax, [r14 + 8]
+    lea     rax, [rax + rax * 2]
+    add     rax, 3
+    and     rax, -4                 ; dst pitch
+    mov     rcx, [rsp + 8]
+    sub     rcx, r9
+    imul    rcx, rax
+    mov     rax, rsi
+    lea     rax, [rax + rax * 2]    ; dst_x * 3
+    add     rcx, rax
+    lea     r11, [r15 + rcx]
+    mov     r8, [r12 + 8]           ; w
+.pb_blend_px24:
+    test    r8, r8
+    jz      .pb_blend_row_end
+    mov     eax, [r10]              ; src 0xAABBGGRR
+    mov     r13d, eax
+    shr     r13d, 24                ; alpha
+    test    r13d, r13d
+    jz      .pb_blend_skip24
+    cmp     r13d, 255
+    je      .pb_blend_opaque24
+    ; load 24bpp dst pixel into edx (3 bytes, zero-extended)
+    xor     edx, edx
+    mov     dx, [r11]
+    movzx   ecx, byte [r11 + 2]
+    shl     ecx, 16
+    or      edx, ecx
+    mov     ebx, 255
+    sub     ebx, r13d               ; 255-a (lives for the pixel)
+    ; red
+    mov     ecx, eax
+    and     ecx, 0FFh
+    imul    ecx, r13d
+    mov     r9d, edx
+    and     r9d, 0FFh
+    imul    r9d, ebx
+    add     ecx, r9d
+    shr     ecx, 8
+    and     ecx, 0FFh
+    ; green
+    mov     r9d, eax
+    shr     r9d, 8
+    and     r9d, 0FFh
+    imul    r9d, r13d
+    mov     [rsp], r9d
+    mov     r9d, edx
+    shr     r9d, 8
+    and     r9d, 0FFh
+    imul    r9d, ebx
+    add     r9d, [rsp]
+    shr     r9d, 8
+    and     r9d, 0FFh
+    shl     r9d, 8
+    or      ecx, r9d
+    ; blue
+    mov     r9d, eax
+    shr     r9d, 16
+    and     r9d, 0FFh
+    imul    r9d, r13d
+    mov     [rsp], r9d
+    mov     r9d, edx
+    shr     r9d, 16
+    and     r9d, 0FFh
+    imul    r9d, ebx
+    add     r9d, [rsp]
+    shr     r9d, 8
+    and     r9d, 0FFh
+    shl     r9d, 16
+    or      ecx, r9d
+    ; store low 3 bytes
+    mov     [r11], cx
+    shr     ecx, 16
+    mov     byte [r11 + 2], cl
+    jmp     .pb_blend_adv24
+.pb_blend_opaque24:
+    mov     eax, [r10]              ; opaque: copy src pixel (3 bytes)
+    mov     [r11], ax
+    shr     eax, 16
+    mov     byte [r11 + 2], al
+.pb_blend_adv24:
+.pb_blend_skip24:
+    add     r10, 4
+    add     r11, 3
+    dec     r8
+    jmp     .pb_blend_px24
 .pb_blend_row_end:
-    add     r10, [r12 + 8]
-    add     r10, [r12 + 8]
-    add     r10, [r12 + 8]
-    add     r10, [r12 + 8]          ; src += w*4
-    inc     r9
-    dec     rax
+    ; src walker already advanced w*4 in the pixel loop; nothing to add
+    inc     qword [rsp + 16]        ; y++
+    dec     qword [rsp + 24]        ; row counter
     jmp     .pb_blend_row
 .pb_blend_done:
+    add     rsp, 32                 ; drop temp + y + row counter + base row
+    pop     r15
     pop     rbx
     jmp     .pb_done
 .pb_plain_bitblt:
@@ -2107,9 +2344,11 @@ _pyfasm_pg_surface_new:
     push    rsi
     push    rdi
     push    r12
+    push    r13
     sub     rsp, 96
     and     rsp, -16
-    mov     [rsp + 88], rdx         ; save h/SRCALPHA flag arg
+    mov     r13, rdx                ; save h/SRCALPHA flag arg (stack slot is zeroed by .psn_z)
+    mov     [rsp + 96], rdx         ; shadow at [rsp+96] lives above the zeroed header
     mov     rsi, 100
     mov     rdi, 100
     cmp     rcx, 65536
@@ -2155,8 +2394,8 @@ _pyfasm_pg_surface_new:
     mov     dword [rsp + 52], esi
     mov     dword [rsp + 56], edi
     mov     word [rsp + 60], 1
-    ; SRCALPHA requested (arg saved at [rsp+88]): 32 bpp DIB with alpha byte + flag at [rbx+60]
-    cmp     qword [rsp + 88], 0
+    ; SRCALPHA requested (arg saved in r13): 32 bpp DIB with alpha byte + flag at [rbx+60]
+    test    r13, r13
     jz      .psn_24bpp
     mov     word [rsp + 62], 32
     jmp     .psn_bpp_done
@@ -2164,7 +2403,11 @@ _pyfasm_pg_surface_new:
     mov     word [rsp + 62], 24
 .psn_bpp_done:
 
-    xor     ecx, ecx
+    mov     rcx, [_pyfasm_pg_hdc]
+    test    rcx, rcx
+    jnz     .psn_have_dc
+    xor     ecx, ecx                    ; window DC released: CreateCompatibleDC(NULL) = screen DC
+.psn_have_dc:
     call    [CreateCompatibleDC]
     mov     r12, rax
     mov     [rbx + 24], r12
@@ -2184,8 +2427,7 @@ _pyfasm_pg_surface_new:
     mov     [rsp + 80], rax         ; keep DIB handle for SelectObject below
     ; record SRCALPHA flag for blit transparency
     mov     qword [rbx + 60], 0
-    mov     rax, [rsp + 88]
-    test    rax, rax
+    test    r13, r13
     jz      .psn_noalpha
     mov     qword [rbx + 60], 1
     ; set alpha byte (every 4th byte) of the zero-initialized 32bpp DIB to 255
@@ -2220,7 +2462,8 @@ _pyfasm_pg_surface_new:
     call    _pyfasm_pg_fill
 .psn_ret:
     mov     rax, rbx
-    lea     rsp, [rbp - 32]
+    lea     rsp, [rbp - 40]
+    pop     r13
     pop     r12
     pop     rdi
     pop     rsi
@@ -2445,6 +2688,7 @@ _pyfasm_pg_draw_polygon:
     cmp     r12d, 0
     jg      .pdp_hol
     mov     ecx, ebx
+    and     ecx, 0FFFFFFh           ; COLORREF has no alpha byte
     call    [CreateSolidBrush]
     mov     r13, rax
     jmp     .pdp_sel

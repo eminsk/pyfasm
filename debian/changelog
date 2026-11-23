@@ -1,6 +1,6 @@
-python3-pyfasm64 (2.3.4-1) stable; urgency=medium
+python3-pyfasm64 (2.3.5-1) stable; urgency=medium
 
-  * Release version 2.3.4.
+  * Release version 2.3.5.
   * codegen: dict-key augmented assignment (d[k] += v) compiled through dict_get/dict_set instead of raw pointer indexing, fixing page faults on the first frame of real games.
   * codegen: string += on dict keys uses _pyfasm_str_concat like plain concatenation.
   * pygame: draw_polygon accepts float coordinates (pygame-compatible) and keeps the point counter on an aligned stack.

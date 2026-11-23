@@ -6956,6 +6956,7 @@ include 'functions.inc'
             self.emit("mov rdx, [rsp + 32]", "color")
             self.emit("call _pyfasm_pg_fill")
             self.emit("add rsp, 48")
+            self.emit("xor eax, eax", "fill returns None: keep stmt-level tmp-free from freeing a surf")
             return True
 
         if ("draw" in func_dump_lower or prefix == "draw") and attr_name in ("rect", "ellipse", "circle", "line"):
@@ -7333,6 +7334,9 @@ include 'functions.inc'
             if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, int):
                 self._generate_expr(call.args[1])
                 self.emit("mov rdx, rax")
+            elif len(call.args) >= 2:
+                self._generate_expr(call.args[1])
+                self.emit("mov rdx, rax")
             else:
                 self.emit("xor edx, edx")
             self.emit("mov rcx, [rsp + 32]")
@@ -7469,6 +7473,7 @@ include 'functions.inc'
                 self.emit("mov r8, [rsp + 48]")
                 self.emit("call _pyfasm_pg_draw_polygon")
                 self.emit("add rsp, 64")
+                self.emit("xor eax, eax", "draw_polygon returns None: keep tmp-free off the surf")
                 return True
             if attr_name == "lines" and len(call.args) >= 4:
                 w_node = call.args[4] if len(call.args) >= 5 else self._extract_kwarg(call, "width")
@@ -7739,6 +7744,8 @@ include 'functions.inc'
             self.emit("mov r8, [rsp + 48]")
             self.emit(f"call _pyfasm_pg_{attr_name}")
             self.emit("add rsp, 64")
+            if attr_name == "set_at":
+                self.emit("xor eax, eax", "set_at returns None: keep stmt-level tmp-free from freeing a surf")
             return True
 
         if attr_name == "subsurface" and isinstance(call.func, ast.Attribute):
