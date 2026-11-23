@@ -11490,6 +11490,7 @@ _pyfasm_handle_ctlcolor:
     push    rsi
     push    rdi
     push    r12
+    push    r13
     sub     rsp, 48
     and     rsp, -16
 
@@ -11500,13 +11501,13 @@ _pyfasm_handle_ctlcolor:
 
     mov     rcx, rsi
     call    _pyfasm_find_widget_slot
-    mov     r10, rax
+    mov     r13, rax
 
     mov     edx, [_pyfasm_theme_text]
-    cmp     r10, 0
+    cmp     r13, 0
     jl      .hcc_tc_ok
-    shl     r10, 6
-    mov     eax, dword [_pyfasm_widget_aux + r10 + 12]
+    shl     r13, 6
+    mov     eax, dword [_pyfasm_widget_aux + r13 + 12]
     cmp     eax, -1
     je      .hcc_tc_ok
     mov     edx, eax
@@ -11514,14 +11515,14 @@ _pyfasm_handle_ctlcolor:
     mov     rcx, rbx
     call    [SetTextColor]
 
-    cmp     r10, 0
+    cmp     r13, 0
     jl      .hcc_no_custom
-    mov     rax, qword [_pyfasm_widget_aux + r10 + 0]
+    mov     rax, qword [_pyfasm_widget_aux + r13 + 0]
     test    rax, rax
     jz      .hcc_no_custom
     mov     [rsp + 32], rax
     mov     rcx, rbx
-    mov     edx, dword [_pyfasm_widget_aux + r10 + 8]
+    mov     edx, dword [_pyfasm_widget_aux + r13 + 8]
     call    [SetBkColor]
     cmp     edi, 133h
     je      .hcc_opq
@@ -11585,7 +11586,8 @@ _pyfasm_handle_ctlcolor:
     mov     rax, [_pyfasm_hbr_input]
 
 .hcc_done:
-    lea     rsp, [rbp - 32]
+    lea     rsp, [rbp - 40]
+    pop     r13
     pop     r12
     pop     rdi
     pop     rsi

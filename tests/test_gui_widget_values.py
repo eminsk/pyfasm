@@ -27,17 +27,23 @@ def _gui_launcher() -> list:
         return []
     wine = shutil.which("wine") or shutil.which("wine64")
     if not wine:
-        raise RuntimeError(
-            "Wine is required to execute the compiled Windows GUI binary on "
-            f"{sys.platform}. Install it (Debian/Ubuntu: 'sudo apt-get install wine wine64')."
-        )
+        if os.environ.get("PYFASM_REQUIRE_WINE") == "1":
+            raise RuntimeError(
+                "Wine is required to execute the compiled Windows GUI binary on "
+                f"{sys.platform}. Install it (Debian/Ubuntu: 'sudo apt-get install wine wine64')."
+            )
+        pytest.skip(f"Running Windows GUI binary on {sys.platform} requires Wine (not installed)")
     if os.environ.get("DISPLAY"):
         return [wine]
     xvfb = shutil.which("xvfb-run")
     if not xvfb:
-        raise RuntimeError(
-            "A display is required to open a native window: set DISPLAY or install "
-            "xvfb (Debian/Ubuntu: 'sudo apt-get install xvfb')."
+        if os.environ.get("PYFASM_REQUIRE_WINE") == "1":
+            raise RuntimeError(
+                "A display is required to open a native window: set DISPLAY or install "
+                "xvfb (Debian/Ubuntu: 'sudo apt-get install xvfb')."
+            )
+        pytest.skip(
+            f"A display or xvfb-run is required to run Windows GUI binary under Wine on {sys.platform}"
         )
     return [xvfb, "-a", wine]
 

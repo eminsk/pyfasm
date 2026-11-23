@@ -140,6 +140,8 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Linux
+        env:
+          PYFASM_REQUIRE_WINE: "1"
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
@@ -186,6 +188,8 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Linux
+        env:
+          PYFASM_REQUIRE_WINE: "1"
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
@@ -233,6 +237,8 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Linux
+        env:
+          PYFASM_REQUIRE_WINE: "1"
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
