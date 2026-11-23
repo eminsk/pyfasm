@@ -264,9 +264,12 @@ jobs:
           chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
           softwareupdate --install-rosetta --agree-to-license
           # ad-hoc codesign of the bundled Mach-O binaries fails strict
-          # validation on runners; tolerate it as main does
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          # validation on runners (pre-existing, tolerated by main);
+          # report the failure as a warning and keep going
+          codesign -s - -f tools/fasm/fasm.darwin \
+            || echo "::warning::codesign failed on tools/fasm/fasm.darwin (strict validation); continuing unsigned"
+          codesign -s - -f src/pyfasm/bin/fasm.darwin \
+            || echo "::warning::codesign failed on src/pyfasm/bin/fasm.darwin (strict validation); continuing unsigned"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -297,9 +300,12 @@ jobs:
           chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
           softwareupdate --install-rosetta --agree-to-license
           # ad-hoc codesign of the bundled Mach-O binaries fails strict
-          # validation on runners; tolerate it as main does
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          # validation on runners (pre-existing, tolerated by main);
+          # report the failure as a warning and keep going
+          codesign -s - -f tools/fasm/fasm.darwin \
+            || echo "::warning::codesign failed on tools/fasm/fasm.darwin (strict validation); continuing unsigned"
+          codesign -s - -f src/pyfasm/bin/fasm.darwin \
+            || echo "::warning::codesign failed on src/pyfasm/bin/fasm.darwin (strict validation); continuing unsigned"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -331,9 +337,12 @@ jobs:
           chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
           softwareupdate --install-rosetta --agree-to-license
           # ad-hoc codesign of the bundled Mach-O binaries fails strict
-          # validation on runners; tolerate it as main does
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          # validation on runners (pre-existing, tolerated by main);
+          # report the failure as a warning and keep going
+          codesign -s - -f tools/fasm/fasm.darwin \
+            || echo "::warning::codesign failed on tools/fasm/fasm.darwin (strict validation); continuing unsigned"
+          codesign -s - -f src/pyfasm/bin/fasm.darwin \
+            || echo "::warning::codesign failed on src/pyfasm/bin/fasm.darwin (strict validation); continuing unsigned"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
