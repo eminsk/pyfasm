@@ -2080,7 +2080,8 @@ _pyfasm_pg_draw_polygon:
     push    r12
     push    r13
     push    r14
-    sub     rsp, 48
+    push    r15
+    sub     rsp, 72
     and     rsp, -16
     mov     rbx, rdx                ; color
     mov     rsi, r8                 ; pts
@@ -2103,10 +2104,13 @@ _pyfasm_pg_draw_polygon:
     cmp     rcx, rdi
     jge     .pdp_draw
     mov     rax, [rsi + 8 + rcx * 8]
-    cmp     rax, 65536
-    jb      .pdp_z
-    mov     r8d, dword [rax + 8]
-    mov     r9d, dword [rax + 16]
+    ; element is a 2-item seq (x, y); x at +8, y at +16, floats stored as raw f64 bits
+    mov     r8, [rax + 8]
+    mov     r9, [rax + 16]
+    movq    xmm0, r8
+    cvtsd2si r8, xmm0
+    movq    xmm0, r9
+    cvtsd2si r9, xmm0
     jmp     .pdp_st
 .pdp_z:
     xor     r8d, r8d
@@ -2148,10 +2152,11 @@ _pyfasm_pg_draw_polygon:
     mov     rdx, r13
     call    [SelectObject]
     mov     [rsp + 40], rax         ; old_brush
+    mov     [rsp + 48], rdi         ; point count (callee-saved home)
 
     mov     rcx, r14
     lea     rdx, [_pyfasm_pg_poly_pts]
-    mov     r8d, edi
+    movsxd  r8, dword [rsp + 48]
     call    [Polygon]
 
     mov     rcx, r14
@@ -2168,7 +2173,8 @@ _pyfasm_pg_draw_polygon:
     call    [DeleteObject]
 .pdp_done:
     xor     eax, eax
-    lea     rsp, [rbp - 48]
+    lea     rsp, [rbp - 56]
+    pop     r15
     pop     r14
     pop     r13
     pop     r12

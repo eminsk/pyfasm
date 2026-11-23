@@ -3003,23 +3003,70 @@ include 'functions.inc'
                     if v and (v.var_type.is_list() or v.var_type.is_tuple()):
                         is_list_target = True
 
-                self._generate_expr(slice_unwrapped)
-                self.emit("push rax", "save index")
-                self._generate_expr(stmt.target.value)
-                self.emit("push rax", "save array ptr")
-                self._generate_expr(stmt.value)
-                self.emit("mov r11, rax", "delta")
-                self.emit("pop r8", "array ptr")
-                self.emit("pop rdx", "index")
-                if is_list_target:
-                    self.emit("mov rax, [r8 + (rdx + 1) * 8]", "current val")
+                aug_slice_type = self._infer_expr_type(slice_unwrapped)
+                aug_is_dict = (
+                    (aug_slice_type.is_str() and not is_list_target)
+                    or (isinstance(slice_unwrapped, ast.Constant) and isinstance(slice_unwrapped.value, str))
+                    or (
+                        not is_list_target
+                        and isinstance(stmt.target.value, ast.Name)
+                        and self.current_func
+                        and (v := self.current_func.local_vars.get(stmt.target.value.id)) is not None
+                        and v.var_type.is_dict()
+                    )
+                )
+                if aug_is_dict and not is_list_target:
+                    # d[k] += v  ->  d[k] = dict_get(d, k) op v
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax", "rhs")
+                    self.emit("push r11", "save rhs")
+                    self._generate_expr(slice_unwrapped)
+                    self.emit("push rax", "save key")
+                    self._generate_expr(stmt.target.value)
+                    self.emit("mov rcx, rax", "dict_ptr")
+                    self.emit("pop rdx", "key")
+                    self.emit("sub rsp, 32", "shadow space")
+                    self.emit("call _pyfasm_dict_get")
+                    self.emit("add rsp, 32")
+                    self.emit("pop r11", "restore rhs")
+                    rhs_t = self._infer_expr_type(stmt.value)
+                    if isinstance(stmt.op, ast.Add) and (
+                        rhs_t.is_str()
+                        or (isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
+                    ):
+                        self.emit("mov rcx, rax", "str1")
+                        self.emit("mov rdx, r11", "str2")
+                        self.emit("sub rsp, 32", "shadow space for _pyfasm_str_concat")
+                        self.emit("call _pyfasm_str_concat")
+                        self.emit("add rsp, 32")
+                    else:
+                        self._generate_binop_instr(stmt.op)
+                    self.emit("push rax", "save new value")
+                    self._generate_expr(slice_unwrapped)
+                    self.emit("push rax", "save key")
+                    self._generate_expr(stmt.target.value)
+                    self.emit("mov rcx, rax", "dict_ptr")
+                    self.emit("pop rdx", "key")
+                    self.emit("pop r8", "new value")
+                    self.emit("call _pyfasm_dict_set")
                 else:
-                    self.emit("mov rax, [r8 + rdx * 8]", "current val")
-                self._generate_binop_instr(stmt.op)
-                if is_list_target:
-                    self.emit("mov [r8 + (rdx + 1) * 8], rax", "store updated list[idx]")
-                else:
-                    self.emit("mov [r8 + rdx * 8], rax", "store updated arr[idx]")
+                    self._generate_expr(slice_unwrapped)
+                    self.emit("push rax", "save index")
+                    self._generate_expr(stmt.target.value)
+                    self.emit("push rax", "save array ptr")
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax", "delta")
+                    self.emit("pop r8", "array ptr")
+                    self.emit("pop rdx", "index")
+                    if is_list_target:
+                        self.emit("mov rax, [r8 + (rdx + 1) * 8]", "current val")
+                    else:
+                        self.emit("mov rax, [r8 + rdx * 8]", "current val")
+                    self._generate_binop_instr(stmt.op)
+                    if is_list_target:
+                        self.emit("mov [r8 + (rdx + 1) * 8], rax", "store updated list[idx]")
+                    else:
+                        self.emit("mov [r8 + rdx * 8], rax", "store updated arr[idx]")
             elif isinstance(stmt.target, ast.Attribute):
                 prop = self.resolve_property_for_expr(stmt.target.value, stmt.target.attr)
                 if prop and getattr(prop, "getter_name", None) and getattr(prop, "setter_name", None):
