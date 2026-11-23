@@ -1,4 +1,4 @@
-python3-pyfasm64 (2.3.1-1) stable; urgency=medium
+python3-pyfasm64 (2.3.2-1) stable; urgency=medium
 
   * Release version 2.3.1.
   * Native nonlocal support with cell boxing and lexical scope resolution.
