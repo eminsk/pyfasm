@@ -2590,9 +2590,22 @@ include 'functions.inc'
                         if isinstance(tgt_elt, ast.Name):
                             var = self.current_func.local_vars.get(tgt_elt.id) if self.current_func else None
                             if var:
+                                self._emit_float_store_coerce(tgt_elt, var.var_type)
                                 self.emit(f"mov [rbp - {var.stack_offset}], rax", f"assign {var.name}")
                             elif (self.current_func and hasattr(self.current_func, "global_names") and tgt_elt.id in self.current_func.global_names) or (tgt_elt.id in self.module.global_vars):
                                 self.emit(f"mov [{safe_global_label(tgt_elt.id)}], rax", f"store global {tgt_elt.id}")
+                        elif isinstance(tgt_elt, ast.Attribute):
+                            # self.attr = unpacked: store into instance field
+                            self.emit("push rax", "save unpacked value")
+                            self._generate_expr(tgt_elt.value)
+                            self.emit("mov r8, rax", "target object pointer")
+                            self.emit("pop rax", "unpacked value")
+                            offset = self._get_attribute_offset(tgt_elt.attr)
+                            lbl_skip_obj = self.new_label("skip_obj_store")
+                            self.emit("test r8, r8")
+                            self.emit(f"jz {lbl_skip_obj}")
+                            self.emit(f"mov [r8 + {offset}], rax", f"store obj.{tgt_elt.attr}")
+                            self.emit_raw(f"{lbl_skip_obj}:")
                     return
                 elif has_starred:
                     star_idx = next(i for i, elt in enumerate(target_tup.elts) if isinstance(elt, ast.Starred))
@@ -2689,6 +2702,26 @@ include 'functions.inc'
                             lbl_skip_obj = self.new_label("skip_obj_store")
                             self.emit("test r8, r8")
                             self.emit(f"jz {lbl_skip_obj}")
+                            # float field: value may be a tagged int — coerce before store
+                            cls_sym = self.resolve_instance_class(tgt_elt.value)
+                            ftypes = getattr(cls_sym, "field_types", None) if cls_sym else None
+                            if isinstance(ftypes, dict) and ftypes.get(tgt_elt.attr) is not None and "float" in str(ftypes.get(tgt_elt.attr)).lower():
+                                lbl_f = self.new_label("attr_f")
+                                lbl_i = self.new_label("attr_i")
+                                self.emit("mov r10, rax", "check tagged int vs f64")
+                                self.emit("cmp rax, 65536", "small tagged int?")
+                                self.emit(f"jb {lbl_i}")
+                                self.emit("mov r10, rax")
+                                self.emit("shr r10, 52")
+                                self.emit("and r10, 7FFh")
+                                self.emit(f"jz {lbl_i}")
+                                self.emit(f"cmp r10, 7FFh")
+                                self.emit(f"je {lbl_i}")
+                                self.emit("movq xmm0, rax")
+                                self.emit("cvtsd2si rax, xmm0")
+                                self.emit(f"jmp {lbl_f}")
+                                self.emit_raw(f"{lbl_i}:")
+                                self.emit_raw(f"{lbl_f}:")
                             self.emit(f"mov [r8 + {offset}], rax", f"store obj.{tgt_elt.attr}")
                             self.emit_raw(f"{lbl_skip_obj}:")
                     return
@@ -3183,6 +3216,40 @@ include 'functions.inc'
                     else:
                         self.emit("mov [r8 + rdx * 8], rax", "store updated arr[idx]")
             elif isinstance(stmt.target, ast.Attribute):
+                # pygame Rect special attribute aug-assignment: rect.centerx += dx, rect.centery += dy
+                if stmt.target.attr in ("centerx", "centery") and self._looks_like_pygame_rect(stmt.target.value):
+                    self._generate_expr(stmt.target.value)
+                    self.emit("mov r8, rax", "rect ptr")
+                    lbl_bad = self.new_label("rect_bad")
+                    lbl_ok = self.new_label("rect_ok")
+                    self.emit("test r8, r8")
+                    self.emit(f"jz {lbl_bad}")
+                    self.emit("cmp r8, 65536")
+                    self.emit(f"jb {lbl_bad}")
+                    self.emit("mov rax, 5059465245435421h", "PYFRECT!")
+                    self.emit("cmp [r8], rax")
+                    self.emit(f"jne {lbl_bad}")
+                    self.emit("push r8", "save rect ptr")
+                    if stmt.target.attr == "centerx":
+                        self.emit("mov rax, [r8 + 48]", "rect.x")
+                    else:
+                        self.emit("mov rax, [r8 + 56]", "rect.y")
+                    self.emit("push rax", "save old val")
+                    self._generate_expr(stmt.value)
+                    self.emit("mov r11, rax", "delta")
+                    self.emit("pop rax", "old val")
+                    self._generate_binop_instr(stmt.op)
+                    self.emit("pop r8", "restore rect ptr")
+                    if stmt.target.attr == "centerx":
+                        self.emit("mov [r8 + 48], rax", "rect.x += delta")
+                    else:
+                        self.emit("mov [r8 + 56], rax", "rect.y += delta")
+                    self.emit(f"jmp {lbl_ok}")
+                    self.emit_raw(f"{lbl_bad}:")
+                    self.emit("xor eax, eax")
+                    self.emit_raw(f"{lbl_ok}:")
+                else:
+                    prop = self.resolve_property_for_expr(stmt.target.value, stmt.target.attr)
                 prop = self.resolve_property_for_expr(stmt.target.value, stmt.target.attr)
                 if prop and getattr(prop, "getter_name", None) and getattr(prop, "setter_name", None):
                     self._generate_expr(stmt.target.value)
@@ -3201,6 +3268,28 @@ include 'functions.inc'
                     self.emit("sub rsp, 32", "shadow space")
                     self.emit(f"call {safe_asm_label(prop.setter_name)}")
                     self.emit("add rsp, 32")
+                elif prop and getattr(prop, "getter_name", None) and not getattr(prop, "setter_name", None):
+                    # Getter-only property on a nested object (e.g. rect.centery):
+                    # mutate through the nested object the property proxies.
+                    nested_type = self._infer_expr_type(stmt.target.value)
+                    nested_cls = self.module.classes.get(getattr(nested_type, "class_name", "")) if isinstance(nested_type, InstanceType) else None
+                    nested_off = self._get_attribute_offset(stmt.target.attr) if nested_cls and stmt.target.attr in getattr(nested_cls, "field_types", {}) else None
+                    if nested_off is not None:
+                        self._generate_expr(stmt.target.value)
+                        self.emit("mov r8, rax", "outer object")
+                        self.emit("mov r8, [r8 + {off}]".format(off=nested_off), "nested object pointer")
+                        offset = self._get_attribute_offset(stmt.target.attr)
+                        self.emit(f"mov rax, [r8 + {offset}]", f"load nested.{stmt.target.attr}")
+                        self.emit("push r8", "save nested ptr")
+                        self.emit("push rax", "save old val")
+                        self._generate_expr(stmt.value)
+                        self.emit("mov r11, rax", "delta")
+                        self.emit("pop rax", "old val")
+                        self._generate_binop_instr(stmt.op)
+                        self.emit("pop r8", "restore nested ptr")
+                        self.emit(f"mov [r8 + {offset}], rax", f"store updated nested.{stmt.target.attr}")
+                    else:
+                        self._generate_expr(stmt.value)
                 else:
                     self._generate_expr(stmt.target.value)
                     self.emit("mov r8, rax", "object pointer")
@@ -3211,7 +3300,17 @@ include 'functions.inc'
                     self._generate_expr(stmt.value)
                     self.emit("mov r11, rax", "delta")
                     self.emit("pop rax", "old val")
-                    self._generate_binop_instr(stmt.op)
+                    obj_type = self._infer_expr_type(stmt.target.value)
+                    old_type = TYPE_INT
+                    if isinstance(obj_type, InstanceType) and obj_type.class_name:
+                        cls_sym = self.module.classes.get(obj_type.class_name)
+                        if cls_sym and stmt.target.attr in getattr(cls_sym, "field_types", {}):
+                            old_type = cls_sym.field_types[stmt.target.attr]
+                    delta_type = self._infer_expr_type(stmt.value)
+                    if self._is_float_arith(stmt.op, old_type, delta_type):
+                        self._emit_float_arith(stmt.op, old_type.is_float(), delta_type.is_float())
+                    else:
+                        self._generate_binop_instr(stmt.op)
                     self.emit("pop r8", "restore obj ptr")
                     self.emit(f"mov [r8 + {offset}], rax", f"store updated obj.{stmt.target.attr}")
 
@@ -4737,6 +4836,67 @@ include 'functions.inc'
                         self.emit("xor eax, eax", f"pygame type/namespace {expr.attr} placeholder (calls route via shim)")
                         val_handled = True
                 if not val_handled:
+                    # global instance of a user class: load the instance field normally
+                    base = expr.value
+                    base_is_global = isinstance(base, ast.Name)
+                    if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+                        base_is_global = True
+                    gvt = None
+                    if base_is_global:
+                        base_name = base.id if isinstance(base, ast.Name) else base.value.id
+                        gvt = getattr(self.module, "global_var_types", {}).get(base_name)
+                    if gvt is not None and getattr(gvt, "class_name", None):
+                        cls_sym = self.module.classes.get(gvt.class_name)
+                        nested_rect = (
+                            isinstance(base, ast.Attribute)
+                            and base.attr in ("rect", "hitbox")
+                            and expr.attr in ("x", "y", "centerx", "centery", "left", "right", "top", "bottom", "width", "height")
+                        )
+                        if nested_rect:
+                            self._generate_expr(base)
+                            self.emit("mov r8, rax", "rect ptr (base already resolves to PYFRECT)")
+                            lbl_nr = self.new_label("null_nested")
+                            lbl_dn = self.new_label("done_nested")
+                            self.emit("test r8, r8")
+                            self.emit(f"jz {lbl_nr}")
+                            if expr.attr in ("centerx",):
+                                self.emit("mov rax, [r8 + 48]", "x")
+                                self.emit("mov r9, [r8 + 64]", "w")
+                                self.emit("sar r9, 1")
+                                self.emit("add rax, r9", "centerx = x + w//2")
+                            elif expr.attr in ("centery",):
+                                self.emit("mov rax, [r8 + 56]", "y")
+                                self.emit("mov r9, [r8 + 72]", "h")
+                                self.emit("sar r9, 1")
+                                self.emit("add rax, r9", "centery = y + h//2")
+                            elif expr.attr in ("right",):
+                                self.emit("mov rax, [r8 + 48]", "x")
+                                self.emit("add rax, [r8 + 64]", "right = x + w")
+                            elif expr.attr in ("bottom",):
+                                self.emit("mov rax, [r8 + 56]", "y")
+                                self.emit("add rax, [r8 + 72]", "bottom = y + h")
+                            else:
+                                self.emit(f"mov rax, [r8 + {self._get_attribute_offset(expr.attr)}]", f"rect.{expr.attr}")
+                            self.emit(f"jmp {lbl_dn}")
+                            self.emit_raw(f"{lbl_nr}:")
+                            self.emit("xor eax, eax", "null pointer default")
+                            self.emit_raw(f"{lbl_dn}:")
+                            val_handled = True
+                        elif cls_sym and expr.attr in getattr(cls_sym, "field_types", {}):
+                            self._generate_expr(expr.value)
+                            offset = self._get_attribute_offset(expr.attr)
+                            self.emit("mov r8, rax", "object pointer")
+                            lbl_null = self.new_label("null_attr")
+                            lbl_done = self.new_label("done_attr")
+                            self.emit("test r8, r8")
+                            self.emit(f"jz {lbl_null}")
+                            self.emit(f"mov rax, [r8 + {offset}]", f"load obj.{expr.attr}")
+                            self.emit(f"jmp {lbl_done}")
+                            self.emit_raw(f"{lbl_null}:")
+                            self.emit("xor eax, eax", "null pointer default")
+                            self.emit_raw(f"{lbl_done}:")
+                            val_handled = True
+                if not val_handled:
                     math_consts = {
                         "pi": 3.141592653589793,
                         "e": 2.718281828459045,
@@ -4833,6 +4993,7 @@ include 'functions.inc'
                 if (
                     "pygame" in self.features
                     and expr.attr in ("right", "bottom", "centerx", "centery", "center", "topleft", "topright", "bottomleft", "bottomright")
+                    and self._looks_like_pygame_rect(expr.value)
                     and self.resolve_instance_class(expr.value) is None
                 ):
                     self._generate_expr(expr.value)
@@ -6500,7 +6661,7 @@ include 'functions.inc'
             self.emit("movq rax, xmm0")
 
     def _looks_like_pygame_rect(self, value_node: ast.expr) -> bool:
-        """True если receiver — pygame.Rect или локальная переменная, хранящая PYFRECT."""
+        """True если receiver — pygame.Rect или переменная, хранящая PYFRECT."""
         name = None
         if isinstance(value_node, ast.Name):
             name = value_node.id
@@ -6512,13 +6673,26 @@ include 'functions.inc'
             var = self.current_func.local_vars.get(name)
             if var is not None and getattr(var.var_type, "pyfasm_rect", False):
                 return True
-        return self.resolve_instance_class(value_node) == "Rect"
+        if self.resolve_instance_class(value_node) == "Rect":
+            return True
+        # field annotated/stored as Rect on a user class (e.g. self.rect)
+        obj_type = self._infer_expr_type(value_node)
+        if isinstance(obj_type, InstanceType) and obj_type.class_name:
+            cls_sym = self.module.classes.get(obj_type.class_name)
+            if cls_sym and isinstance(value_node, ast.Attribute) and value_node.attr in getattr(cls_sym, "field_classes", {}):
+                return True
+            # common convention: field literally named 'rect'
+            if cls_sym and isinstance(value_node, ast.Attribute) and "rect" in value_node.attr.lower():
+                return True
+        return False
 
     def _is_pygame_sprite_group(self, func_node: ast.expr) -> bool:
         """True если receiver выглядит как pygame.sprite.Group (local var, holding group list)."""
         if not (isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name)):
             return False
-        var_name = func_node.value.id
+        return self._name_is_pygame_group(func_node.value.id)
+
+    def _name_is_pygame_group(self, var_name: str) -> bool:
         lower = var_name.lower()
         if any(k in lower for k in ("group", "sprites", "all_sprites", "lasers", "bullets")):
             return True
@@ -6529,6 +6703,40 @@ include 'functions.inc'
             if var is not None and getattr(var.var_type, "pyfasm_group", False):
                 return True
         return False
+
+    def _emit_group_alive_len(self, node: ast.Name) -> None:
+        """len(group): считает только живых спрайтов (kill() помечает спрайт флагом +2024)."""
+        self.emit("sub rsp, 64", "frame for group alive count")
+        self._generate_expr(node)
+        self.emit("mov [rsp + 32], rax", "group list")
+        self.emit("mov qword [rsp + 40], 0", "alive count")
+        self.emit("mov qword [rsp + 48], 0", "index i")
+        lbl_loop = self.new_label("glen_loop")
+        lbl_next = self.new_label("glen_next")
+        lbl_done = self.new_label("glen_done")
+        self.emit_raw(f"{lbl_loop}:")
+        self.emit("mov rbx, [rsp + 32]", "group list")
+        self.emit("mov rax, [rbx]", "n = len(list)")
+        self.emit("cmp [rsp + 48], rax", "i < n ?")
+        self.emit(f"jae {lbl_done}")
+        self.emit("mov rcx, [rsp + 48]")
+        self.emit("mov rcx, [rbx + rcx * 8 + 8]", "sprite = group[i]")
+        self.emit("test rcx, rcx")
+        self.emit(f"jz {lbl_next}")
+        self.emit("cmp rcx, 65536")
+        self.emit(f"jb {lbl_next}")
+        self.emit("mov r10, 505946434C535447h", "PYFCLSTG")
+        self.emit("cmp [rcx + 2032], r10")
+        self.emit(f"jne {lbl_next}")
+        self.emit("cmp qword [rcx + 2024], 0", "sprite alive?")
+        self.emit(f"jne {lbl_next}")
+        self.emit("inc qword [rsp + 40]")
+        self.emit_raw(f"{lbl_next}:")
+        self.emit("inc qword [rsp + 48]")
+        self.emit(f"jmp {lbl_loop}")
+        self.emit_raw(f"{lbl_done}:")
+        self.emit("mov rax, [rsp + 40]")
+        self.emit("add rsp, 64")
 
     def _mark_group_receiver(self, func_node: ast.expr) -> None:
         """Помечает local var как pygame-группу после успешного перехвата её метода."""
@@ -6616,16 +6824,21 @@ include 'functions.inc'
         self.emit("add rsp, 96")
 
     def _emit_pygame_group_update(self, call: ast.Call) -> None:
-        """group.update(args...): for each alive sprite call its update method (polymorphic)."""
+        """group.update(args..., kw=...): for each alive sprite call its update method (polymorphic).
+
+        kwargs поддерживаются для common-паттернов: update(now=now) — значение kwarg
+        подставляется как очередной позиционный аргумент (порядок как в вызове).
+        """
         self.emit("sub rsp, 160", "aligned frame for Group.update loop")
         self._generate_expr(call.func.value)
         self.emit("mov [rsp + 32], rax", "group list")
         self.emit("mov qword [rsp + 40], 0", "index i = 0")
         arg_slots = 64
-        for idx, arg in enumerate(call.args[:8]):
+        all_args = list(call.args) + [kw.value for kw in call.keywords if kw.arg is not None]
+        for idx, arg in enumerate(all_args[:8]):
             self._generate_expr(arg)
             self.emit(f"mov [rsp + {arg_slots + idx * 8}], rax", f"update arg {idx}")
-        n_args = min(len(call.args), 8)
+        n_args = min(len(all_args), 8)
         lbl_loop = self.new_label("gupd_loop")
         lbl_call = self.new_label("gupd_call")
         lbl_next = self.new_label("gupd_next")
@@ -7400,6 +7613,30 @@ include 'functions.inc'
             self.emit("sub rsp, 32")
             self.emit("call _pyfasm_pg_group_new")
             self.emit("add rsp, 32")
+            if call.args:
+                # Group(*sprites) -> append each sprite to the new group list
+                lbl_grp_end = self.new_label("group_ctor_end")
+                for arg in call.args:
+                    self.emit("mov rdi, rax", "group list so far")
+                    self.emit("push rdi", "save group list")
+                    self.emit("sub rsp, 32", "aligned frame for sprite ctor/expr")
+                    self._generate_expr(arg)
+                    self.emit("add rsp, 32")
+                    self.emit("mov rdx, rax", "sprite instance")
+                    self.emit("pop rcx", "group list")
+                    self.emit("test rdx, rdx", "skip null sprite")
+                    self.emit(f"jz {lbl_grp_end}_arg")
+                    self.emit("test rcx, rcx")
+                    self.emit(f"jz {lbl_grp_end}_arg")
+                    self.emit("cmp rdx, 65536")
+                    self.emit(f"jb {lbl_grp_end}_arg")
+                    self.emit("mov r10, 505946434C535447h       ; PYFCLSTG")
+                    self.emit("cmp [rdx + 2032], r10")
+                    self.emit(f"jne {lbl_grp_end}_arg")
+                    self.emit("sub rsp, 32", "aligned frame for append")
+                    self.emit("call _pyfasm_list_append")
+                    self.emit("add rsp, 32")
+                    self.emit_raw(f"{lbl_grp_end}_arg:")
             return True
 
         # --- pygame.sprite.Group methods (Group is a plain list of sprite instances) ---
@@ -12031,6 +12268,9 @@ include 'functions.inc'
 
                 is_dict_arg = False
                 is_str_arg = False
+                if isinstance(arg0, ast.Name) and self._name_is_pygame_group(arg0.id):
+                    self._emit_group_alive_len(arg0)
+                    return
                 arg0_type = self._infer_expr_type(arg0)
                 if arg0_type.is_str():
                     is_str_arg = True

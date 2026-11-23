@@ -354,6 +354,7 @@ import kernel32,\
        GetVersionExW,'GetVersionExW',\
        GetVolumeInformationA,'GetVolumeInformationA',\
        GetVolumeInformationW,'GetVolumeInformationW',\
+       GetTickCount64,'GetTickCount64',\
        GetWindowsDirectoryA,'GetWindowsDirectoryA',\
        GetWindowsDirectoryW,'GetWindowsDirectoryW',\
        GlobalAddAtomA,'GlobalAddAtomA',\

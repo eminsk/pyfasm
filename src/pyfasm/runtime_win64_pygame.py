@@ -2370,6 +2370,7 @@ _pyfasm_pg_draw_polygon:
     sub     rsp, 72
     and     rsp, -16
     mov     rbx, rdx                ; color
+    mov     r15, rcx                ; save surf ptr for alpha fixup
     mov     rsi, r8                 ; pts
     mov     r12, r9                 ; width
     call    _pyfasm_pg_resolve_surf
@@ -2390,13 +2391,35 @@ _pyfasm_pg_draw_polygon:
     cmp     rcx, rdi
     jge     .pdp_draw
     mov     rax, [rsi + 8 + rcx * 8]
-    ; element is a 2-item seq (x, y); x at +8, y at +16, floats stored as raw f64 bits
+    ; element is a 2-item seq (x, y). Values may be tagged ints or raw f64 bits:
+    ; detect a valid double by exponent bits (any exp != 0x7FF... and not both
+    ; low/high zero pattern of small tagged ints). Codegen stores list-literal
+    ; numbers per element type; int lists store plain ints, float lists f64.
     mov     r8, [rax + 8]
     mov     r9, [rax + 16]
+    ; float detection: f64 exponent all-ones or biased exp >= 2^20 => huge/int-like
+    mov     r10, r8
+    shr     r10, 52
+    and     r10, 7FFh
+    jz      .pdp_x_is_int          ; subnormal/zero -> tagged int (or 0.0)
+    cmp     r10, 7FFh
+    je      .pdp_x_is_int          ; inf/nan -> not a sane coordinate double
+    ; looks like a real double in [1e-300, 1e300): treat as f64
     movq    xmm0, r8
     cvtsd2si r8, xmm0
+    jmp     .pdp_x_done
+.pdp_x_is_int:
+    ; small ints (< 2^31) stored directly; convert
+.pdp_x_done:
+    mov     r10, r9
+    shr     r10, 52
+    and     r10, 7FFh
+    jz      .pdp_y_is_int
+    cmp     r10, 7FFh
+    je      .pdp_y_is_int
     movq    xmm0, r9
     cvtsd2si r9, xmm0
+.pdp_y_is_int:
     jmp     .pdp_st
 .pdp_z:
     xor     r8d, r8d
@@ -2458,6 +2481,31 @@ _pyfasm_pg_draw_polygon:
     mov     rcx, r13
     call    [DeleteObject]
 .pdp_done:
+    ; SRCALPHA fixup: GDI Polygon overwrote alpha bytes with 0 (transparent);
+    ; if the surface has the SRCALPHA flag, restore alpha=255 for all pixels.
+    ; Only real PYFPGSRF surfaces: the screen is a raw hwnd, reading its
+    ; +60/+40 fields is garbage and used to page-fault.
+    mov     rcx, r15
+    test    rcx, rcx
+    jz      .pdp_exit
+    cmp     rcx, 65536
+    jb      .pdp_exit
+    mov     r9, 4652534750465950h   ; 'PYFPGSRF'
+    cmp     [rcx], r9
+    jne     .pdp_exit
+    cmp     qword [rcx + 60], 0
+    je      .pdp_exit
+    cmp     qword [rcx + 40], 0
+    je      .pdp_exit
+    mov     rax, [rcx + 8]
+    imul    rax, [rcx + 16]
+    mov     rcx, [rcx + 40]
+    mov     rdx, rax
+.pdp_alpha_loop:
+    mov     byte [rcx + rdx * 4 - 1], 255
+    dec     rdx
+    jnz     .pdp_alpha_loop
+.pdp_exit:
     xor     eax, eax
     lea     rsp, [rbp - 56]
     pop     r15

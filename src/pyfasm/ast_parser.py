@@ -2938,6 +2938,19 @@ class AstAnalyzer:
                                 field_kind = self._constructed_widget_kind(sub.value)
                                 if field_kind is not None:
                                     cls_sym.field_widget_kinds[tgt.attr] = field_kind
+                            elif isinstance(tgt, ast.Tuple):
+                                for i, tgt_elt in enumerate(tgt.elts):
+                                    if isinstance(tgt_elt, ast.Attribute) and isinstance(tgt_elt.value, ast.Name) and tgt_elt.value.id == "self":
+                                        ft = self._infer_node_type(sub.value, m_fn.local_vars)
+                                        if isinstance(ft, TupleType) and ft.element_types and i < len(ft.element_types):
+                                            ft = ft.element_types[i]
+                                        elif isinstance(ft, ListType) and ft.element_type is not None:
+                                            ft = ft.element_type
+                                        cur_ft = cls_sym.field_types.get(tgt_elt.attr)
+                                        if cur_ft is None or self._should_upgrade_type(cur_ft, ft):
+                                            cls_sym.field_types[tgt_elt.attr] = ft
+                                        if isinstance(ft, InstanceType):
+                                            cls_sym.field_classes[tgt_elt.attr] = ft.class_name
                     elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Attribute):
                         if isinstance(sub.target.value, ast.Name) and sub.target.value.id == "self" and sub.value is not None:
                             ft = self._infer_node_type(sub.value, m_fn.local_vars)
