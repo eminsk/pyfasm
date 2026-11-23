@@ -1,3 +1,13 @@
+python3-pyfasm64 (2.3.3-1) stable; urgency=medium
+
+  * Release version 2.3.3.
+  * pygame: Surface.get_at/set_at return and accept (x, y) points and colours like pygame.
+  * pygame: Surface.subsurface, transform.rotate/rotozoom/scale2x/scale_by with real rotation and scaling.
+  * pygame: event.Event/post/wait/clear, mouse.get_rel/set_pos/set_visible, key.set_repeat.
+  * Fix wrong pixel, subsurface and transform results shipped in 2.3.2.
+
+ -- eminsk <M_N_N@tut.by>  Mon, 23 Nov 2026 10:30:00 +0000
+
 python3-pyfasm64 (2.3.2-1) stable; urgency=medium
 
   * Release version 2.3.1.
