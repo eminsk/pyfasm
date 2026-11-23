@@ -1,4 +1,5 @@
 """Comprehensive cross-target and native execution tests for PyFASM64 universal libraries."""
+from __future__ import annotations
 
 import re
 import struct

@@ -406,6 +406,7 @@ _pyfasm_textbox_append:
 _pyfasm_progressbar_set:
 _pyfasm_grid_propagate:
 _pyfasm_after:
+_pyfasm_window_close_cb:
 _pyfasm_stringvar_bind:
 _pyfasm_stringvar_trace:
 _pyfasm_fire_sv_traces:

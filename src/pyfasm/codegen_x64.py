@@ -14,7 +14,18 @@ _AST_MATCH = getattr(ast, 'Match', ())
 _AST_MATCH_AS = getattr(ast, 'MatchAs', ())
 _AST_MATCH_VALUE = getattr(ast, 'MatchValue', ())
 _AST_MATCH_OR = getattr(ast, 'MatchOr', ())
-from pyfasm.ast_parser import ParsedModule, FunctionSymbol, VariableSymbol, StringLiteral, FloatLiteral, walk_local_scope
+from pyfasm.ast_parser import (
+    ParsedModule,
+    FunctionSymbol,
+    VariableSymbol,
+    StringLiteral,
+    FloatLiteral,
+    walk_local_scope,
+    is_negative_number_literal,
+    gui_method_result_type,
+    GUI_ITEM_LIST_KINDS,
+    GUI_LIBRARY_ROOTS,
+)
 from pyfasm.diagnostics import CompilerDiagnostic, extract_source_line
 from pyfasm.types import (
     TYPE_INT, TYPE_FLOAT, TYPE_COMPLEX, TYPE_STR, TYPE_LIST, TYPE_DICT, TYPE_SET,
@@ -232,6 +243,57 @@ class X64CodeGen:
         label = f"_str_lit_gen_{self._label_counter}"
         self.module.string_literals.append(StringLiteral(label=label, value=text))
         return label
+
+    def _named_container_operand(self, name: str) -> Optional[Tuple[str, PyFasmType]]:
+        """Memory operand and static type of a named variable: local stack slot or module global."""
+        if self.current_func:
+            var = self.current_func.local_vars.get(name)
+            if var:
+                return f"[rbp - {var.stack_offset}]", var.var_type
+        if name in self.module.global_vars:
+            gtype = getattr(self.module, "global_var_types", {}).get(name)
+            if gtype is not None:
+                return f"[{safe_global_label(name)}]", gtype
+        return None
+
+    def _widget_kind(self, node: Optional[ast.AST]) -> Optional[str]:
+        """GUI widget kind ("entry", "listbox", "strvar", ...) of a receiver expression, if known."""
+        if isinstance(node, ast.Name):
+            if self.current_func:
+                var = self.current_func.local_vars.get(node.id)
+                if var is not None:
+                    return getattr(var, "widget_kind", None)
+            return getattr(self.module, "global_widget_kinds", {}).get(node.id)
+        if isinstance(node, ast.Attribute):
+            cls_name = self.resolve_instance_class(node.value)
+            seen: Set[str] = set()
+            while cls_name and cls_name not in seen and cls_name in self.module.classes:
+                seen.add(cls_name)
+                cls_sym = self.module.classes[cls_name]
+                kinds = getattr(cls_sym, "field_widget_kinds", {})
+                if node.attr in kinds:
+                    return kinds[node.attr]
+                cls_name = cls_sym.bases[0] if cls_sym.bases else None
+        return None
+
+    def _sort_items_are_str(self, node: ast.AST, node_type: PyFasmType) -> bool:
+        """True when the iterable being sorted is statically known to hold strings."""
+        if node_type.is_dict():
+            item_t = getattr(node_type, "key_type", None)
+        else:
+            item_t = getattr(node_type, "element_type", None)
+        if item_t is not None:
+            return item_t.is_str()
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and node.elts:
+            return all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts)
+        return False
+
+    @staticmethod
+    def _sort_reverse_requested(call: ast.Call) -> bool:
+        for kw in call.keywords:
+            if kw.arg == "reverse" and isinstance(kw.value, ast.Constant):
+                return bool(kw.value.value)
+        return False
 
     def _record_unresolved(self, sym: str, node: Optional[ast.AST] = None) -> None:
         self.unresolved_symbols.add(sym)
@@ -917,14 +979,16 @@ class X64CodeGen:
         self.emit("add rsp, 16")
 
     def _extract_parent_container_node(self, call: ast.Call) -> Optional[ast.AST]:
-        master_kw = self._extract_kwarg(call, "master")
-        if master_kw is not None:
-            return master_kw
-        if call.args:
+        parent = self._extract_kwarg(call, "master")
+        if parent is None and call.args:
             first = call.args[0]
             if not (isinstance(first, ast.Constant) and isinstance(first.value, (str, int, float, bool))):
-                return first
-        return None
+                parent = first
+        if parent is not None and self.resolve_instance_class(parent) in self.module.classes:
+            # An instance of a user window class (class App(tk.Tk)) is an object, not an HWND:
+            # its children belong to the main window.
+            return None
+        return parent
 
     def _emit_string_pointer(self, reg: str, text: str) -> None:
         label = None
@@ -937,6 +1001,22 @@ class X64CodeGen:
             label = f"_str_lit_ui_{self._label_counter}"
             self.module.string_literals.append(StringLiteral(label=label, value=text))
         self.emit(f"lea {reg}, [{label}]")
+
+    @staticmethod
+    def _is_scalar_number_type(t: PyFasmType) -> bool:
+        return t.is_int() or t.is_bool() or t.is_float()
+
+    def _emit_bool_to_str_rax(self) -> None:
+        """Replace the 0/1 truth value in RAX with a pointer to 'True' or 'False'."""
+        lbl_false = self.new_label("bool_false")
+        lbl_done = self.new_label("bool_str_done")
+        self.emit("test rax, rax")
+        self.emit(f"jz {lbl_false}")
+        self._emit_string_pointer("rax", "True")
+        self.emit(f"jmp {lbl_done}")
+        self.emit_raw(f"{lbl_false}:")
+        self._emit_string_pointer("rax", "False")
+        self.emit_raw(f"{lbl_done}:")
 
     def _is_ambiguous_dynamic_expr(self, expr: Optional[ast.AST]) -> bool:
         """True when an expression has dynamically typed (int vs str pointer) representation at runtime."""
@@ -1051,7 +1131,9 @@ class X64CodeGen:
             return "_pyfasm_print_str_repr"
         if elem_t.is_float():
             return "_pyfasm_print_float_bits"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_print_bool"
+        if elem_t.is_int():
             return "_pyfasm_print_int"
         if elem_t.is_list():
             return self._select_win64_list_printer(elem_t)
@@ -1067,7 +1149,9 @@ class X64CodeGen:
             return "_pyfasm_print_list_str"
         if elem_t.is_float():
             return "_pyfasm_print_list_float"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_print_list_bool"
+        if elem_t.is_int():
             return "_pyfasm_print_list_int"
         if elem_t.is_list():
             inner = getattr(elem_t, "element_type", None)
@@ -1092,7 +1176,9 @@ class X64CodeGen:
             return "_pyfasm_print_tuple_str"
         if elem_t.is_float():
             return "_pyfasm_print_tuple_float"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_print_tuple_bool"
+        if elem_t.is_int():
             return "_pyfasm_print_tuple_int"
         if elem_t.is_list():
             return "_pyfasm_print_tuple_list"
@@ -1105,7 +1191,9 @@ class X64CodeGen:
             return "_pyfasm_str_to_repr"
         if elem_t.is_float():
             return "_pyfasm_float_to_str"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_bool_to_str"
+        if elem_t.is_int():
             return "_pyfasm_int_to_str"
         if elem_t.is_list():
             return self._select_win64_list_to_str(elem_t)
@@ -1121,7 +1209,9 @@ class X64CodeGen:
             return "_pyfasm_list_str_to_str"
         if elem_t.is_float():
             return "_pyfasm_list_float_to_str"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_list_bool_to_str"
+        if elem_t.is_int():
             return "_pyfasm_list_int_to_str"
         if elem_t.is_list():
             inner = getattr(elem_t, "element_type", None)
@@ -1146,7 +1236,9 @@ class X64CodeGen:
             return "_pyfasm_tuple_str_to_str"
         if elem_t.is_float():
             return "_pyfasm_tuple_float_to_str"
-        if elem_t.is_int() or elem_t.is_bool():
+        if elem_t.is_bool():
+            return "_pyfasm_tuple_bool_to_str"
+        if elem_t.is_int():
             return "_pyfasm_tuple_int_to_str"
         if elem_t.is_list():
             return "_pyfasm_tuple_list_to_str"
@@ -1237,7 +1329,10 @@ class X64CodeGen:
             self.emit("call _pyfasm_set_to_str_with")
             self.emit("add rsp, 32")
             return
-        if not part_type.is_bool() and self._is_ambiguous_dynamic_expr(expr):
+        if part_type.is_bool():
+            self._emit_bool_to_str_rax()
+            return
+        if self._is_ambiguous_dynamic_expr(expr):
             self.emit("mov rcx, rax")
             self.emit("sub rsp, 32", "shadow space")
             self.emit(f"call {'_pyfasm_auto_to_repr' if is_repr else '_pyfasm_auto_to_str'}")
@@ -1449,6 +1544,10 @@ class X64CodeGen:
                         break
             if cb_symbol:
                 self.emit(f"lea rax, [{safe_asm_label(cb_symbol)}]")
+                return True
+            if attr in ("destroy", "quit", "close"):
+                # Bound framework method (root.destroy, app.quit) used as a callback
+                self.emit("lea rax, [_pyfasm_window_close_cb]")
                 return True
             return False
         if isinstance(cmd_node, ast.Name):
@@ -3491,8 +3590,19 @@ include 'functions.inc'
         self.emit_raw(f"{lbl_null}:")
 
     def _generate_for_range(self, stmt: ast.For) -> None:
-        target_var = self.current_func.local_vars.get(stmt.target.id)
-        if not target_var:
+        local_vars = self.current_func.local_vars if self.current_func else {}
+        target_var = local_vars.get(stmt.target.id)
+        target_is_global = target_var is None and stmt.target.id in self.module.global_vars
+        if not target_var and not target_is_global:
+            return
+
+        # Hidden counter and stop slots keep the iteration independent of the loop
+        # variable, so the variable holds the last yielded value after the loop and
+        # the stop expression is evaluated once, as in CPython.
+        cnt_var = local_vars.get(f"_pyfasm_for_idx_{id(stmt)}")
+        stop_var = local_vars.get(f"_pyfasm_for_buf_{id(stmt)}")
+        hidden = cnt_var is not None and stop_var is not None
+        if not hidden and not target_var:
             return
 
         call = stmt.iter
@@ -3510,12 +3620,17 @@ include 'functions.inc'
             if len(args) == 3 and isinstance(args[2], ast.Constant) and isinstance(args[2].value, int):
                 step_val = args[2].value
 
-        # Initialize loop variable
+        counter_slot = cnt_var.stack_offset if hidden else target_var.stack_offset
+
+        # Initialize loop counter
         if start_expr:
             self._generate_expr(start_expr)
         else:
             self.emit("xor eax, eax")
-        self.emit(f"mov [rbp - {target_var.stack_offset}], rax", f"init for {target_var.name}")
+        self.emit(f"mov [rbp - {counter_slot}], rax", f"init for {stmt.target.id}")
+        if hidden:
+            self._generate_expr(stop_expr)
+            self.emit(f"mov [rbp - {stop_var.stack_offset}], rax", "range stop")
 
         l_start = self.new_label("for_start")
         l_step = self.new_label("for_step")
@@ -3526,17 +3641,22 @@ include 'functions.inc'
 
         self.emit_raw(f"{l_start}:")
 
-        # Compare target with stop
-        self.emit(f"mov rax, [rbp - {target_var.stack_offset}]")
-        self.emit("push rax")
-        self._generate_expr(stop_expr)
-        self.emit("mov r11, rax")
-        self.emit("pop rax")
-        self.emit("cmp rax, r11")
+        # Compare counter with stop
+        self.emit(f"mov rax, [rbp - {counter_slot}]")
+        if hidden:
+            self.emit(f"cmp rax, [rbp - {stop_var.stack_offset}]")
+        else:
+            self.emit("push rax")
+            self._generate_expr(stop_expr)
+            self.emit("mov r11, rax")
+            self.emit("pop rax")
+            self.emit("cmp rax, r11")
         if step_val > 0:
             self.emit(f"jge {l_normal}")
         else:
             self.emit(f"jle {l_normal}")
+        if hidden:
+            self._assign_target(stmt.target, "rax")
 
         # Body
         for s in stmt.body:
@@ -3545,11 +3665,11 @@ include 'functions.inc'
         # Step
         self.emit_raw(f"{l_step}:")
         if step_val == 1:
-            self.emit(f"inc qword [rbp - {target_var.stack_offset}]")
+            self.emit(f"inc qword [rbp - {counter_slot}]")
         elif step_val == -1:
-            self.emit(f"dec qword [rbp - {target_var.stack_offset}]")
+            self.emit(f"dec qword [rbp - {counter_slot}]")
         else:
-            self.emit(f"add qword [rbp - {target_var.stack_offset}], {step_val}")
+            self.emit(f"add qword [rbp - {counter_slot}], {step_val}")
 
         self.emit(f"jmp {l_start}")
 
@@ -3643,6 +3763,20 @@ include 'functions.inc'
         if isinstance(expr, ast.BoolOp):
             if expr.values:
                 return self._infer_expr_type(expr.values[-1])
+            return TYPE_BOOL
+        if isinstance(expr, ast.Compare):
+            cmp_dunders = {
+                ast.Eq: "__eq__", ast.NotEq: "__ne__", ast.Lt: "__lt__",
+                ast.LtE: "__le__", ast.Gt: "__gt__", ast.GtE: "__ge__",
+            }
+            dunder = cmp_dunders.get(type(expr.ops[0]))
+            if dunder:
+                lcls = self.resolve_instance_class(expr.left)
+                cm = self.resolve_class_method(lcls, dunder) if lcls else None
+                if cm and cm in self.module.functions:
+                    rt = self.module.functions[cm].return_type
+                    if rt != TYPE_VOID and not rt.is_int():
+                        return rt
             return TYPE_BOOL
         if isinstance(expr, ast.Dict):
             kt = self._merge_expr_element_types([self._infer_expr_type(k) for k in expr.keys if k is not None])
@@ -3749,6 +3883,12 @@ include 'functions.inc'
             if lt.is_str() or rt.is_str():
                 return TYPE_STR
             if lt.is_float() or rt.is_float():
+                return TYPE_FLOAT
+            if (
+                (isinstance(expr.op, ast.Div) or (isinstance(expr.op, ast.Pow) and is_negative_number_literal(expr.right)))
+                and self._is_scalar_number_type(lt)
+                and self._is_scalar_number_type(rt)
+            ):
                 return TYPE_FLOAT
         if isinstance(expr, ast.UnaryOp):
             if isinstance(expr.op, ast.Not):
@@ -3911,6 +4051,9 @@ include 'functions.inc'
                     return self.module.functions[fn_id].return_type
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
+                gui_t = gui_method_result_type(self._widget_kind(expr.func.value), attr, len(expr.args))
+                if gui_t is not None:
+                    return gui_t
                 if attr in ("split", "splitlines"):
                     return ListType(element_type=TYPE_STR)
                 if attr in ("text", "toPlainText") and self.module.has_library("pyqt5", "pyqt6", "pyside6", "pyside2", "qt", "tkinter", "customtkinter"):
@@ -3969,6 +4112,8 @@ include 'functions.inc'
                     if recv_t.is_list() or recv_t.is_dict() or recv_t.is_set():
                         return recv_t
                 if attr in ("isdigit", "isascii"):
+                    return TYPE_BOOL
+                if attr in ("startswith", "endswith") and not self.resolve_instance_class(expr.func.value):
                     return TYPE_BOOL
                 if attr in ("bit_length", "count", "find", "index"):
                     return TYPE_INT
@@ -4704,63 +4849,13 @@ include 'functions.inc'
                 self.emit("pop rcx", "list1")
                 self.emit("call _pyfasm_list_concat")
                 return
-            if (lt.is_float() or rt.is_float()) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Pow)):
+            if self._is_float_arith(expr.op, lt, rt, expr.right):
                 self._generate_expr(expr.left)
-                if not lt.is_float():
-                    self.emit("cvtsi2sd xmm0, rax")
-                    self.emit("movq rax, xmm0")
                 self.emit("push rax")
                 self._generate_expr(expr.right)
-                if not rt.is_float():
-                    self.emit("cvtsi2sd xmm0, rax")
-                    self.emit("movq rax, xmm0")
                 self.emit("mov r11, rax")
                 self.emit("pop rax")
-                self.emit("movq xmm0, rax")
-                self.emit("movq xmm1, r11")
-                if isinstance(expr.op, ast.Add):
-                    self.emit("addsd xmm0, xmm1")
-                elif isinstance(expr.op, ast.Sub):
-                    self.emit("subsd xmm0, xmm1")
-                elif isinstance(expr.op, ast.Mult):
-                    self.emit("mulsd xmm0, xmm1")
-                elif isinstance(expr.op, (ast.Div, ast.FloorDiv)):
-                    self.emit("divsd xmm0, xmm1")
-                elif isinstance(expr.op, ast.Pow):
-                    lbl_pow_sqrt = self.new_label("pow_sqrt")
-                    lbl_pow_end = self.new_label("pow_end")
-                    lbl_pow_neg = self.new_label("pow_neg")
-                    lbl_pow_pos = self.new_label("pow_pos")
-                    lbl_pow_neg_loop = self.new_label("pow_neg_loop")
-                    # Check if exponent == 0.5 (0x3FE0000000000000)
-                    self.emit("mov r10, 0x3FE0000000000000")
-                    self.emit("cmp r11, r10")
-                    self.emit(f"je {lbl_pow_sqrt}")
-                    # General integer power on float base:
-                    self.emit("cvttsd2si rcx, xmm1")
-                    self.emit("movq xmm2, xmm0", "base")
-                    self.emit("mov rax, 0x3FF0000000000000", "1.0")
-                    self.emit("movq xmm0, rax")
-                    self.emit("test rcx, rcx")
-                    self.emit(f"js {lbl_pow_neg}")
-                    self.emit_raw(f"{lbl_pow_pos}:")
-                    self.emit("test rcx, rcx")
-                    self.emit(f"jz {lbl_pow_end}")
-                    self.emit("mulsd xmm0, xmm2")
-                    self.emit("dec rcx")
-                    self.emit(f"jmp {lbl_pow_pos}")
-                    self.emit_raw(f"{lbl_pow_neg}:")
-                    self.emit("neg rcx")
-                    self.emit_raw(f"{lbl_pow_neg_loop}:")
-                    self.emit("test rcx, rcx")
-                    self.emit(f"jz {lbl_pow_end}")
-                    self.emit("divsd xmm0, xmm2")
-                    self.emit("dec rcx")
-                    self.emit(f"jmp {lbl_pow_neg_loop}")
-                    self.emit_raw(f"{lbl_pow_sqrt}:")
-                    self.emit("sqrtsd xmm0, xmm0")
-                    self.emit_raw(f"{lbl_pow_end}:")
-                self.emit("movq rax, xmm0")
+                self._emit_float_arith(expr.op, lt.is_float(), rt.is_float())
                 return
 
             self._generate_expr(expr.left)
@@ -5858,6 +5953,74 @@ include 'functions.inc'
 
         else:
             self.emit(f"jmp {lbl_success}")
+
+    def _is_float_arith(self, op: ast.operator, lt: PyFasmType, rt: PyFasmType, right: Optional[ast.AST] = None) -> bool:
+        """True when a binary operation has to be computed in IEEE-754 doubles."""
+        if isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Pow)) and (lt.is_float() or rt.is_float()):
+            return True
+        if not (self._is_scalar_number_type(lt) and self._is_scalar_number_type(rt)):
+            return False
+        if isinstance(op, ast.Mod):
+            return lt.is_float() or rt.is_float()
+        if isinstance(op, ast.Div):
+            return True
+        return isinstance(op, ast.Pow) and is_negative_number_literal(right)
+
+    def _emit_float_arith(self, op: ast.operator, left_is_float: bool, right_is_float: bool) -> None:
+        """Compute RAX <op> R11 as doubles (integer operands are converted) and leave the result bits in RAX."""
+        self.emit("movq xmm0, rax" if left_is_float else "cvtsi2sd xmm0, rax")
+        self.emit("movq xmm1, r11" if right_is_float else "cvtsi2sd xmm1, r11")
+        if isinstance(op, ast.Add):
+            self.emit("addsd xmm0, xmm1")
+        elif isinstance(op, ast.Sub):
+            self.emit("subsd xmm0, xmm1")
+        elif isinstance(op, ast.Mult):
+            self.emit("mulsd xmm0, xmm1")
+        elif isinstance(op, ast.Div):
+            self.emit("divsd xmm0, xmm1")
+        elif isinstance(op, ast.FloorDiv):
+            self.emit("divsd xmm0, xmm1")
+            self.emit("roundsd xmm0, xmm0, 1", "floor toward -infinity")
+        elif isinstance(op, ast.Mod):
+            self.emit("movapd xmm2, xmm0")
+            self.emit("divsd xmm2, xmm1")
+            self.emit("roundsd xmm2, xmm2, 1", "floor(a / b)")
+            self.emit("mulsd xmm2, xmm1")
+            self.emit("subsd xmm0, xmm2", "a - floor(a / b) * b takes the divisor's sign")
+        elif isinstance(op, ast.Pow):
+            lbl_pow_sqrt = self.new_label("pow_sqrt")
+            lbl_pow_end = self.new_label("pow_end")
+            lbl_pow_neg = self.new_label("pow_neg")
+            lbl_pow_pos = self.new_label("pow_pos")
+            lbl_pow_neg_loop = self.new_label("pow_neg_loop")
+            self.emit("movq r11, xmm1", "exponent bits")
+            self.emit("mov r10, 0x3FE0000000000000", "0.5")
+            self.emit("cmp r11, r10")
+            self.emit(f"je {lbl_pow_sqrt}")
+            self.emit("cvttsd2si rcx, xmm1")
+            self.emit("movq xmm2, xmm0", "base")
+            self.emit("mov rax, 0x3FF0000000000000", "1.0")
+            self.emit("movq xmm0, rax")
+            self.emit("test rcx, rcx")
+            self.emit(f"js {lbl_pow_neg}")
+            self.emit_raw(f"{lbl_pow_pos}:")
+            self.emit("test rcx, rcx")
+            self.emit(f"jz {lbl_pow_end}")
+            self.emit("mulsd xmm0, xmm2")
+            self.emit("dec rcx")
+            self.emit(f"jmp {lbl_pow_pos}")
+            self.emit_raw(f"{lbl_pow_neg}:")
+            self.emit("neg rcx")
+            self.emit_raw(f"{lbl_pow_neg_loop}:")
+            self.emit("test rcx, rcx")
+            self.emit(f"jz {lbl_pow_end}")
+            self.emit("divsd xmm0, xmm2")
+            self.emit("dec rcx")
+            self.emit(f"jmp {lbl_pow_neg_loop}")
+            self.emit_raw(f"{lbl_pow_sqrt}:")
+            self.emit("sqrtsd xmm0, xmm0")
+            self.emit_raw(f"{lbl_pow_end}:")
+        self.emit("movq rax, xmm0")
 
     def _generate_binop_instr(self, op: ast.operator) -> None:
         if isinstance(op, ast.Add):
@@ -7121,7 +7284,13 @@ include 'functions.inc'
             for route in getattr(self.module, "http_routes", []):
                 param_names = list(getattr(route, "param_names", []) or [])
                 if param_names:
-                    self.emit(f"mov ecx, {len(param_names) * 8}", "allocate param_names ptr array")
+                    n_params = len(param_names)
+                    param_defaults = list(getattr(route, "param_defaults", []) or [])
+                    param_defaults += [None] * (n_params - len(param_defaults))
+                    param_masks = (int(getattr(route, "param_int_mask", 0)) & 0xFFFF) | (
+                        (int(getattr(route, "param_dict_mask", 0)) & 0xFFFF) << 16
+                    )
+                    self.emit(f"mov ecx, {n_params * 16}", "allocate param names + defaults ptr arrays")
                     self.emit("sub rsp, 32", "shadow space")
                     self.emit("call _pyfasm_alloc")
                     self.emit("add rsp, 32")
@@ -7130,16 +7299,25 @@ include 'functions.inc'
                         self._emit_string_pointer("rdx", pname)
                         self.emit("mov rcx, [rsp]", "restore param_names array")
                         self.emit(f"mov [rcx + {idx * 8}], rdx", f"param '{pname}'")
+                        default_text = param_defaults[idx]
+                        if default_text is None:
+                            self.emit(f"mov qword [rcx + {(n_params + idx) * 8}], 0", f"param '{pname}' has no default")
+                        else:
+                            self._emit_string_pointer("rdx", default_text)
+                            self.emit(f"mov [rcx + {(n_params + idx) * 8}], rdx", f"default for '{pname}'")
                     self.emit("pop rax", "param_names array")
                     self.emit("sub rsp, 64", "route registration frame")
-                    self.emit(f"mov qword [rsp + 32], {len(param_names)}")
-                    self.emit(f"mov qword [rsp + 40], {int(getattr(route, 'param_int_mask', 0))}")
+                    self.emit(f"mov qword [rsp + 32], {n_params}")
+                    self.emit(f"mov qword [rsp + 40], {param_masks}")
                     self.emit("mov [rsp + 48], rax")
+                    self.emit(f"lea rax, [rax + {n_params * 8}]", "param_defaults array")
+                    self.emit("mov [rsp + 56], rax")
                 else:
                     self.emit("sub rsp, 64", "route registration frame")
                     self.emit("mov qword [rsp + 32], 0")
                     self.emit("mov qword [rsp + 40], 0")
                     self.emit("mov qword [rsp + 48], 0")
+                    self.emit("mov qword [rsp + 56], 0")
                 self._emit_string_pointer("rcx", route.method)
                 self._emit_string_pointer("rdx", route.path)
                 self.emit(f"lea r8, [{safe_asm_label(route.handler_name)}]", f"route handler {route.handler_name}")
@@ -7509,7 +7687,19 @@ include 'functions.inc'
         if attr_name == "insert" and len(call.args) >= 2:
             target_type = self._infer_expr_type(call.func.value)
             is_gui = "gui" in self.features or getattr(self.module, "is_modern_gui", False)
-            is_entry_widget = is_gui and (
+            recv_kind = self._widget_kind(call.func.value)
+            if recv_kind in GUI_ITEM_LIST_KINDS:
+                self._generate_expr(call.args[1])
+                self.emit("push rax", "new item")
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "listbox/combobox HWND")
+                self.emit("pop rdx", "new item")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_listbox_add")
+                self.emit("add rsp, 32")
+                self.emit("xor eax, eax")
+                return
+            is_entry_widget = recv_kind is not None or is_gui and (
                 not target_type.is_list()
                 or (isinstance(call.func.value, ast.Name) and any(k in call.func.value.id.lower() for k in ("ent", "edit", "txt", "search", "filter")))
                 or (isinstance(call.func.value, ast.Attribute) and any(k in call.func.value.attr.lower() for k in ("ent", "edit", "txt", "search", "filter")))
@@ -7570,34 +7760,38 @@ include 'functions.inc'
             self.emit("add rsp, 32")
             return
 
-        # List append
-        if attr_name == "append" and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var and var.var_type.is_list():
-                self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax", "item to append")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "list_ptr")
-                self.emit("call _pyfasm_list_append")
-                return
+        # List append / set add / set-dict remove & discard on a named container
+        if attr_name in ("append", "add", "remove", "discard") and call.args and prefix and self.current_func:
+            container_ref = self._named_container_operand(prefix)
+            if container_ref:
+                operand, ctype = container_ref
+                runtime_fn = None
+                if attr_name == "append" and ctype.is_list():
+                    runtime_fn = "_pyfasm_list_append"
+                elif attr_name == "add" and (ctype.is_set() or ctype.is_dict()):
+                    runtime_fn = "_pyfasm_set_add"
+                elif attr_name in ("remove", "discard") and (ctype.is_set() or ctype.is_dict()):
+                    runtime_fn = "_pyfasm_set_remove"
+                elif attr_name == "remove" and ctype.is_list():
+                    elem_t = getattr(ctype, "element_type", None)
+                    is_str_item = (elem_t is not None and elem_t.is_str()) or self._infer_expr_type(call.args[0]).is_str()
+                    runtime_fn = "_pyfasm_list_remove_str" if is_str_item else "_pyfasm_list_remove"
+                if runtime_fn:
+                    self._generate_expr(call.args[0])
+                    self.emit("mov rdx, rax", f"item to {attr_name}")
+                    self.emit(f"mov rcx, {operand}", "container_ptr")
+                    self.emit(f"call {runtime_fn}")
+                    if runtime_fn.startswith("_pyfasm_list_remove"):
+                        self.emit("xor eax, eax", "remove() returns None")
+                    return
 
-        # Set add
-        if attr_name == "add" and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var and (var.var_type.is_set() or var.var_type.is_dict()):
-                self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax", "item to add")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "set_ptr")
-                self.emit("call _pyfasm_set_add")
-                return
-
-        # Set/Dict remove & discard
-        if attr_name in ("remove", "discard") and call.args and prefix and self.current_func:
-            var = self.current_func.local_vars.get(prefix)
-            if var and (var.var_type.is_set() or var.var_type.is_dict()):
-                self._generate_expr(call.args[0])
-                self.emit("mov rdx, rax", "item to remove")
-                self.emit(f"mov rcx, [rbp - {var.stack_offset}]", "set_ptr")
-                self.emit("call _pyfasm_set_remove")
+        # list.reverse() on a named list
+        if attr_name == "reverse" and not call.args and prefix and self.current_func:
+            container_ref = self._named_container_operand(prefix)
+            if container_ref and container_ref[1].is_list():
+                self.emit(f"mov rcx, {container_ref[0]}", "list_ptr")
+                self.emit("call _pyfasm_list_reverse")
+                self.emit("xor eax, eax", "reverse() returns None")
                 return
 
         # List / Dict pop
@@ -8445,7 +8639,18 @@ include 'functions.inc'
         func_dump_lower = ast.dump(call.func).lower()
         call_name_lower = (func_name or attr_name or "").lower()
 
-        if attr_name in ("mainloop", "run", "show", "exec", "exec_"):
+        # In a program that imports a real GUI toolkit, a user class that defines its own
+        # run()/show()/... gets an ordinary method call, as in Python: the event loop starts
+        # only where the program itself calls the toolkit's mainloop()/exec().
+        recv_user_cls = self.resolve_instance_class(call.func.value) if isinstance(call.func, ast.Attribute) else None
+        is_user_defined_entry = bool(
+            recv_user_cls
+            and attr_name
+            and self.resolve_class_method(recv_user_cls, attr_name)
+            and any(imp.split(".")[0].lower() in GUI_LIBRARY_ROOTS for imp in getattr(self.module, "imports", []))
+        )
+
+        if attr_name in ("mainloop", "run", "show", "exec", "exec_") and not is_user_defined_entry:
             # If chained call on instantiated class like QuadraticEquationApp().mainloop(), instantiate it first!
             if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Call):
                 self._generate_expr(call.func.value)
@@ -8857,20 +9062,28 @@ include 'functions.inc'
 
             # 1. Widget UI methods: .get()
             if attr_name == "get" and len(call.args) == 0 and not is_user_class_method:
-                is_direct_entry = False
                 if isinstance(call.func, ast.Attribute):
-                    if getattr(call.func.value, "attr", "").lower().endswith("entry") or getattr(call.func.value, "id", "").lower().endswith("entry"):
-                        is_direct_entry = True
                     self._generate_expr(call.func.value)
                     self.emit("mov rcx, rax", "target widget or StringVar")
                 else:
                     self.emit("xor ecx, ecx")
-                if is_direct_entry:
-                    self.emit("xor edx, edx")
-                    self.emit("xor r8d, r8d")
-                    self.emit("call _pyfasm_get_edit_text", "read native edit box text")
-                else:
-                    self.emit("call _pyfasm_unified_get", "read native edit box text or StringVar")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_unified_get", "read native widget value or StringVar as UTF-8")
+                self.emit("add rsp, 32")
+                return
+
+            # Item count: Listbox.size(), QListWidget.count(), QComboBox.count()
+            if (
+                attr_name in ("size", "count")
+                and len(call.args) == 0
+                and isinstance(call.func, ast.Attribute)
+                and self._widget_kind(call.func.value) in GUI_ITEM_LIST_KINDS
+            ):
+                self._generate_expr(call.func.value)
+                self.emit("mov rcx, rax", "listbox/combobox HWND")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_listbox_count")
+                self.emit("add rsp, 32")
                 return
 
             # Widget UI methods: .set()
@@ -9160,6 +9373,26 @@ include 'functions.inc'
 
             if any(k in call_name_lower for k in ("ctkimage", "tkimage")) or (call_name_lower == "image" and raw_ctor in ("CTkImage", "PhotoImage")):
                 self.emit("mov rax, 1", "dummy GUI Image handle")
+                return
+
+            if (
+                attr_name == "singleShot"
+                and len(call.args) >= 2
+                and isinstance(call.func, ast.Attribute)
+                and not is_user_defined_call
+            ):
+                # QTimer.singleShot(ms, slot): one-shot timer on the main window
+                if self._emit_control_callback_to_rax(call.args[-1]):
+                    self.emit("push rax", "single-shot slot")
+                    self._generate_expr(call.args[0])
+                    self.emit("mov rdx, rax", "ms")
+                    self.emit("pop r8", "slot")
+                    self.emit("xor ecx, ecx", "main window")
+                    self.emit("sub rsp, 32")
+                    self.emit("call _pyfasm_after")
+                    self.emit("add rsp, 32")
+                else:
+                    self.emit("xor eax, eax")
                 return
 
             if (
@@ -9930,8 +10163,13 @@ include 'functions.inc'
                         self.emit("push rax", "timer cb")
                         self._generate_expr(call.args[0])
                         self.emit("push rax", "ms")
-                        self._generate_expr(call.func.value)
-                        self.emit("mov rcx, rax", "hwnd")
+                        if self.resolve_instance_class(call.func.value) in self.module.classes:
+                            # A user window class (class App(tk.Tk)) is an object, not an HWND:
+                            # its timers belong to the main window.
+                            self.emit("xor ecx, ecx", "main window")
+                        else:
+                            self._generate_expr(call.func.value)
+                            self.emit("mov rcx, rax", "hwnd")
                         self.emit("pop rdx", "ms")
                         self.emit("pop r8", "cb")
                         self.emit("sub rsp, 32")
@@ -10387,8 +10625,9 @@ include 'functions.inc'
                             self.emit("call _pyfasm_print_set_with")
                             self.emit("add rsp, 32")
                         elif arg_type.is_bool():
+                            self._emit_bool_to_str_rax()
                             self.emit("mov rcx, rax")
-                            self.emit("call _pyfasm_print_int")
+                            self.emit("call _pyfasm_print_str")
                         elif arg_type.is_int():
                             if self.target in ("win64", "dll") and self._is_ambiguous_dynamic_expr(arg):
                                 self.emit("mov rcx, rax")
@@ -11091,27 +11330,46 @@ include 'functions.inc'
         # Built-in sorted(iterable) or list.sort()
         if func_name == "sorted" and len(call.args) >= 1:
             is_gen = self._is_generator_expr(call.args[0])
+            src_type = self._infer_expr_type(call.args[0])
             self._generate_expr(call.args[0])
             if is_gen:
                 self.emit("mov rcx, rax")
                 self.emit("sub rsp, 32")
                 self.emit("call _pyfasm_gen_to_list")
                 self.emit("add rsp, 32")
+            elif src_type.is_dict():
+                self.emit("mov rcx, rax", "dict_ptr")
+                self.emit("sub rsp, 32")
+                self.emit("call _pyfasm_dict_keys")
+                self.emit("add rsp, 32")
             self.emit("mov rcx, rax", "pass list to sort")
             self.emit("sub rsp, 32", "shadow space for _pyfasm_sorted")
             self.emit("call _pyfasm_sorted")
+            if self._sort_items_are_str(call.args[0], src_type):
+                self.emit("mov rcx, rax", "sorted copy")
+                self.emit("call _pyfasm_list_sort_str")
+            if self._sort_reverse_requested(call):
+                self.emit("mov rcx, rax", "sorted copy")
+                self.emit("call _pyfasm_list_reverse")
             self.emit("add rsp, 32", "restore shadow space")
             return
 
         if (func_name == "sort" or attr_name == "sort") and (isinstance(call.func, ast.Attribute) or len(call.args) >= 1):
-            if isinstance(call.func, ast.Attribute):
-                self._generate_expr(call.func.value)
-            else:
-                self._generate_expr(call.args[0])
+            list_node = call.func.value if isinstance(call.func, ast.Attribute) else call.args[0]
+            self._generate_expr(list_node)
+            self.emit("push rax", "keep list across sort")
+            self.emit("push rax", "keep stack aligned")
             self.emit("mov rcx, rax", "pass list to sort")
-            self.emit("sub rsp, 32", "shadow space for _pyfasm_list_sort")
-            self.emit("call _pyfasm_list_sort")
+            self.emit("sub rsp, 32", "shadow space for sort")
+            if self._sort_items_are_str(list_node, self._infer_expr_type(list_node)):
+                self.emit("call _pyfasm_list_sort_str")
+            else:
+                self.emit("call _pyfasm_list_sort")
             self.emit("add rsp, 32", "restore shadow space")
+            self.emit("pop rcx")
+            self.emit("pop rcx", "sorted list")
+            if self._sort_reverse_requested(call):
+                self.emit("call _pyfasm_list_reverse")
             self.emit("xor eax, eax", "sort() returns None")
             return
 

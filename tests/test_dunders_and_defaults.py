@@ -141,10 +141,10 @@ def main() -> int:
     assert "V3 y: 25" in out
     assert "V4 x: 7" in out
     assert "V4 y: 15" in out
-    assert "Eq True: 1" in out
-    assert "Eq False: 0" in out
-    assert "Ne True: 1" in out
-    assert "Ne False: 0" in out
+    assert "Eq True: True" in out
+    assert "Eq False: False" in out
+    assert "Ne True: True" in out
+    assert "Ne False: False" in out
     assert "Str v1: Vector(10, 20)" in out
     assert "Print v3: Vector(13, 25)" in out
 
@@ -153,7 +153,7 @@ def main() -> int:
     assert "Arr[0]: 111" in out
     assert "Arr[1]: 222" in out
     assert "Arr[2]: 333" in out
-    assert "In 222: 1" in out
-    assert "In 999: 0" in out
-    assert "NotIn 999: 1" in out
-    assert "NotIn 222: 0" in out
+    assert "In 222: True" in out
+    assert "In 999: False" in out
+    assert "NotIn 999: True" in out
+    assert "NotIn 222: False" in out

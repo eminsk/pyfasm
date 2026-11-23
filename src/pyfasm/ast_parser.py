@@ -40,6 +40,7 @@ class VariableSymbol:
     is_generator: bool = False
     is_dynamic: bool = False
     fn_alias: Optional[str] = None
+    widget_kind: Optional[str] = None
 
 
 @dataclass
@@ -78,6 +79,7 @@ class ClassSymbol:
     class_attrs: Dict[str, Any] = field(default_factory=dict)
     field_types: Dict[str, PyFasmType] = field(default_factory=dict)
     field_classes: Dict[str, str] = field(default_factory=dict)
+    field_widget_kinds: Dict[str, str] = field(default_factory=dict)
     static_methods: Set[str] = field(default_factory=set)
     class_methods: Set[str] = field(default_factory=set)
     ast_node: Optional[ast.ClassDef] = None
@@ -103,6 +105,8 @@ class HttpRouteSpec:
     return_kind: str = "auto"
     param_names: List[str] = field(default_factory=list)
     param_int_mask: int = 0
+    param_dict_mask: int = 0
+    param_defaults: List[Optional[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -113,6 +117,7 @@ class ParsedModule:
     float_literals: List[FloatLiteral] = field(default_factory=list)
     global_vars: Dict[str, int] = field(default_factory=dict)
     global_var_types: Dict[str, PyFasmType] = field(default_factory=dict)
+    global_widget_kinds: Dict[str, str] = field(default_factory=dict)
     imports: List[str] = field(default_factory=list)
     detected_libraries: Set[str] = field(default_factory=set)
     main_func: Optional[FunctionSymbol] = None
@@ -180,12 +185,105 @@ class ParsedModule:
         return self.has_library("cv2", "opencv", "ffmpeg", "pyaudio", "sounddevice", "pil", "pillow")
 
 
+def is_negative_number_literal(node: Optional[ast.AST]) -> bool:
+    """True for a literal such as -1 or -0.5 (a negative exponent turns int ** int into a float)."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = node.operand
+        return (
+            isinstance(inner, ast.Constant)
+            and isinstance(inner.value, (int, float))
+            and not isinstance(inner.value, bool)
+            and inner.value > 0
+        )
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+        and node.value < 0
+    )
+
+
 def walk_local_scope(node: ast.AST):
     """Walk an AST node without descending into nested function or class scopes."""
     for child in ast.iter_child_nodes(node):
         yield child
         if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             yield from walk_local_scope(child)
+
+
+GUI_LIBRARY_ROOTS = ("tkinter", "customtkinter", "pyqt5", "pyqt6", "pyside2", "pyside6")
+
+_GUI_WIDGET_KINDS: Dict[str, str] = {
+    "StringVar": "strvar",
+    "IntVar": "intvar",
+    "BooleanVar": "intvar",
+    "DoubleVar": "floatvar",
+    "Entry": "entry",
+    "CTkEntry": "entry",
+    "QLineEdit": "entry",
+    "Text": "text",
+    "ScrolledText": "text",
+    "CTkTextbox": "text",
+    "QTextEdit": "text",
+    "QPlainTextEdit": "text",
+    "Listbox": "listbox",
+    "QListWidget": "listbox",
+    "Combobox": "combo",
+    "CTkComboBox": "combo",
+    "CTkOptionMenu": "combo",
+    "QComboBox": "combo",
+    "Scale": "slider",
+    "CTkSlider": "slider",
+    "QSlider": "slider",
+    "Label": "label",
+    "CTkLabel": "label",
+    "QLabel": "label",
+    "Button": "button",
+    "CTkButton": "button",
+    "QPushButton": "button",
+    "Tk": "window",
+    "CTk": "window",
+    "Toplevel": "window",
+    "CTkToplevel": "window",
+    "Frame": "frame",
+    "CTkFrame": "frame",
+    "LabelFrame": "frame",
+}
+
+GUI_STRING_GETTER_KINDS = ("strvar", "entry", "text", "combo")
+GUI_FLOAT_GETTER_KINDS = ("floatvar", "slider")
+GUI_ITEM_LIST_KINDS = ("listbox", "combo")
+
+
+def gui_method_result_type(kind: Optional[str], attr: str, n_args: int) -> Optional[PyFasmType]:
+    """Result type of ``<widget>.<attr>(...)`` for a known widget kind, or None if not a value getter."""
+    if kind is None:
+        return None
+    if attr == "get":
+        if kind in GUI_STRING_GETTER_KINDS:
+            return TYPE_STR
+        if kind in GUI_FLOAT_GETTER_KINDS and n_args == 0:
+            return TYPE_FLOAT
+        if kind == "intvar" and n_args == 0:
+            return TYPE_INT
+        return None
+    if attr in ("cget", "text", "currentText", "toPlainText", "title"):
+        return TYPE_STR
+    if attr in ("size", "count") and n_args == 0 and kind in GUI_ITEM_LIST_KINDS:
+        return TYPE_INT
+    return None
+
+
+def gui_widget_kind(expr: Optional[ast.AST]) -> Optional[str]:
+    """Classify a GUI constructor call (``tk.Entry(...)``, ``QComboBox()``) by widget kind."""
+    if not isinstance(expr, ast.Call):
+        return None
+    func = expr.func
+    if isinstance(func, ast.Attribute):
+        return _GUI_WIDGET_KINDS.get(func.attr)
+    if isinstance(func, ast.Name):
+        return _GUI_WIDGET_KINDS.get(func.id)
+    return None
 
 
 
@@ -1961,12 +2059,33 @@ class AstAnalyzer:
                     r_kind = "bool"
                 elif rt.is_int() and not getattr(fn_sym, "is_dynamic_return", False):
                     r_kind = "auto"
+            default_texts: Dict[str, str] = {}
+            fn_args = getattr(fn_sym.ast_node, "args", None)
+            if isinstance(fn_args, ast.arguments):
+                positional = list(getattr(fn_args, "posonlyargs", [])) + list(fn_args.args)
+                pairs = list(zip(positional[len(positional) - len(fn_args.defaults):], fn_args.defaults))
+                pairs += [(a, d) for a, d in zip(fn_args.kwonlyargs, fn_args.kw_defaults) if d is not None]
+                for arg_node, default_node in pairs:
+                    if not isinstance(default_node, ast.Constant):
+                        continue
+                    value = default_node.value
+                    if isinstance(value, bool):
+                        default_texts[arg_node.arg] = "1" if value else "0"
+                    elif isinstance(value, (int, str)):
+                        default_texts[arg_node.arg] = str(value)
             p_names: List[str] = []
+            p_defaults: List[Optional[str]] = []
             p_int_mask = 0
+            p_dict_mask = 0
             for idx, arg in enumerate(fn_sym.args):
                 p_names.append(arg.name)
-                if not arg.is_dynamic and (arg.var_type.is_int() or arg.var_type.is_bool()):
+                p_defaults.append(default_texts.get(arg.name))
+                if arg.is_dynamic:
+                    continue
+                if arg.var_type.is_int() or arg.var_type.is_bool():
                     p_int_mask |= (1 << idx)
+                elif arg.var_type.is_dict():
+                    p_dict_mask |= (1 << idx)
             module.http_routes.append(
                 HttpRouteSpec(
                     method=method,
@@ -1975,6 +2094,8 @@ class AstAnalyzer:
                     return_kind=r_kind,
                     param_names=p_names,
                     param_int_mask=p_int_mask,
+                    param_dict_mask=p_dict_mask,
+                    param_defaults=p_defaults,
                 )
             )
 
@@ -1997,8 +2118,13 @@ class AstAnalyzer:
             def _scan_global_stmt(s: ast.stmt) -> None:
                 if isinstance(s, ast.Assign):
                     val_t = self._infer_node_type(s.value, {})
+                    val_kind = self._constructed_widget_kind(s.value)
                     for tgt in s.targets:
                         if isinstance(tgt, ast.Name):
+                            if val_kind is not None:
+                                module.global_widget_kinds[tgt.id] = val_kind
+                                if mod_prefix:
+                                    module.global_widget_kinds[f"{mod_prefix}_{tgt.id}"] = val_kind
                             init_val = 0
                             if isinstance(s.value, ast.Constant) and isinstance(s.value.value, int):
                                 init_val = int(s.value.value)
@@ -2093,6 +2219,28 @@ class AstAnalyzer:
                     for s in top_level_stmts
                 )
                 if "main" not in module.functions:
+                    names_used_in_scopes: Set[str] = set()
+                    for scope_node in ast.walk(tree):
+                        if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                            for inner in ast.walk(scope_node):
+                                if isinstance(inner, ast.Name):
+                                    names_used_in_scopes.add(inner.id)
+                                elif isinstance(inner, ast.Global):
+                                    names_used_in_scopes.update(inner.names)
+                    shared_names: List[str] = []
+                    for s in top_level_stmts:
+                        bound_here: Set[str] = set()
+                        if isinstance(s, ast.Assign):
+                            for tgt in s.targets:
+                                ClosureLifter._collect_target_names(tgt, bound_here)
+                        elif isinstance(s, ast.AnnAssign):
+                            ClosureLifter._collect_target_names(s.target, bound_here)
+                        for bname in sorted(bound_here):
+                            if bname in names_used_in_scopes and bname not in shared_names:
+                                shared_names.append(bname)
+                    if shared_names:
+                        top_level_stmts = [ast.Global(names=shared_names)] + top_level_stmts
+
                     entry_fn_def = ast.FunctionDef(
                         name="main",
                         args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
@@ -2238,6 +2386,7 @@ class AstAnalyzer:
             if base_sym:
                 cls_sym.field_types.update(getattr(base_sym, "field_types", {}))
                 cls_sym.field_classes.update(getattr(base_sym, "field_classes", {}))
+                cls_sym.field_widget_kinds.update(getattr(base_sym, "field_widget_kinds", {}))
                 cls_sym.static_methods.update(getattr(base_sym, "static_methods", set()))
                 cls_sym.class_methods.update(getattr(base_sym, "class_methods", set()))
 
@@ -2365,6 +2514,9 @@ class AstAnalyzer:
                                     cls_sym.field_types[tgt.attr] = ft
                                 if isinstance(ft, InstanceType):
                                     cls_sym.field_classes[tgt.attr] = ft.class_name
+                                field_kind = self._constructed_widget_kind(sub.value)
+                                if field_kind is not None:
+                                    cls_sym.field_widget_kinds[tgt.attr] = field_kind
                     elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Attribute):
                         if isinstance(sub.target.value, ast.Name) and sub.target.value.id == "self" and sub.value is not None:
                             ft = self._infer_node_type(sub.value, m_fn.local_vars)
@@ -2582,6 +2734,49 @@ class AstAnalyzer:
                     if all(cand in s for s in other_sets):
                         return InstanceType(class_name=cand)
             return TYPE_PTR
+        return None
+
+    def _module_uses_gui(self) -> bool:
+        mod = getattr(self, "current_module", None)
+        if mod is None:
+            return False
+        return any(imp.split(".")[0].lower() in GUI_LIBRARY_ROOTS for imp in mod.imports)
+
+    def _constructed_widget_kind(self, expr: Optional[ast.AST]) -> Optional[str]:
+        """Widget kind created by ``expr`` when it is a GUI constructor call, else None."""
+        kind = gui_widget_kind(expr)
+        if kind is None or not self._module_uses_gui():
+            return None
+        mod = self.current_module
+        func = expr.func
+        if isinstance(func, ast.Name) and (func.id in mod.classes or func.id in mod.functions):
+            return None
+        return kind
+
+    def _receiver_widget_kind(self, expr: Optional[ast.AST], local_vars: Dict[str, VariableSymbol]) -> Optional[str]:
+        """Widget kind of a receiver expression: a local, a global or ``self.<field>``."""
+        mod = getattr(self, "current_module", None)
+        if isinstance(expr, ast.Name):
+            sym = local_vars.get(expr.id)
+            if sym is not None:
+                return sym.widget_kind
+            if mod is not None:
+                prefix = getattr(self, "_current_mod_prefix", "")
+                if prefix and f"{prefix}_{expr.id}" in mod.global_widget_kinds:
+                    return mod.global_widget_kinds[f"{prefix}_{expr.id}"]
+                return mod.global_widget_kinds.get(expr.id)
+            return None
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and mod is not None:
+            owner = local_vars.get(expr.value.id)
+            owner_t = owner.var_type if owner is not None else None
+            cls_name = getattr(owner_t, "class_name", None) if isinstance(owner_t, InstanceType) else None
+            seen: Set[str] = set()
+            while cls_name and cls_name not in seen and cls_name in mod.classes:
+                seen.add(cls_name)
+                cls_sym = mod.classes[cls_name]
+                if expr.attr in cls_sym.field_widget_kinds:
+                    return cls_sym.field_widget_kinds[expr.attr]
+                cls_name = cls_sym.bases[0] if cls_sym.bases else None
         return None
 
     @staticmethod
@@ -2867,6 +3062,12 @@ class AstAnalyzer:
                 return TYPE_STR
             if left_t.is_tuple() or right_t.is_tuple():
                 return TYPE_TUPLE
+            if (
+                (isinstance(expr.op, ast.Div) or (isinstance(expr.op, ast.Pow) and is_negative_number_literal(expr.right)))
+                and (left_t.is_int() or left_t.is_bool())
+                and (right_t.is_int() or right_t.is_bool())
+            ):
+                return TYPE_FLOAT
             return TYPE_INT
 
         elif isinstance(expr, ast.UnaryOp):
@@ -3035,6 +3236,11 @@ class AstAnalyzer:
             elif isinstance(expr.func, ast.Attribute):
                 attr = expr.func.attr
                 mod = getattr(self, "current_module", None)
+                gui_t = gui_method_result_type(
+                    self._receiver_widget_kind(expr.func.value, local_vars), attr, len(expr.args)
+                )
+                if gui_t is not None:
+                    return gui_t
                 if mod is not None and isinstance(expr.func.value, ast.Name) and expr.func.value.id in mod.classes:
                     cname = expr.func.value.id
                     cq = [cname]
@@ -3340,6 +3546,7 @@ class AstAnalyzer:
                 if isinstance(sub_node, ast.Assign):
                     inferred_type = self._infer_node_type(sub_node.value, local_vars)
                     rhs_dynamic = inferred_type == TYPE_INT and self._is_dynamic_expr(sub_node.value, local_vars)
+                    rhs_widget_kind = self._constructed_widget_kind(sub_node.value)
                     targets_to_proc = []
                     for target in sub_node.targets:
                         if isinstance(target, ast.Name):
@@ -3390,6 +3597,13 @@ class AstAnalyzer:
                                     local_vars[vname].is_dynamic = False
                                 elif is_dyn and local_vars[vname].var_type == TYPE_INT:
                                     local_vars[vname].is_dynamic = True
+                        if rhs_widget_kind is not None:
+                            if vname in local_vars:
+                                local_vars[vname].widget_kind = rhs_widget_kind
+                            elif mod is not None:
+                                mod.global_widget_kinds[vname] = rhs_widget_kind
+                                if mod_prefix:
+                                    mod.global_widget_kinds[f"{mod_prefix}_{vname}"] = rhs_widget_kind
                         if t_type.is_list() and getattr(t_type, "element_type", None) is not None:
                             pass_list_obs.setdefault(vname, []).append(t_type.element_type)
                         elif t_type.is_set() and getattr(t_type, "element_type", None) is not None:
@@ -3576,7 +3790,11 @@ class AstAnalyzer:
                         )
                         offset += 8
 
-            # Reconcile container element/key/value types observed in this pass
+            # Reconcile container element/key/value types observed in this pass.
+            # GUI handles are not containers: widget.insert()/.add() must not retype them.
+            for obs_map in (pass_list_obs, pass_set_obs, pass_dict_k_obs, pass_dict_v_obs):
+                for cname in [c for c in obs_map if self._receiver_widget_kind(ast.Name(id=c), local_vars)]:
+                    del obs_map[cname]
             for cname, obs in pass_list_obs.items():
                 cur_t = _get_var_type(cname)
                 if cur_t is not None and (cur_t.is_list() or cur_t == TYPE_INT):
@@ -3608,7 +3826,12 @@ class AstAnalyzer:
             ret_type = TYPE_PTR
 
         # Usage-based type refinement: upgrade INT variables to LIST/DICT
-        # based on how they are used in the function body (e.g. .get() → dict, len() → list)
+        # based on how they are used in the function body (e.g. .get() → dict, len() → list).
+        # GUI handles (widgets, StringVar) keep their type: their .get()/.insert() are widget calls.
+        def _refinable(vname: str) -> bool:
+            sym = local_vars.get(vname)
+            return sym is not None and sym.var_type == TYPE_INT and sym.widget_kind is None
+
         for sub_node in walk_local_scope(node):
             for usage_node in ast.walk(sub_node):
                 if isinstance(usage_node, ast.Call):
@@ -3616,16 +3839,16 @@ class AstAnalyzer:
                         attr_name = usage_node.func.attr
                         if attr_name in ("get", "keys", "values", "items", "update", "setdefault") and isinstance(usage_node.func.value, ast.Name):
                             vname = usage_node.func.value.id
-                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                            if _refinable(vname):
                                 local_vars[vname].var_type = TYPE_DICT
                         elif attr_name in ("append", "extend", "insert", "remove", "sort", "reverse") and isinstance(usage_node.func.value, ast.Name):
                             vname = usage_node.func.value.id
-                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                            if _refinable(vname):
                                 local_vars[vname].var_type = TYPE_LIST
                     elif isinstance(usage_node.func, ast.Name) and usage_node.func.id in ("len", "heappop", "heappush", "heapreplace", "heapify"):
                         if usage_node.args and isinstance(usage_node.args[0], ast.Name):
                             vname = usage_node.args[0].id
-                            if vname in local_vars and local_vars[vname].var_type == TYPE_INT:
+                            if _refinable(vname):
                                 local_vars[vname].var_type = TYPE_LIST
 
         # If return type wasn't explicitly annotated, infer from return statements
