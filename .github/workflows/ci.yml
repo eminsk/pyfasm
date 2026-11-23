@@ -86,7 +86,6 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite
-        continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
@@ -115,7 +114,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -124,13 +123,16 @@ jobs:
                   r = pathlib.Path(root)
                   for d in list(dirs):
                       if d.lower() != d and not (r / d.lower()).exists():
-                          try: os.symlink(d, r / d.lower())
-                          except Exception: pass
+                          os.symlink(d, r / d.lower())
                   for f in files:
                       if f.lower() != f and not (r / f.lower()).exists():
-                          try: os.symlink(f, r / f.lower())
-                          except Exception: pass
-          " || true
+                          os.symlink(f, r / f.lower())
+          "
+
+      - name: Install Wine to execute compiled Win64 binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine64
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -158,7 +160,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -167,13 +169,16 @@ jobs:
                   r = pathlib.Path(root)
                   for d in list(dirs):
                       if d.lower() != d and not (r / d.lower()).exists():
-                          try: os.symlink(d, r / d.lower())
-                          except Exception: pass
+                          os.symlink(d, r / d.lower())
                   for f in files:
                       if f.lower() != f and not (r / f.lower()).exists():
-                          try: os.symlink(f, r / f.lower())
-                          except Exception: pass
-          " || true
+                          os.symlink(f, r / f.lower())
+          "
+
+      - name: Install Wine to execute compiled Win64 binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine64
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -202,7 +207,7 @@ jobs:
 
       - name: Set permissions and include symlinks for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64 || true
+          chmod +x tools/fasm/fasm.x64 tools/fasm/fasm src/pyfasm/bin/fasm.x64
           python3 -c "
           import os, pathlib
           inc = pathlib.Path('tools/fasm/INCLUDE')
@@ -211,13 +216,16 @@ jobs:
                   r = pathlib.Path(root)
                   for d in list(dirs):
                       if d.lower() != d and not (r / d.lower()).exists():
-                          try: os.symlink(d, r / d.lower())
-                          except Exception: pass
+                          os.symlink(d, r / d.lower())
                   for f in files:
                       if f.lower() != f and not (r / f.lower()).exists():
-                          try: os.symlink(f, r / f.lower())
-                          except Exception: pass
-          " || true
+                          os.symlink(f, r / f.lower())
+          "
+
+      - name: Install Wine to execute compiled Win64 binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine64
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -225,7 +233,6 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Linux
-        continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
@@ -254,10 +261,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
-          softwareupdate --install-rosetta --agree-to-license || true
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
+          softwareupdate --install-rosetta --agree-to-license
+          codesign -s - -f tools/fasm/fasm.darwin
+          codesign -s - -f src/pyfasm/bin/fasm.darwin
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -265,7 +272,6 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Apple macOS
-        continue-on-error: ${{ matrix.python-version == '3.8' || matrix.python-version == '3.9' }}
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v
 
@@ -286,10 +292,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
-          softwareupdate --install-rosetta --agree-to-license || true
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
+          softwareupdate --install-rosetta --agree-to-license
+          codesign -s - -f tools/fasm/fasm.darwin
+          codesign -s - -f src/pyfasm/bin/fasm.darwin
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -318,10 +324,10 @@ jobs:
 
       - name: Set permissions and Rosetta for bundled FASM
         run: |
-          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin || true
-          softwareupdate --install-rosetta --agree-to-license || true
-          codesign -s - -f tools/fasm/fasm.darwin || true
-          codesign -s - -f src/pyfasm/bin/fasm.darwin || true
+          chmod +x tools/fasm/fasm.darwin tools/fasm/fasm src/pyfasm/bin/fasm.darwin
+          softwareupdate --install-rosetta --agree-to-license
+          codesign -s - -f tools/fasm/fasm.darwin
+          codesign -s - -f src/pyfasm/bin/fasm.darwin
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -329,6 +335,5 @@ jobs:
           enable-cache: true
 
       - name: Run Pytest Test Suite on Apple macOS
-        continue-on-error: ${{ matrix.python-version == 'pypy3.8' }}
         run: |
           uv run --python ${{ matrix.python-version }} pytest -v

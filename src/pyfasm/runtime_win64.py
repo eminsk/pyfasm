@@ -11308,6 +11308,45 @@ _pyfasm_listbox_clear:
     pop     rbp
     ret
 
+_pyfasm_listbox_count:
+    ; RCX = listbox or combobox hwnd -> RAX = number of items
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    sub     rsp, 32
+    and     rsp, -16
+    test    rcx, rcx
+    jnz     .ln_hwnd_ok
+    mov     rcx, [_pyfasm_last_list_hwnd]
+.ln_hwnd_ok:
+    xor     eax, eax
+    test    rcx, rcx
+    jz      .ln_done
+    mov     rbx, rcx
+    call    _pyfasm_find_widget_slot
+    mov     edx, 18Bh           ; LB_GETCOUNT
+    cmp     rax, 0
+    jl      .ln_send
+    shl     rax, 6
+    cmp     dword [_pyfasm_layout_table + rax + 16], 9
+    jne     .ln_send
+    mov     edx, 146h           ; CB_GETCOUNT
+.ln_send:
+    mov     rcx, rbx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    [SendMessageW]
+    movsxd  rax, eax
+    test    rax, rax
+    jns     .ln_done
+    xor     eax, eax
+.ln_done:
+    lea     rsp, [rbp - 8]
+    pop     rbx
+    mov     rsp, rbp
+    pop     rbp
+    ret
+
 _pyfasm_register_hotkey:
     ; RCX = id, RDX = vk_code
     push    rbp
@@ -20747,6 +20786,44 @@ section '.idata' import data readable writeable
 
 
 _WIN64_FORMAT_SPEC_HELPERS_ASM = """
+_pyfasm_bool_to_str:
+    ; RCX = truth value -> RAX = pointer to static 'True' / 'False'
+    lea     rax, [_pyfasm_false_text]
+    test    rcx, rcx
+    jz      .bts_done
+    lea     rax, [_pyfasm_true_text]
+.bts_done:
+    ret
+
+_pyfasm_print_bool:
+    ; RCX = truth value
+    lea     rax, [_pyfasm_false_text]
+    test    rcx, rcx
+    jz      .pb_print
+    lea     rax, [_pyfasm_true_text]
+.pb_print:
+    mov     rcx, rax
+    jmp     _pyfasm_print_str
+
+_pyfasm_true_text   db 'True', 0
+_pyfasm_false_text  db 'False', 0
+
+_pyfasm_print_list_bool:
+    lea     rdx, [_pyfasm_print_bool]
+    jmp     _pyfasm_print_list_with
+
+_pyfasm_print_tuple_bool:
+    lea     rdx, [_pyfasm_print_bool]
+    jmp     _pyfasm_print_tuple_with
+
+_pyfasm_list_bool_to_str:
+    lea     rdx, [_pyfasm_bool_to_str]
+    jmp     _pyfasm_list_to_str_with
+
+_pyfasm_tuple_bool_to_str:
+    lea     rdx, [_pyfasm_bool_to_str]
+    jmp     _pyfasm_tuple_to_str_with
+
 _pyfasm_int_to_base:
     ; RCX = value (int64), RDX = base (2..16), R8 = uppercase (0/1) -> RAX = heap str
     push    rbp
@@ -21200,6 +21277,12 @@ _pyfasm_destroy_window:
     mov     rsp, rbp
     pop     rbp
     ret
+
+_pyfasm_window_close_cb:
+    ; Callback form of root.destroy / app.quit / window.close (timer or button command):
+    ; destroys the main window, which posts WM_QUIT and ends the event loop.
+    xor     ecx, ecx
+    jmp     _pyfasm_destroy_window
 
 _pyfasm_canvas_set_color:
     ; RCX = COLORREF (0x00BBGGRR or -1 for default)

@@ -10,6 +10,16 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+DEFAULT_FASM_MEMORY_KB = 262144
+
+
+def _fasm_memory_kb() -> int:
+    """Assembler memory limit in kilobytes (override with PYFASM_FASM_MEMORY_KB)."""
+    raw = os.environ.get("PYFASM_FASM_MEMORY_KB", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return DEFAULT_FASM_MEMORY_KB
+
 
 class FasmRunner:
     """Manages discovery and invocation of Flat Assembler (FASM)."""
@@ -384,7 +394,9 @@ class FasmRunner:
         env = os.environ.copy()
         env["INCLUDE"] = self.include_path
 
-        cmd = [self.fasm_path, str(asm_path), str(out_bin)]
+        # FASM on Linux/macOS defaults to 16 MB of assembler memory, which is too
+        # small for targets that embed large reserved areas (e.g. the MyOS heap).
+        cmd = [self.fasm_path, "-m", str(_fasm_memory_kb()), str(asm_path), str(out_bin)]
 
         try:
             res = subprocess.run(
@@ -398,7 +410,7 @@ class FasmRunner:
             )
             if res.returncode != 0 and sys.platform == "darwin" and shutil.which("arch"):
                 arch_res = subprocess.run(
-                    ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
+                    ["arch", "-x86_64"] + cmd,
                     env=env,
                     cwd=str(asm_path.parent),
                     stdout=subprocess.PIPE,
@@ -421,7 +433,7 @@ class FasmRunner:
             if sys.platform == "darwin" and shutil.which("arch"):
                 try:
                     arch_res = subprocess.run(
-                        ["arch", "-x86_64", self.fasm_path, str(asm_path), str(out_bin)],
+                        ["arch", "-x86_64"] + cmd,
                         env=env,
                         cwd=str(asm_path.parent),
                         stdout=subprocess.PIPE,

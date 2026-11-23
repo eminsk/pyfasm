@@ -804,6 +804,10 @@ _pyfasm_listbox_append:
 _pyfasm_listbox_clear:
     ret
 
+_pyfasm_listbox_count:
+    xor     eax, eax
+    ret
+
 _pyfasm_listbox_get_selected:
     lea     rax, [_pyfasm_edit_buf]
     ret

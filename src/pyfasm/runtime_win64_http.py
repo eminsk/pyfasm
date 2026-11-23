@@ -724,7 +724,8 @@ _pyfasm_http_send_all:
 
 _pyfasm_http_register_route:
     ; RCX = method_str, RDX = pattern_str, R8 = handler_ptr, R9 = return_kind
-    ; [rbp+48] = param_count, [rbp+56] = param_int_mask, [rbp+64] = param_names_arr
+    ; [rbp+48] = param_count, [rbp+56] = param masks (bits 0..15 int, bits 16..31 dict body),
+    ; [rbp+64] = param_names_arr, [rbp+72] = param_defaults_arr (0 entry = no default)
     push    rbp
     mov     rbp, rsp
     mov     rax, [_pyfasm_http_srv_route_cnt]
@@ -742,6 +743,8 @@ _pyfasm_http_register_route:
     mov     [r10 + 40], rax
     mov     rax, [rbp + 64]
     mov     [r10 + 48], rax
+    mov     rax, [rbp + 72]
+    mov     [r10 + 56], rax
     inc     qword [_pyfasm_http_srv_route_cnt]
 .hrr_done:
     xor     eax, eax
@@ -1052,6 +1055,19 @@ _pyfasm_http_handle_client:
     test    rax, rax
     jnz     .hhc_store_extra
 .hhc_try_body:
+    ; Not in the query string: a dict parameter takes the request body, otherwise the declared default wins
+    mov     rdx, [rsp + 96]
+    mov     r8, [r12 + 40]
+    lea     ecx, [edx + 16]
+    bt      r8, rcx
+    jc      .hhc_use_body
+    mov     r8, [r12 + 56]          ; param_defaults_arr
+    test    r8, r8
+    jz      .hhc_use_body
+    mov     rax, [r8 + rdx * 8]
+    test    rax, rax
+    jnz     .hhc_store_extra
+.hhc_use_body:
     mov     rax, r13
     test    rax, rax
     jnz     .hhc_store_extra
@@ -1071,6 +1087,9 @@ _pyfasm_http_handle_client:
     jge     .hhc_call_handler
     cmp     rdx, 16
     jge     .hhc_call_handler
+    lea     ecx, [edx + 16]
+    bt      r8, rcx
+    jc      .hhc_conv_dict
     bt      r8, rdx
     jnc     .hhc_conv_next
     mov     rcx, [_pyfasm_http_param_vals + rdx * 8]
@@ -1079,6 +1098,40 @@ _pyfasm_http_handle_client:
     mov     [rsp + 96], rdx
     mov     [rsp + 104], r8
     call    _pyfasm_str_to_int
+    mov     rdx, [rsp + 96]
+    mov     r8, [rsp + 104]
+    mov     [_pyfasm_http_param_vals + rdx * 8], rax
+    jmp     .hhc_conv_next
+.hhc_conv_dict:
+    ; Parameter annotated as dict: parse the JSON request body into a dict (empty dict when it is not an object)
+    mov     [rsp + 96], rdx
+    mov     [rsp + 104], r8
+    mov     rcx, [_pyfasm_http_param_vals + rdx * 8]
+    test    rcx, rcx
+    jz      .hhc_conv_dict_empty
+.hhc_conv_dict_ws:
+    mov     al, [rcx]
+    cmp     al, ' '
+    je      .hhc_conv_dict_skip
+    cmp     al, 9
+    je      .hhc_conv_dict_skip
+    cmp     al, 10
+    je      .hhc_conv_dict_skip
+    cmp     al, 13
+    jne     .hhc_conv_dict_first
+.hhc_conv_dict_skip:
+    inc     rcx
+    jmp     .hhc_conv_dict_ws
+.hhc_conv_dict_first:
+    cmp     al, '{'
+    jne     .hhc_conv_dict_empty
+    call    _pyfasm_json_parse
+    test    rax, rax
+    jnz     .hhc_conv_dict_store
+.hhc_conv_dict_empty:
+    xor     ecx, ecx
+    call    _pyfasm_dict_create
+.hhc_conv_dict_store:
     mov     rdx, [rsp + 96]
     mov     r8, [rsp + 104]
     mov     [_pyfasm_http_param_vals + rdx * 8], rax

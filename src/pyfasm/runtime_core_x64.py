@@ -2681,4 +2681,168 @@ _pyfasm_ffmt_emit_fixed_pos:
     mov     rsp, rbp
     pop     rbp
     ret
+
+; ============================================================
+; String ordering, string-list sort, list reverse and remove
+; ============================================================
+_pyfasm_str_order:
+    ; RCX = str a, RDX = str b -> RAX = -1 / 0 / 1 (byte-wise, equals code point order for UTF-8)
+    cmp     rcx, 65536
+    jb      .so_a_null
+    cmp     rdx, 65536
+    jb      .so_gt
+.so_loop:
+    movzx   eax, byte [rcx]
+    movzx   r10d, byte [rdx]
+    cmp     eax, r10d
+    jb      .so_lt
+    ja      .so_gt
+    test    eax, eax
+    jz      .so_eq
+    inc     rcx
+    inc     rdx
+    jmp     .so_loop
+.so_a_null:
+    cmp     rdx, 65536
+    jb      .so_eq
+.so_lt:
+    mov     rax, -1
+    ret
+.so_gt:
+    mov     eax, 1
+    ret
+.so_eq:
+    xor     eax, eax
+    ret
+
+_pyfasm_list_sort_str:
+    ; RCX = list of str pointers, sorted in place (stable insertion sort) -> RAX = list
+    test    rcx, rcx
+    jnz     .lss_start
+    xor     eax, eax
+    ret
+.lss_start:
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    mov     rdi, rcx
+    mov     r12, [rdi]              ; r12 = len
+    mov     rsi, 1                  ; rsi = i
+.lss_outer:
+    cmp     rsi, r12
+    jge     .lss_done
+    mov     r13, [rdi + rsi * 8 + 8] ; r13 = key
+    mov     rbx, rsi                ; rbx = j
+.lss_inner:
+    test    rbx, rbx
+    jz      .lss_place
+    mov     rcx, [rdi + rbx * 8]    ; item[j - 1]
+    mov     rdx, r13
+    call    _pyfasm_str_order
+    cmp     rax, 0
+    jle     .lss_place
+    mov     rax, [rdi + rbx * 8]
+    mov     [rdi + rbx * 8 + 8], rax
+    dec     rbx
+    jmp     .lss_inner
+.lss_place:
+    mov     [rdi + rbx * 8 + 8], r13
+    inc     rsi
+    jmp     .lss_outer
+.lss_done:
+    mov     rax, rdi
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+
+_pyfasm_list_reverse:
+    ; RCX = list pointer, reversed in place -> RAX = list
+    mov     rax, rcx
+    test    rcx, rcx
+    jz      .lrv_ret
+    mov     r10, [rcx]
+    lea     rdx, [rcx + 8]          ; left
+    lea     r10, [rcx + r10 * 8]    ; right = last item
+.lrv_loop:
+    cmp     rdx, r10
+    jae     .lrv_ret
+    mov     r8, [rdx]
+    mov     r9, [r10]
+    mov     [rdx], r9
+    mov     [r10], r8
+    add     rdx, 8
+    sub     r10, 8
+    jmp     .lrv_loop
+.lrv_ret:
+    ret
+
+_pyfasm_list_remove:
+    ; RCX = list pointer, RDX = value -> removes first equal item, RAX = 1 if removed
+    xor     eax, eax
+    test    rcx, rcx
+    jz      .lrm_ret
+    mov     r10, [rcx]              ; len
+    xor     r11, r11                ; index
+.lrm_find:
+    cmp     r11, r10
+    jge     .lrm_ret
+    cmp     [rcx + r11 * 8 + 8], rdx
+    je      .lrm_shift
+    inc     r11
+    jmp     .lrm_find
+.lrm_shift:
+    inc     r11
+    cmp     r11, r10
+    jge     .lrm_shrink
+    mov     r8, [rcx + r11 * 8 + 8]
+    mov     [rcx + r11 * 8], r8
+    jmp     .lrm_shift
+.lrm_shrink:
+    dec     qword [rcx]
+    mov     eax, 1
+.lrm_ret:
+    ret
+
+_pyfasm_list_remove_str:
+    ; RCX = list of str pointers, RDX = str -> removes first equal string, RAX = 1 if removed
+    test    rcx, rcx
+    jnz     .lrs_start
+    xor     eax, eax
+    ret
+.lrs_start:
+    push    rbx
+    push    rsi
+    push    rdi
+    mov     rdi, rcx
+    mov     rsi, rdx
+    xor     rbx, rbx
+.lrs_find:
+    cmp     rbx, [rdi]
+    jge     .lrs_none
+    mov     rcx, [rdi + rbx * 8 + 8]
+    cmp     rcx, rsi
+    je      .lrs_hit
+    mov     rdx, rsi
+    call    _pyfasm_str_order
+    test    rax, rax
+    jz      .lrs_hit
+    inc     rbx
+    jmp     .lrs_find
+.lrs_hit:
+    mov     rcx, rdi
+    mov     rdx, [rdi + rbx * 8 + 8]
+    call    _pyfasm_list_remove
+    jmp     .lrs_ret
+.lrs_none:
+    xor     eax, eax
+.lrs_ret:
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
 """
