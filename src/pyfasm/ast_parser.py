@@ -2679,6 +2679,12 @@ class AstAnalyzer:
                             for tgt in s.targets:
                                 if isinstance(tgt, ast.Name) and tgt.id not in assigned_names:
                                     assigned_names.append(tgt.id)
+                                elif isinstance(tgt, (ast.Tuple, ast.List)):
+                                    for elt in tgt.elts:
+                                        if isinstance(elt, ast.Name) and elt.id not in assigned_names:
+                                            assigned_names.append(elt.id)
+                                        elif isinstance(elt, ast.Starred) and isinstance(elt.value, ast.Name) and elt.value.id not in assigned_names:
+                                            assigned_names.append(elt.value.id)
                         elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
                             if s.target.id not in assigned_names:
                                 assigned_names.append(s.target.id)
